@@ -31,6 +31,8 @@ use crate::cpu::misc_instr::{lar, lsl, verr, verw};
 use crate::cpu::misc_instr::{lss16, lss32};
 use crate::cpu::sse_instr::*;
 
+fn edx_eax(low: i32, high: i32) -> u64 { low as u32 as u64 | (high as u32 as u64) << 32 }
+
 #[no_mangle]
 pub unsafe fn instr16_0F00_0_mem(addr: i32) {
     // sldt
@@ -345,9 +347,28 @@ pub unsafe fn instr16_0F01_6_mem(addr: i32) {
 pub unsafe fn instr32_0F01_6_mem(addr: i32) { instr16_0F01_6_mem(addr) }
 
 #[no_mangle]
-pub unsafe fn instr16_0F01_7_reg(_r: i32) { trigger_ud(); }
+pub unsafe fn instr16_0F01_7_reg(r: i32) { instr32_0F01_7_reg(r); }
 #[no_mangle]
-pub unsafe fn instr32_0F01_7_reg(_r: i32) { trigger_ud(); }
+pub unsafe fn instr32_0F01_7_reg(r: i32) {
+    if r == 0 {
+        // SWAPGS
+        if !*is_64 {
+            trigger_ud();
+            return;
+        }
+        if *cpl != 0 {
+            trigger_gp(0);
+            return;
+        }
+        let tmp = *msr_kernel_gs_base;
+        *msr_kernel_gs_base = *msr_gs_base;
+        *msr_gs_base = tmp;
+        *segment_offsets.offset(GS as isize) = tmp as i32;
+    }
+    else {
+        trigger_ud();
+    }
+}
 
 #[no_mangle]
 pub unsafe fn instr16_0F01_7_mem(addr: i32) {
@@ -448,7 +469,32 @@ pub unsafe fn instr32_0F03_reg(r1: i32, r: i32) {
 #[no_mangle]
 pub unsafe fn instr_0F04() { undefined_instruction(); }
 #[no_mangle]
-pub unsafe fn instr_0F05() { undefined_instruction(); }
+pub unsafe fn instr_0F05() {
+    // SYSCALL (64-bit CS only in this slice)
+    if !*is_64 || !efer_sce() {
+        trigger_ud();
+        return;
+    }
+    let lstar = *msr_lstar;
+    if lstar >> 32 != 0 {
+        dbg_log!("#gp LSTAR {:x} exceeds 4G", lstar);
+        trigger_gp(0);
+        return;
+    }
+    let (kernel_cs, kernel_ss, _, _) = syscall_star_selectors(*msr_star);
+    if kernel_cs == 0 {
+        dbg_log!("#gp SYSCALL with null STAR CS");
+        trigger_gp(0);
+        return;
+    }
+    let rflags = get_eflags();
+    write_reg64(ECX, get_real_eip() as u32 as u64);
+    write_reg64(R11, rflags as u32 as u64);
+    *flags = rflags & !(*msr_fmask as u32 as i32) & !FLAG_RF & !FLAG_VM;
+    *flags_changed = 0;
+    load_ia32e_cs_ss(kernel_cs as i32, kernel_ss as i32, 0, true);
+    *instruction_pointer = get_seg_cs() + lstar as i32;
+}
 #[no_mangle]
 pub unsafe fn instr_0F06() {
     // clts
@@ -464,7 +510,34 @@ pub unsafe fn instr_0F06() {
     };
 }
 #[no_mangle]
-pub unsafe fn instr_0F07() { undefined_instruction(); }
+pub unsafe fn instr_0F07() {
+    // SYSRET
+    if !*is_64 || !efer_sce() {
+        trigger_ud();
+        return;
+    }
+    if *cpl != 0 {
+        trigger_gp(0);
+        return;
+    }
+    let long_return = *rex_prefix & crate::cpu::long_mode::REX_W != 0;
+    let rip = if long_return { read_reg64(ECX) } else { read_reg32(ECX) as u32 as u64 };
+    if rip >> 32 != 0 {
+        dbg_log!("#gp SYSRET rip {:x} exceeds 4G", rip);
+        trigger_gp(0);
+        return;
+    }
+    let (_, _, user_cs, user_ss) = syscall_star_selectors(*msr_star);
+    if user_cs & !3 == 0 {
+        dbg_log!("#gp SYSRET with null user CS");
+        trigger_gp(0);
+        return;
+    }
+    update_eflags(read_reg64(R11) as i32);
+    *flags &= !FLAG_RF & !FLAG_VM;
+    load_ia32e_cs_ss(user_cs as i32, user_ss as i32, 3, long_return);
+    *instruction_pointer = get_seg_cs() + rip as i32;
+}
 #[no_mangle]
 pub unsafe fn instr_0F08() {
     // invd
@@ -1266,10 +1339,37 @@ pub unsafe fn instr_0F30() {
             // Enable Misc. Processor Features
         },
         IA32_MCG_CAP => {}, // netbsd
+        IA32_FS_BASE => set_fs_gs_base_msr(FS, edx_eax(low, high)),
+        IA32_GS_BASE => set_fs_gs_base_msr(GS, edx_eax(low, high)),
         IA32_KERNEL_GS_BASE => {
-            // Only used in 64 bit mode (by SWAPGS), but set by kvm-unit-test
-            dbg_log!("GS Base written");
+            let value = edx_eax(low, high);
+            if value >> 32 != 0 {
+                dbg_log!("#gp KERNEL_GS_BASE {:x} exceeds 4G", value);
+                trigger_gp(0);
+                return;
+            }
+            *msr_kernel_gs_base = value;
         },
+        MSR_STAR => *msr_star = edx_eax(low, high),
+        MSR_LSTAR => {
+            let value = edx_eax(low, high);
+            if value >> 32 != 0 {
+                dbg_log!("#gp LSTAR {:x} exceeds 4G", value);
+                trigger_gp(0);
+                return;
+            }
+            *msr_lstar = value;
+        },
+        MSR_CSTAR => {
+            let value = edx_eax(low, high);
+            if value >> 32 != 0 {
+                dbg_log!("#gp CSTAR {:x} exceeds 4G", value);
+                trigger_gp(0);
+                return;
+            }
+            *msr_cstar = value;
+        },
+        MSR_SFMASK => *msr_fmask = edx_eax(low, high) & 0xFFFF_FFFF,
         IA32_EFER => {
             let value = low as u32 as u64 | (high as u32 as u64) << 32;
             if *cr & CR0_PG != 0 && (value & EFER_LME == 0) != (*efer & EFER_LME == 0) {
@@ -1368,6 +1468,34 @@ pub unsafe fn instr_0F32() {
         IA32_EFER => {
             low = *efer as i32;
             high = (*efer >> 32) as i32;
+        },
+        MSR_STAR => {
+            low = *msr_star as i32;
+            high = (*msr_star >> 32) as i32;
+        },
+        MSR_LSTAR => {
+            low = *msr_lstar as i32;
+            high = (*msr_lstar >> 32) as i32;
+        },
+        MSR_CSTAR => {
+            low = *msr_cstar as i32;
+            high = (*msr_cstar >> 32) as i32;
+        },
+        MSR_SFMASK => {
+            low = *msr_fmask as i32;
+            high = (*msr_fmask >> 32) as i32;
+        },
+        IA32_FS_BASE => {
+            low = *msr_fs_base as i32;
+            high = (*msr_fs_base >> 32) as i32;
+        },
+        IA32_GS_BASE => {
+            low = *msr_gs_base as i32;
+            high = (*msr_gs_base >> 32) as i32;
+        },
+        IA32_KERNEL_GS_BASE => {
+            low = *msr_kernel_gs_base as i32;
+            high = (*msr_kernel_gs_base >> 32) as i32;
         },
         _ => {
             dbg_log!("Unknown msr: {:x}", index);
@@ -3375,11 +3503,11 @@ pub unsafe fn instr_0FA2() {
         },
 
         0x80000001 => {
-            // AMD64 feature flags (NX + long mode). SYSCALL is omitted until implemented.
+            // AMD64 feature flags: SYSCALL, NX, long mode.
             eax = 0;
             ebx = 0;
             ecx = 0;
-            edx = 1 << 20 | 1 << 29; // NX, LM
+            edx = 1 << 11 | 1 << 20 | 1 << 29; // SCE, NX, LM
         },
 
         0x80000008 => {
