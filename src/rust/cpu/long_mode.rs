@@ -8,11 +8,14 @@
 use crate::cpu::arith::{cmp16, cmp32, cmp8};
 use crate::cpu::cpu::*;
 use crate::cpu::global_pointers::*;
+use crate::cpu::memory;
 use crate::cpu::misc_instr::{
     adjust_stack_reg, getcf, getzf, pop64, push64, test_b, test_be, test_l, test_le, test_o,
     test_p, test_s, test_z,
 };
 use crate::cpu::modrm::resolve_modrm64;
+use crate::jit;
+use crate::page::Page;
 use crate::paging::OrPageFault;
 use crate::prefix;
 
@@ -310,7 +313,7 @@ unsafe fn finish_instruction() {
     *pending_linear64 = 0;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum String64 {
     Movs,
     Stos,
@@ -394,7 +397,60 @@ unsafe fn string64(kind: String64, width: i64) {
     let rax = string_ax(width);
     let repz = *prefixes & prefix::PREFIX_REPZ != 0;
     let repnz = *prefixes & prefix::PREFIX_REPNZ != 0;
-    while rcx > 0 {
+    let page_of = |a: u64| a & !0xFFF;
+    let mut cmp_stop = false;
+
+    // Linux BSS/heap clears are `rep stosq` of 0. Do a whole page with memset
+    // so a multi-megabyte REP does not block the JS event loop.
+    if kind == String64::Stos && rep && dir > 0 {
+        let splat = rax as u8;
+        let splat_ok = match width {
+            1 => true,
+            2 => rax & 0xFFFF == splat as u64 * 0x0101,
+            4 => rax & 0xFFFF_FFFF == splat as u64 * 0x0101_0101,
+            8 => rax == splat as u64 * 0x0101_0101_0101_0101,
+            _ => false,
+        };
+        if splat_ok && rdi & (width as u64 - 1) == 0 {
+            let max_bytes = (0x1000 - (rdi & 0xFFF)).min(rcx.saturating_mul(width as u64));
+            let n = max_bytes / width as u64;
+            if n > 0 {
+                *pending_linear64 = rdi;
+                match translate_address_write_and_can_skip_dirty(rdi as i32) {
+                    Ok((phys, skip)) => {
+                        let nbytes = (n * width as u64) as u32;
+                        if !memory::in_mapped_range(phys) && (phys & 0xFFF) + nbytes <= 0x1000 {
+                            if !skip {
+                                jit::jit_dirty_page(Page::page_of(phys));
+                            }
+                            memory::memset_no_mmap_or_dirty_check(phys, splat, nbytes);
+                            rdi = rdi.wrapping_add(n * width as u64);
+                            rcx -= n;
+                        }
+                    },
+                    Err(()) => return,
+                }
+            }
+        }
+    }
+
+    let start_rdi_page = page_of(rdi);
+    let start_rsi_page = page_of(rsi);
+    let mut slow = 0u32;
+    const MAX_SLOW: u32 = 256;
+    while rcx > 0 && slow < MAX_SLOW {
+        if matches!(
+            kind,
+            String64::Movs | String64::Stos | String64::Scas | String64::Cmps
+        ) && page_of(rdi) != start_rdi_page
+        {
+            break;
+        }
+        if matches!(kind, String64::Movs | String64::Lods | String64::Cmps)
+            && page_of(rsi) != start_rsi_page
+        {
+            break;
+        }
         match kind {
             String64::Movs => {
                 let v = return_on_pagefault!(string_read(rsi, width));
@@ -423,9 +479,11 @@ unsafe fn string64(kind: String64, width: i64) {
             },
         }
         rcx -= 1;
+        slow += 1;
         if matches!(kind, String64::Scas | String64::Cmps) && (repz || repnz) {
             let z = getzf();
             if repz && !z || repnz && z {
+                cmp_stop = true;
                 break;
             }
         }
@@ -457,6 +515,10 @@ unsafe fn string64(kind: String64, width: i64) {
         if rep {
             write_reg64(ECX, rcx);
         }
+    }
+    if rep && rcx > 0 && !cmp_stop {
+        set_rip(*previous_rip);
+        after_block_boundary();
     }
 }
 
@@ -521,6 +583,8 @@ unsafe fn run_legacy_opcode(opcode: i32) {
 }
 
 unsafe fn dispatch_rex_w(opcode: i32) {
+    current_interp_opcode = opcode as u32 | 0x100;
+    current_interp_0f = false;
     match opcode {
         0x05 => {
             let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
@@ -669,7 +733,7 @@ unsafe fn dispatch_rex_w(opcode: i32) {
             let modrm = return_on_pagefault!(read_imm8());
             if modrm < 0xC0 {
                 let addr = return_on_pagefault!(modrm_resolve(modrm));
-                let _ = safe_write64(addr, read_reg64(gpr_reg(modrm)));
+                return_on_pagefault!(safe_write64(addr, read_reg64(gpr_reg(modrm))));
             }
             else {
                 write_reg64(gpr_rm(modrm), read_reg64(gpr_reg(modrm)));
@@ -1144,6 +1208,8 @@ unsafe fn load_rm16(modrm: i32) -> OrPageFault<i32> {
 }
 
 unsafe fn dispatch_rex_w_0f(opcode: i32) {
+    current_interp_opcode = opcode as u32 | 0x100;
+    current_interp_0f = true;
     match opcode {
         0x40..=0x4F => {
             let modrm = return_on_pagefault!(read_imm8());

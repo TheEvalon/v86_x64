@@ -44,7 +44,7 @@ const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "..
 
 const TIMEOUT_MS = +process.env.LINUX64_TIMEOUT_MS || 600000;
 const CMDLINE = "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 " +
-    "acpi=off noapic nolapic nosmp debug";
+    "acpi=off noapic nolapic nosmp nokaslr debug";
 
 const emulator = new V86({
     bios: { url: path.join(ROOT, "bios/seabios.bin") },
@@ -90,6 +90,23 @@ function dump_at(cpu, virt)
     }
 }
 
+function dump_regs(cpu)
+{
+    const names = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"];
+    const parts = [];
+    for(let i = 0; i < 8; i++)
+    {
+        const full = (cpu.reg32[i] >>> 0) + (cpu.reg_high32[i] >>> 0) * 0x100000000;
+        parts.push(names[i] + "=" + hex64(full));
+    }
+    const efer = (cpu.efer[0] >>> 0) + (cpu.efer[1] >>> 0) * 0x100000000;
+    parts.push("cs=" + hex64(cpu.sreg[1]));
+    parts.push("ss=" + hex64(cpu.sreg[2]));
+    parts.push("is_64=" + (cpu.is_64[0] | 0));
+    parts.push("efer=" + hex64(efer));
+    return parts.join(" ");
+}
+
 function finish(code, message)
 {
     if(finished)
@@ -128,7 +145,7 @@ emulator.add_listener("emulator-loaded", function()
         const rip = u64_from_pair(cpu.previous_rip64);
         const what = n === 8 ? "#DF" : "#UD";
         finish(1, "linux64: unexpected " + what + " rip=" + hex64(rip) +
-            " bytes=[" + dump_at(cpu, rip) + "]");
+            " bytes=[" + dump_at(cpu, rip) + "] " + dump_regs(cpu));
         return true;
     };
 });

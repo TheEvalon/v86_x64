@@ -79,6 +79,9 @@ pub const INTERPRETER_ITERATION_LIMIT: u32 = 100_001;
 
 // How often, in milliseconds, to yield to the browser for rendering and running events
 pub const TIME_PER_FRAME: f64 = 1.0;
+/// `performance.now()` can stay frozen for the whole WASM `main_loop` call.
+/// Cap slices so we still return to JS (timers, linux64 timeout) in that case.
+pub const MAX_SLICES_PER_FRAME: u32 = 4;
 
 pub const FLAG_SUB: i32 = -0x8000_0000;
 pub const FLAG_CARRY: i32 = 1;
@@ -3901,9 +3904,26 @@ pub unsafe fn modrm_resolve(modrm_byte: i32) -> OrPageFault<i32> {
     }
 }
 
-pub unsafe fn run_instruction(opcode: i32) { gen::interpreter::run(opcode as u32) }
-pub unsafe fn run_instruction0f_16(opcode: i32) { gen::interpreter0f::run(opcode as u32) }
-pub unsafe fn run_instruction0f_32(opcode: i32) { gen::interpreter0f::run(opcode as u32 | 0x100) }
+/// Opcode currently in the 32-bit interpreter (`0x100` = 32-bit opsize).
+/// Used so RIP-relative addressing can skip a trailing immediate.
+pub static mut current_interp_opcode: u32 = 0;
+pub static mut current_interp_0f: bool = false;
+
+pub unsafe fn run_instruction(opcode: i32) {
+    current_interp_opcode = opcode as u32;
+    current_interp_0f = false;
+    gen::interpreter::run(opcode as u32)
+}
+pub unsafe fn run_instruction0f_16(opcode: i32) {
+    current_interp_opcode = opcode as u32;
+    current_interp_0f = true;
+    gen::interpreter0f::run(opcode as u32)
+}
+pub unsafe fn run_instruction0f_32(opcode: i32) {
+    current_interp_opcode = opcode as u32 | 0x100;
+    current_interp_0f = true;
+    gen::interpreter0f::run(opcode as u32 | 0x100)
+}
 
 pub unsafe fn cycle_internal() {
     profiler::stat_increment(stat::CYCLE_INTERNAL);
@@ -4183,6 +4203,10 @@ pub fn update_state_flags() {
 
 #[no_mangle]
 pub unsafe fn has_flat_segmentation() -> bool {
+    if *is_64 {
+        // CS/DS/ES/SS bases are 0 in 64-bit CS. Null DS/ES/SS is allowed (startup_64).
+        return true;
+    }
     // cs/ss can't be null
     return *segment_offsets.offset(SS as isize) == 0
         && !*segment_is_null.offset(DS as isize)
@@ -4222,8 +4246,10 @@ pub unsafe fn main_loop() -> f64 {
         }
     }
 
+    let mut slices = 0u32;
     loop {
         do_many_cycles_native();
+        slices += 1;
 
         let now = js::microtick();
         let t = js::run_hardware_timers(*acpi_enabled, now);
@@ -4232,7 +4258,7 @@ pub unsafe fn main_loop() -> f64 {
             return t;
         }
 
-        if now - start > TIME_PER_FRAME {
+        if now - start > TIME_PER_FRAME || slices >= MAX_SLICES_PER_FRAME {
             break;
         }
     }

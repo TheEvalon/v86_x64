@@ -311,7 +311,7 @@ pub fn jit_add_seg_offset_no_override(ctx: &mut JitContext, seg: u32) {
         },
     );
 
-    if seg != CS && seg != SS {
+    if seg != CS && seg != SS && !ctx.cpu.state_flags.is_64() {
         if cfg!(feature = "profiler") {
             ctx.builder.const_i32(seg as i32);
             ctx.builder.call_fn1("log_segment_null");

@@ -122,6 +122,41 @@ back64:
     cmp rdi, rsi
     jne fail64
 
+    ; RIP-relative ADD r/m32, imm8 includes the trailing imm8 in RIP.
+    ; An off-by-one store hits the last byte of the previous qword (Linux
+    ; decompressor refcount next to vidmem).
+    mov rax, 0xB8000
+    mov [rel vidmem_sim], rax
+    mov dword [rel refcount], 0
+    add dword [rel refcount], 1
+    cmp dword [rel refcount], 1
+    jne fail64
+    mov rbx, 0xB8000
+    cmp [rel vidmem_sim], rbx
+    jne fail64
+
+    ; REP STOSQ of a splat byte uses a paged memset and must not run the
+    ; whole RCX in one emulator turn (Linux BSS clear is ~10MB).
+    lea rdi, [rel stos_buf]
+    mov rcx, 1024
+    xor eax, eax
+    rep stosq
+    cmp qword [rel stos_buf], 0
+    jne fail64
+    cmp qword [rel stos_buf + 8192 - 8], 0
+    jne fail64
+    mov rax, 0x1122334455667788
+    cmp [rel stos_guard], rax
+    jne fail64
+
+    ; Null DS is valid in 64-bit CPL0. 32-bit JIT loads must not #GP.
+    xor eax, eax
+    mov ds, ax
+    lea rbx, [rel refcount]
+    mov eax, [rbx]
+    cmp eax, 1
+    jne fail64
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -138,6 +173,12 @@ fail64:
 align 8
 scratch:
     dq 0
+
+align 8
+vidmem_sim:
+    dq 0
+refcount:
+    dd 0
 
 align 8
 compat_ptr:
@@ -181,3 +222,9 @@ pd:
 align 16
     times 4096 db 0
 stack_top:
+
+align 4096
+stos_buf:
+    times 8192 db 0xAA
+stos_guard:
+    dq 0x1122334455667788

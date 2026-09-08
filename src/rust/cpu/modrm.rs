@@ -218,6 +218,40 @@ unsafe fn resolve_sib64(mod_has_disp: bool) -> OrPageFault<(u64, i32)> {
     Ok((ea, seg))
 }
 
+/// Bytes of immediate that follow ModRM (and its SIB/displacement) for RIP-relative.
+/// `opcode` uses bit 8 as the generated interpreter's 32-bit opsize flag.
+pub fn trailing_imm_after_modrm(opcode: u32, is_0f: bool, modrm_byte: i32) -> u32 {
+    let op = opcode as u8;
+    if is_0f {
+        return match op {
+            0x70 | 0x71 | 0x72 | 0x73 | 0xA4 | 0xAC | 0xBA | 0xC2 | 0xC4 | 0xC5 | 0xC6 => 1,
+            _ => 0,
+        };
+    }
+    let imm1632 = if opcode & 0x100 != 0 { 4 } else { 2 };
+    match op {
+        0x80 | 0x82 | 0x83 | 0xC0 | 0xC1 | 0xC6 | 0x6B => 1,
+        0x81 | 0x69 | 0xC7 => imm1632,
+        0xF6 => {
+            if modrm_byte >> 3 & 7 == 0 {
+                1
+            }
+            else {
+                0
+            }
+        },
+        0xF7 => {
+            if modrm_byte >> 3 & 7 == 0 {
+                imm1632
+            }
+            else {
+                0
+            }
+        },
+        _ => 0,
+    }
+}
+
 /// 64-bit addressing: REX.B/X, SIB, RIP-relative (`mod=00, rm=101` without REX.B).
 /// `67h` truncates the effective address to 32 bits. Non-canonical linear addresses #GP.
 pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
@@ -243,9 +277,12 @@ pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
             (read_reg64(13).wrapping_add(disp), SS, false)
         }
         else {
-            // RIP of the next instruction. Immediates after the displacement are
-            // not included (U6 guests use RIP-rel without a trailing immediate).
-            ((get_rip()).wrapping_add(disp), DS, true)
+            // RIP is the next instruction, including a trailing immediate
+            // (e.g. ADD r/m32, imm8 is opcode+modrm+disp32+imm8).
+            let tail =
+                trailing_imm_after_modrm(current_interp_opcode, current_interp_0f, modrm_byte)
+                    as u64;
+            ((get_rip()).wrapping_add(disp).wrapping_add(tail), DS, true)
         }
     }
     else {
@@ -260,4 +297,27 @@ pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
     };
 
     linear_from_ea64(seg, apply_asize64(ea), rip_rel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trailing_imm_after_modrm;
+
+    #[test]
+    fn group1_imm8_is_one_byte() {
+        assert_eq!(trailing_imm_after_modrm(0x183, false, 0x05), 1);
+        assert_eq!(trailing_imm_after_modrm(0x83, false, 0x05), 1);
+    }
+
+    #[test]
+    fn group1_imm32_is_four_bytes_when_osize32() {
+        assert_eq!(trailing_imm_after_modrm(0x181, false, 0x05), 4);
+        assert_eq!(trailing_imm_after_modrm(0x81, false, 0x05), 2);
+    }
+
+    #[test]
+    fn test_rm_imm_uses_modrm_extra() {
+        assert_eq!(trailing_imm_after_modrm(0x1F7, false, 0x05), 4);
+        assert_eq!(trailing_imm_after_modrm(0x1F7, false, 0x0D), 0);
+    }
 }
