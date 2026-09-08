@@ -315,9 +315,7 @@ unsafe fn finish_instruction() {
     current_interp_0f = false;
 }
 
-fn is_hint_nop(opcode: i32) -> bool {
-    matches!(opcode, 0x18 | 0x19 | 0x1C | 0x1D | 0x1E | 0x1F)
-}
+fn is_hint_nop(opcode: i32) -> bool { matches!(opcode, 0x18 | 0x19 | 0x1C | 0x1D | 0x1E | 0x1F) }
 
 /// 0F 18–1F are prefetch / multi-byte NOPs. They must not read memory or
 /// #GP a non-canonical EA (Linux FineIBT uses `nopl 0x0(%rax,%rax,1)`).
