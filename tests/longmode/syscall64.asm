@@ -99,7 +99,8 @@ start64:
 
     lea rcx, [user_land]
     mov r11, 2
-    sysretq
+    ; NASM 2.16 has no sysretq mnemonic; o64 sysret is REX.W SYSRET (48 0F 07).
+    o64 sysret
 
 user_land:
     syscall
