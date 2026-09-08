@@ -68,6 +68,7 @@ export function CPU(bus, wm, stop_idling)
     this.wm = wm;
     this.wasm_patch();
     this.create_jit_imports();
+    this.sync_jit = false;
 
     const memory = this.wm.exports.memory;
 
@@ -1045,6 +1046,12 @@ CPU.prototype.init = function(settings, device_bus)
         this.set_jit_config(0, 1);
     }
 
+    this.sync_jit = !!settings.sync_jit;
+    if(settings.jit_threshold)
+    {
+        this.set_jit_config(4, settings.jit_threshold);
+    }
+
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
     this.acpi_enabled[0] = +settings.acpi;
@@ -1848,7 +1855,7 @@ CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, 
         }
     }
 
-    const SYNC_COMPILATION = false;
+    const SYNC_COMPILATION = this.sync_jit;
 
     if(SYNC_COMPILATION)
     {

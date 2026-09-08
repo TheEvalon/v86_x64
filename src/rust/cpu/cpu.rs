@@ -3801,19 +3801,19 @@ pub unsafe fn cycle_internal() {
     let initial_state_flags = *state_flags;
 
     if *is_64 {
-        if *rip <= 0xFFFF_FFFF {
-            *rip = *instruction_pointer as u32 as u64;
+        if get_rip() > 0xFFFF_FFFF {
+            *previous_ip = initial_eip;
+            *previous_rip = get_rip();
+            let phys_addr = return_on_pagefault!(get_phys_eip());
+            let initial_instruction_counter = *instruction_counter;
+            jit_run_interpreted(phys_addr);
+            profiler::stat_increment_by(
+                stat::RUN_INTERPRETED_STEPS,
+                (*instruction_counter - initial_instruction_counter) as u64,
+            );
+            return;
         }
-        *previous_ip = initial_eip;
-        *previous_rip = get_rip();
-        let phys_addr = return_on_pagefault!(get_phys_eip());
-        let initial_instruction_counter = *instruction_counter;
-        jit_run_interpreted(phys_addr);
-        profiler::stat_increment_by(
-            stat::RUN_INTERPRETED_STEPS,
-            (*instruction_counter - initial_instruction_counter) as u64,
-        );
-        return;
+        *rip = *instruction_pointer as u32 as u64;
     }
 
     match tlb_code[(initial_eip as u32 >> 12) as usize] {
@@ -3849,6 +3849,9 @@ pub unsafe fn cycle_internal() {
                 }
                 if c.state_flags.ssize_32() != s.ssize_32() {
                     profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_SS32);
+                }
+                if c.state_flags.is_64() != s.is_64() {
+                    profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_IS64);
                 }
             }
         },
@@ -3961,6 +3964,28 @@ pub unsafe fn cycle_internal() {
             "Instruction counter didn't change"
         );
     };
+
+    if *is_64 && *rip <= 0xFFFF_FFFF {
+        *rip = *instruction_pointer as u32 as u64;
+    }
+}
+
+#[no_mangle]
+pub unsafe fn jit_run_one_long() {
+    dbg_assert!(*is_64);
+    dbg_assert!(get_rip() <= 0xFFFF_FFFF);
+    #[cfg(debug_assertions)]
+    {
+        in_jit = false;
+    }
+    *rip = *instruction_pointer as u32 as u64;
+    *previous_ip = *instruction_pointer;
+    *previous_rip = get_rip();
+    crate::cpu::long_mode::run_one();
+    #[cfg(debug_assertions)]
+    {
+        in_jit = true;
+    }
 }
 
 pub unsafe fn get_phys_eip() -> OrPageFault<u32> {
@@ -4039,7 +4064,8 @@ pub fn update_state_flags() {
             (*is_32 as u32) << 0
                 | (*stack_size_32 as u32) << 1
                 | ((*cpl == 3) as u32) << 2
-                | (has_flat_segmentation() as u32) << 3,
+                | (has_flat_segmentation() as u32) << 3
+                | (*is_64 as u32) << 4,
         )
     }
 }

@@ -7,13 +7,18 @@ impl CachedStateFlags {
     const MASK_SS32: u8 = 1 << 1;
     const MASK_CPL3: u8 = 1 << 2;
     const MASK_FLAT_SEGS: u8 = 1 << 3;
+    const MASK_IS_64: u8 = 1 << 4;
 
     pub const EMPTY: CachedStateFlags = CachedStateFlags(0);
 
     pub fn of_u32(f: u32) -> CachedStateFlags {
         dbg_assert!(
             f as u8
-                & !(Self::MASK_IS_32 | Self::MASK_SS32 | Self::MASK_CPL3 | Self::MASK_FLAT_SEGS)
+                & !(Self::MASK_IS_32
+                    | Self::MASK_SS32
+                    | Self::MASK_CPL3
+                    | Self::MASK_FLAT_SEGS
+                    | Self::MASK_IS_64)
                 == 0
         );
         CachedStateFlags(f as u8)
@@ -24,4 +29,20 @@ impl CachedStateFlags {
     pub fn has_flat_segmentation(&self) -> bool { self.0 & CachedStateFlags::MASK_FLAT_SEGS != 0 }
     pub fn is_32(&self) -> bool { self.0 & CachedStateFlags::MASK_IS_32 != 0 }
     pub fn ssize_32(&self) -> bool { self.0 & CachedStateFlags::MASK_SS32 != 0 }
+    pub fn is_64(&self) -> bool { self.0 & CachedStateFlags::MASK_IS_64 != 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CachedStateFlags;
+
+    #[test]
+    fn is_64_is_distinct_from_is_32() {
+        let long = CachedStateFlags::of_u32(1 << 0 | 1 << 4);
+        assert!(long.is_32());
+        assert!(long.is_64());
+        let prot32 = CachedStateFlags::of_u32(1 << 0);
+        assert!(prot32.is_32());
+        assert!(!prot32.is_64());
+    }
 }

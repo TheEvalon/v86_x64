@@ -73,7 +73,9 @@ static mut JIT_USE_LOOP_SAFETY: bool = true;
 
 pub static mut MAX_EXTRA_BASIC_BLOCKS: u32 = 250;
 
-pub const JIT_THRESHOLD: u32 = 200 * 1000;
+pub static mut JIT_THRESHOLD: u32 = 200 * 1000;
+
+fn jit_threshold() -> u32 { unsafe { JIT_THRESHOLD } }
 
 // less branches will generate if-else, more will generate brtable
 pub const BRTABLE_CUTOFF: usize = 10;
@@ -831,7 +833,7 @@ pub fn jit_force_generate_unsafe(virt_addr: i32) {
         cpu::translate_address_read(virt_addr).unwrap(),
         cpu::get_seg_cs() as u32,
         cpu::get_state_flags(),
-        JIT_THRESHOLD,
+        jit_threshold(),
     );
     dbg_assert!(get_jit_state().compiling.is_some());
 }
@@ -843,13 +845,13 @@ fn jit_analyze_and_generate(
     phys_entry_point: u32,
     cs_offset: u32,
     state_flags: CachedStateFlags,
-) {
+) -> Option<(WasmTableIndex, u32, CachedStateFlags, u32, u32)> {
     let page = Page::page_of(phys_entry_point);
 
     dbg_assert!(ctx.compiling.is_none());
 
     let (_, entry_points) = match ctx.entry_points.get(&page) {
-        None => return,
+        None => return None,
         Some(entry_points) => entry_points,
     };
 
@@ -863,7 +865,7 @@ fn jit_analyze_and_generate(
         .all(|entry_point| existing_entry_points.contains(entry_point))
     {
         profiler::stat_increment(stat::COMPILE_SKIPPED_NO_NEW_ENTRY_POINTS);
-        return;
+        return None;
     }
 
     // XXX: check and remove
@@ -882,6 +884,7 @@ fn jit_analyze_and_generate(
     let cpu = CpuContext {
         eip: 0,
         prefixes: 0,
+        rex_prefix: 0,
         cs_offset,
         state_flags,
     };
@@ -1057,17 +1060,10 @@ fn jit_analyze_and_generate(
     ));
 
     let phys_addr = page.to_address();
-
-    // will call codegen_finalize_finished asynchronously when finished
-    codegen_finalize(
-        wasm_table_index,
-        phys_addr,
-        state_flags,
-        ctx.wasm_builder.get_output_ptr() as u32,
-        ctx.wasm_builder.get_output_len(),
-    );
-
+    let ptr = ctx.wasm_builder.get_output_ptr() as u32;
+    let len = ctx.wasm_builder.get_output_len();
     check_jit_state_invariants(ctx);
+    Some((wasm_table_index, phys_addr, state_flags, ptr, len))
 }
 
 #[no_mangle]
@@ -2163,32 +2159,50 @@ pub fn jit_increase_hotness_and_maybe_compile(
         return;
     }
 
-    let mut ctx = get_jit_state();
-    let is_compiling = ctx.compiling.is_some();
-    let page = Page::page_of(phys_address);
-    let (hotness, entry_points) = ctx.entry_points.entry(page).or_insert_with(|| {
-        cpu::tlb_set_has_code(page, true);
-        profiler::stat_increment(stat::RUN_INTERPRETED_NEW_PAGE);
-        (0, HashSet::new())
-    });
+    let pending_finalize = {
+        let mut ctx = get_jit_state();
+        let is_compiling = ctx.compiling.is_some();
+        let page = Page::page_of(phys_address);
+        let (hotness, entry_points) = ctx.entry_points.entry(page).or_insert_with(|| {
+            cpu::tlb_set_has_code(page, true);
+            profiler::stat_increment(stat::RUN_INTERPRETED_NEW_PAGE);
+            (0, HashSet::new())
+        });
 
-    if !is_near_end_of_page(phys_address) {
-        entry_points.insert(phys_address as u16 & 0xFFF);
-    }
-
-    *hotness += heat;
-    if *hotness >= JIT_THRESHOLD {
-        if is_compiling {
-            return;
+        if !is_near_end_of_page(phys_address) {
+            entry_points.insert(phys_address as u16 & 0xFFF);
         }
-        // only try generating if we're in the correct address space
-        if cpu::translate_address_read_no_side_effects(virt_address) == Ok(phys_address) {
-            *hotness = 0;
-            jit_analyze_and_generate(&mut ctx, virt_address, phys_address, cs_offset, state_flags)
+
+        *hotness += heat;
+        if *hotness >= jit_threshold() {
+            if is_compiling {
+                None
+            }
+            else if cpu::translate_address_read_no_side_effects(virt_address) == Ok(phys_address)
+            {
+                *hotness = 0;
+                jit_analyze_and_generate(
+                    &mut ctx,
+                    virt_address,
+                    phys_address,
+                    cs_offset,
+                    state_flags,
+                )
+            }
+            else {
+                profiler::stat_increment(stat::COMPILE_WRONG_ADDRESS_SPACE);
+                None
+            }
         }
         else {
-            profiler::stat_increment(stat::COMPILE_WRONG_ADDRESS_SPACE);
+            None
         }
+    };
+
+    if let Some((wasm_table_index, phys_addr, state_flags, ptr, len)) = pending_finalize {
+        // Drop the JIT lock before the JS callback so synchronous instantiation
+        // can call codegen_finalize_finished without try_lock WouldBlock.
+        codegen_finalize(wasm_table_index, phys_addr, state_flags, ptr, len);
     }
 }
 
@@ -2511,6 +2525,7 @@ pub unsafe fn set_jit_config(index: u32, value: u32) {
         1 => MAX_PAGES = value,
         2 => JIT_USE_LOOP_SAFETY = value != 0,
         3 => MAX_EXTRA_BASIC_BLOCKS = value,
+        4 => JIT_THRESHOLD = value,
         _ => dbg_assert!(false),
     }
 }
@@ -2522,6 +2537,7 @@ pub unsafe fn get_jit_config(index: u32) -> u32 {
         1 => MAX_PAGES as u32,
         2 => JIT_USE_LOOP_SAFETY as u32,
         3 => MAX_EXTRA_BASIC_BLOCKS as u32,
+        4 => JIT_THRESHOLD,
         _ => 0,
     }
 }

@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+use crate::analysis;
 use crate::codegen;
 use crate::codegen::{BitSize, ConditionNegate};
 use crate::cpu::cpu::{
@@ -75,12 +76,44 @@ fn local_to_instruction_operand(ctx: &mut JitContext, local: &WasmLocal) -> Inst
 
 pub fn jit_instruction(ctx: &mut JitContext, instr_flags: &mut u32) {
     ctx.cpu.prefixes = 0;
+    ctx.cpu.rex_prefix = 0;
     ctx.start_of_current_instruction = ctx.cpu.eip;
+    if ctx.cpu.state_flags.is_64() {
+        jit_instruction_64(ctx, instr_flags);
+        return;
+    }
     gen::jit::jit(
         ctx.cpu.read_imm8() as u32 | (ctx.cpu.osize_32() as u32) << 8,
         ctx,
         instr_flags,
     );
+}
+
+fn jit_instruction_64(ctx: &mut JitContext, instr_flags: &mut u32) {
+    if analysis::long_cs_needs_trampoline(&ctx.cpu) {
+        gen_trampoline_long_mode(ctx, instr_flags);
+        return;
+    }
+    let opcode = analysis::consume_legacy_prefixes_and_rex(&mut ctx.cpu);
+    gen::jit::jit(
+        opcode as u32 | (ctx.cpu.osize_32() as u32) << 8,
+        ctx,
+        instr_flags,
+    );
+}
+
+fn gen_trampoline_long_mode(ctx: &mut JitContext, instr_flags: &mut u32) {
+    let start = ctx.start_of_current_instruction;
+    ctx.cpu.eip = start;
+    ctx.cpu.prefixes = 0;
+    ctx.cpu.rex_prefix = 0;
+    let _ = analysis::analyze_step(&mut ctx.cpu);
+    codegen::gen_set_previous_eip_offset_from_eip_with_low_bits(ctx.builder, start as i32 & 0xFFF);
+    codegen::gen_set_eip_low_bits(ctx.builder, start as i32 & 0xFFF);
+    codegen::gen_move_registers_from_locals_to_memory(ctx);
+    ctx.builder.call_fn0("jit_run_one_long");
+    codegen::gen_move_registers_from_memory_to_locals(ctx);
+    *instr_flags |= crate::jit::JIT_INSTR_BLOCK_BOUNDARY_FLAG;
 }
 
 pub fn jit_handle_prefix(ctx: &mut JitContext, instr_flags: &mut u32) {
