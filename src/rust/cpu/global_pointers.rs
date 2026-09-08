@@ -96,6 +96,11 @@ pub fn get_reg32_offset(r: u32) -> u32 {
     (unsafe { reg32.offset(r as isize) }) as u32
 }
 
+pub fn get_reg_high32_offset(r: u32) -> u32 {
+    dbg_assert!(r < 8);
+    (unsafe { reg_high32.offset(r as isize) }) as u32
+}
+
 pub fn get_reg_mmx_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);
     (unsafe { fpu_st.offset(r as isize) }) as u32

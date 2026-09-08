@@ -9,7 +9,7 @@ const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
 process.on("unhandledRejection", exn => { throw exn; });
 
-const ALL_TESTS = ["enter64", "stack64", "idt64", "syscall64", "higher64"];
+const ALL_TESTS = ["enter64", "stack64", "idt64", "syscall64", "higher64", "jit64"];
 const requested = process.argv.slice(2);
 
 if(requested.length === 0)
@@ -46,6 +46,7 @@ const emulator = new V86({
     autostart: false,
     memory_size: 32 * 1024 * 1024,
     disable_jit: +process.env.DISABLE_JIT,
+    sync_jit: name === "jit64",
     log_level: 0,
 });
 
@@ -64,6 +65,7 @@ function finish(code, message) {
 
 emulator.add_listener("emulator-loaded", function() {
     const cpu = emulator.v86.cpu;
+    let compiled = 0;
 
     emulator.cpu_exception_hook = function(n) {
         const names = { 0: "DE", 6: "UD", 13: "GP", 14: "PF" };
@@ -71,12 +73,24 @@ emulator.add_listener("emulator-loaded", function() {
         return true;
     };
 
+    if(name === "jit64")
+    {
+        cpu.test_hook_did_finalize_wasm = function() {
+            compiled++;
+        };
+    }
+
     // load_multiboot registers a 0xF4 write that throws "HALT"; overwrite after.
     cpu.load_multiboot(fs.readFileSync(IMAGE).buffer);
 
     cpu.io.register_write_consecutive(0xF4, {},
         function(value) {
             if(value === 0) {
+                if(name === "jit64" && !+process.env.DISABLE_JIT && compiled === 0)
+                {
+                    finish(1, "long mode jit64: JIT did not compile before exit");
+                    return;
+                }
                 console.log("long mode " + name + ": pass");
                 finish(0);
             }

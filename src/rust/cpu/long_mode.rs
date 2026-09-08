@@ -1,8 +1,9 @@
 //! Interpreter path for 64-bit CS (IA-32e, CS.L=1).
 //!
-//! JIT is not used here. Default operand size is 32 bits (existing
-//! interpreter table). Near stack ops are forced 64-bit. REX.W selects
-//! 64-bit ALU/MOV plus RIP-relative and other memory operands.
+//! Default operand size is 32 bits (existing interpreter table). Near stack
+//! ops are forced 64-bit. REX.W selects 64-bit ALU/MOV plus RIP-relative and
+//! other memory operands. 32-bit-opsize ops in low 4GB may run through the
+//! existing JIT; 64-bit-only encodings trampoline back here.
 
 use crate::cpu::cpu::*;
 use crate::cpu::global_pointers::*;
@@ -394,7 +395,7 @@ unsafe fn dispatch_forced64(opcode: i32) {
     }
 }
 
-fn opcode_is_forced64(opcode: i32) -> bool {
+pub fn opcode_is_forced64(opcode: i32) -> bool {
     matches!(
         opcode,
         0x50..=0x5F
@@ -553,5 +554,16 @@ mod tests {
         assert_eq!((va >> 39) & 0x1FF, 511);
         assert_eq!((va >> 30) & 0x1FF, 510);
         assert_eq!((va >> 21) & 0x1FF, 0);
+    }
+
+    #[test]
+    fn forced64_includes_near_call_and_push() {
+        assert!(opcode_is_forced64(0xE8));
+        assert!(opcode_is_forced64(0x50));
+        assert!(opcode_is_forced64(0xC3));
+        assert!(opcode_is_forced64(0xFF));
+        assert!(!opcode_is_forced64(0x01));
+        assert!(!opcode_is_forced64(0x75));
+        assert!(!opcode_is_forced64(0x83));
     }
 }

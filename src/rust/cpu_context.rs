@@ -6,6 +6,7 @@ use crate::state_flags::CachedStateFlags;
 pub struct CpuContext {
     pub eip: u32,
     pub prefixes: u8,
+    pub rex_prefix: u8,
     pub cs_offset: u32,
     pub state_flags: CachedStateFlags,
 }

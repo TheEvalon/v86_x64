@@ -295,6 +295,12 @@ pub fn gen_set_reg16_local(builder: &mut WasmBuilder, local: &WasmLocal) {
 
 pub fn gen_set_reg32(ctx: &mut JitContext, r: u32) {
     ctx.builder.set_local(&ctx.register_locals[r as usize]);
+    if ctx.cpu.state_flags.is_64() {
+        ctx.builder
+            .const_i32(global_pointers::get_reg_high32_offset(r) as i32);
+        ctx.builder.const_i32(0);
+        ctx.builder.store_aligned_i32(0);
+    }
 }
 
 pub fn decr_exc_asize(ctx: &mut JitContext) {
