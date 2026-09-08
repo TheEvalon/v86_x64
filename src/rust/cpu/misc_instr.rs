@@ -103,7 +103,15 @@ pub unsafe fn jmpcc16(condition: bool, imm16: i32) {
 }
 pub unsafe fn jmpcc32(condition: bool, imm32: i32) {
     if condition {
-        *instruction_pointer += imm32
+        if *is_64 {
+            let target = get_rip().wrapping_add(imm32 as i64 as u64);
+            if !gp_if_noncanonical(target) {
+                set_rip(target);
+            }
+        }
+        else {
+            *instruction_pointer += imm32
+        }
     };
 }
 pub unsafe fn loope16(imm8s: i32) { jmpcc16(0 != decr_ecx_asize(is_asize_32()) && getzf(), imm8s); }

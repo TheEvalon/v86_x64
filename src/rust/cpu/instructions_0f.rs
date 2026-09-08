@@ -476,9 +476,7 @@ pub unsafe fn instr_0F05() {
         return;
     }
     let lstar = *msr_lstar;
-    if lstar >> 32 != 0 {
-        dbg_log!("#gp LSTAR {:x} exceeds 4G", lstar);
-        trigger_gp(0);
+    if gp_if_noncanonical(lstar) {
         return;
     }
     let (kernel_cs, kernel_ss, _, _) = syscall_star_selectors(*msr_star);
@@ -488,12 +486,12 @@ pub unsafe fn instr_0F05() {
         return;
     }
     let rflags = get_eflags();
-    write_reg64(ECX, get_real_eip() as u32 as u64);
+    write_reg64(ECX, get_rip());
     write_reg64(R11, rflags as u32 as u64);
     *flags = rflags & !(*msr_fmask as u32 as i32) & !FLAG_RF & !FLAG_VM;
     *flags_changed = 0;
     load_ia32e_cs_ss(kernel_cs as i32, kernel_ss as i32, 0, true);
-    *instruction_pointer = get_seg_cs() + lstar as i32;
+    set_rip(lstar);
 }
 #[no_mangle]
 pub unsafe fn instr_0F06() {
@@ -521,10 +519,8 @@ pub unsafe fn instr_0F07() {
         return;
     }
     let long_return = *rex_prefix & crate::cpu::long_mode::REX_W != 0;
-    let rip = if long_return { read_reg64(ECX) } else { read_reg32(ECX) as u32 as u64 };
-    if rip >> 32 != 0 {
-        dbg_log!("#gp SYSRET rip {:x} exceeds 4G", rip);
-        trigger_gp(0);
+    let new_rip = if long_return { read_reg64(ECX) } else { read_reg32(ECX) as u32 as u64 };
+    if gp_if_noncanonical(new_rip) {
         return;
     }
     let (_, _, user_cs, user_ss) = syscall_star_selectors(*msr_star);
@@ -536,7 +532,7 @@ pub unsafe fn instr_0F07() {
     update_eflags(read_reg64(R11) as i32);
     *flags &= !FLAG_RF & !FLAG_VM;
     load_ia32e_cs_ss(user_cs as i32, user_ss as i32, 3, long_return);
-    *instruction_pointer = get_seg_cs() + rip as i32;
+    set_rip(new_rip);
 }
 #[no_mangle]
 pub unsafe fn instr_0F08() {
@@ -1353,8 +1349,8 @@ pub unsafe fn instr_0F30() {
         MSR_STAR => *msr_star = edx_eax(low, high),
         MSR_LSTAR => {
             let value = edx_eax(low, high);
-            if value >> 32 != 0 {
-                dbg_log!("#gp LSTAR {:x} exceeds 4G", value);
+            if !is_canonical_va(value) {
+                dbg_log!("#gp LSTAR {:x} non-canonical", value);
                 trigger_gp(0);
                 return;
             }
@@ -1362,8 +1358,8 @@ pub unsafe fn instr_0F30() {
         },
         MSR_CSTAR => {
             let value = edx_eax(low, high);
-            if value >> 32 != 0 {
-                dbg_log!("#gp CSTAR {:x} exceeds 4G", value);
+            if !is_canonical_va(value) {
+                dbg_log!("#gp CSTAR {:x} non-canonical", value);
                 trigger_gp(0);
                 return;
             }

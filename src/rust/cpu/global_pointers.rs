@@ -87,6 +87,9 @@ pub const msr_fmask: *mut u64 = 2200 as *mut u64;
 pub const msr_fs_base: *mut u64 = 2208 as *mut u64;
 pub const msr_gs_base: *mut u64 = 2216 as *mut u64;
 pub const msr_kernel_gs_base: *mut u64 = 2224 as *mut u64;
+pub const rip: *mut u64 = 2232 as *mut u64;
+pub const previous_rip: *mut u64 = 2240 as *mut u64;
+pub const last_virt_rip: *mut u64 = 2248 as *mut u64;
 
 pub fn get_reg32_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);

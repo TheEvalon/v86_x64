@@ -7,6 +7,7 @@
 use crate::cpu::cpu::*;
 use crate::cpu::global_pointers::*;
 use crate::cpu::misc_instr::{adjust_stack_reg, pop64, push64};
+use crate::cpu::modrm::resolve_modrm64;
 use crate::paging::OrPageFault;
 use crate::prefix;
 
@@ -232,8 +233,8 @@ unsafe fn dispatch_rex_w(opcode: i32) {
                 trigger_ud();
                 return;
             }
-            let addr = return_on_pagefault!(modrm_resolve(modrm));
-            write_reg64(gpr_reg(modrm), addr as u32 as u64);
+            let addr = return_on_pagefault!(resolve_modrm64(modrm));
+            write_reg64(gpr_reg(modrm), addr);
         },
         0xB8..=0xBF => {
             let imm = return_on_pagefault!(read_imm64());
@@ -265,12 +266,10 @@ unsafe fn dispatch_rex_w(opcode: i32) {
 }
 
 unsafe fn jump_near64(target: u64) {
-    if target >> 32 != 0 {
-        dbg_log!("#gp 64-bit near target {:x} exceeds 4G", target);
-        trigger_gp(0);
+    if gp_if_noncanonical(target) {
         return;
     }
-    *instruction_pointer = get_seg_cs() + target as i32;
+    set_rip(target);
 }
 
 unsafe fn dispatch_forced64(opcode: i32) {
@@ -353,17 +352,25 @@ unsafe fn dispatch_forced64(opcode: i32) {
         0xCF => iretq(),
         0xE8 => {
             let rel = return_on_pagefault!(read_imm32s());
-            return_on_pagefault!(push64(get_real_eip() as u32 as u64));
-            *instruction_pointer = *instruction_pointer + rel;
+            return_on_pagefault!(push64(get_rip()));
+            jump_near64(get_rip().wrapping_add(rel as i64 as u64));
+        },
+        0xE9 => {
+            let rel = return_on_pagefault!(read_imm32s());
+            jump_near64(get_rip().wrapping_add(rel as i64 as u64));
+        },
+        0xEB => {
+            let rel = return_on_pagefault!(read_imm8s());
+            jump_near64(get_rip().wrapping_add(rel as i64 as u64));
         },
         0xFF => {
-            let saved_ip = *instruction_pointer;
+            let saved_rip = get_rip();
             let modrm = return_on_pagefault!(read_imm8());
             let extra = modrm >> 3 & 7;
             match extra {
                 2 => {
                     let target = return_on_pagefault!(load_rm64(modrm));
-                    return_on_pagefault!(push64(get_real_eip() as u32 as u64));
+                    return_on_pagefault!(push64(get_rip()));
                     jump_near64(target);
                 },
                 4 => {
@@ -375,7 +382,7 @@ unsafe fn dispatch_forced64(opcode: i32) {
                     return_on_pagefault!(push64(value));
                 },
                 _ => {
-                    *instruction_pointer = saved_ip;
+                    set_rip(saved_rip);
                     run_legacy_opcode(opcode);
                     return;
                 },
@@ -403,6 +410,8 @@ fn opcode_is_forced64(opcode: i32) -> bool {
             | 0xCB
             | 0xCF
             | 0xE8
+            | 0xE9
+            | 0xEB
             | 0xFF
     )
 }
@@ -525,5 +534,24 @@ mod tests {
         assert_eq!(kss, 0x10);
         assert_eq!(ucs, 0x23);
         assert_eq!(uss, 0x1B);
+    }
+
+    #[test]
+    fn canonical_va_is_48_bit() {
+        use crate::cpu::cpu::is_canonical_va;
+        assert!(is_canonical_va(0));
+        assert!(is_canonical_va(0x0000_7FFF_FFFF_FFFF));
+        assert!(!is_canonical_va(0x0000_8000_0000_0000));
+        assert!(is_canonical_va(0xFFFF_8000_0000_0000));
+        assert!(is_canonical_va(0xFFFF_FFFF_8000_0000));
+        assert!(!is_canonical_va(0x0000_FFFF_8000_0000));
+    }
+
+    #[test]
+    fn linux_minus_2gb_pml4_indices() {
+        let va = 0xFFFF_FFFF_8000_0000u64;
+        assert_eq!((va >> 39) & 0x1FF, 511);
+        assert_eq!((va >> 30) & 0x1FF, 510);
+        assert_eq!((va >> 21) & 0x1FF, 0);
     }
 }

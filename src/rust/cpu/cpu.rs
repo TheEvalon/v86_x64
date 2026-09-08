@@ -343,6 +343,12 @@ pub static mut tlb_code: [Option<ptr::NonNull<Code>>; 0x100000] = [None; 0x10000
 pub static mut valid_tlb_entries: [i32; 10000] = [0; 10000];
 pub static mut valid_tlb_entries_count: i32 = 0;
 
+/// Direct-mapped TLB for canonical VAs above 4GB while LMA is set. Low 4GB
+/// keeps `tlb_data` so 32-bit guests are unchanged.
+const HASH_TLB_SIZE: usize = 4096;
+static mut tlb_hash_tag: [u64; HASH_TLB_SIZE] = [0; HASH_TLB_SIZE];
+static mut tlb_hash_data: [i32; HASH_TLB_SIZE] = [0; HASH_TLB_SIZE];
+
 pub static mut in_jit: bool = false;
 
 pub enum JitExitReason {
@@ -572,8 +578,8 @@ pub unsafe fn iretq() {
     let new_rsp = return_on_pagefault!(safe_read64s(ss_base + rsp0 as i32 + 24));
     let new_ss = return_on_pagefault!(safe_read64s(ss_base + rsp0 as i32 + 32)) as u16 as i32;
 
-    if new_rip >> 32 != 0 {
-        dbg_log!("#gp iretq rip {:x} exceeds 4G", new_rip);
+    if !is_canonical_va(new_rip) {
+        dbg_log!("#gp iretq rip {:x} non-canonical", new_rip);
         trigger_gp(0);
         return;
     }
@@ -641,6 +647,9 @@ pub unsafe fn iretq() {
     *segment_offsets.offset(CS as isize) = cs_descriptor.base();
     *segment_access_bytes.offset(CS as isize) = cs_descriptor.access_byte();
     *instruction_pointer = new_rip as i32 + get_seg_cs();
+    if *is_64 {
+        set_rip(new_rip.wrapping_add(get_seg_cs() as u32 as u64));
+    }
 
     if !switch_seg(SS, new_ss) {
         return;
@@ -1011,8 +1020,8 @@ unsafe fn call_interrupt_vector_lma(
         return;
     }
 
-    if offset >> 32 != 0 {
-        dbg_log!("#gp long-mode handler offset {:x} exceeds 4G", offset);
+    if !is_canonical_va(offset) {
+        dbg_log!("#gp long-mode handler offset {:x} non-canonical", offset);
         trigger_gp(0);
         return;
     }
@@ -1086,6 +1095,9 @@ unsafe fn call_interrupt_vector_lma(
     *segment_access_bytes.offset(CS as isize) = cs_segment_descriptor.access_byte();
 
     *instruction_pointer = get_seg_cs() + offset as i32;
+    if *is_64 {
+        set_rip(offset.wrapping_add(get_seg_cs() as u32 as u64));
+    }
 
     *flags &= !FLAG_NT & !FLAG_VM & !FLAG_RF & !FLAG_TRAP;
 
@@ -1958,6 +1970,9 @@ pub unsafe fn far_return(eip: i32, selector: i32, stack_adjust: i32, is_osize_32
     dbg_assert!(selector & 3 == *cpl as i32);
 
     *instruction_pointer = get_seg_cs() + eip;
+    if *is_64 {
+        set_rip(*instruction_pointer as u32 as u64);
+    }
 
     update_state_flags();
 }
@@ -2361,7 +2376,7 @@ unsafe fn pte64_check_phys32(entry: i64) {
 }
 
 unsafe fn walk_ia32e_to_pd(
-    addr: i32,
+    addr: u64,
     for_writing: bool,
     user: bool,
     jit: bool,
@@ -2369,15 +2384,12 @@ unsafe fn walk_ia32e_to_pd(
     allow_user: &mut bool,
     allow_write: &mut bool,
 ) -> OrPageFault<u32> {
-    // Zero-extend the 32-bit linear address; sign-extending i32 would treat
-    // 0x80000000 as the 64-bit higher-half canonical form.
-    let pml4_addr =
-        (*cr.offset(3) as u32 & 0xFFFFF000) + ((((addr as u32 as u64 >> 39) & 0x1FF) as u32) << 3);
+    let pml4_addr = (*cr.offset(3) as u32 & 0xFFFFF000) + ((((addr >> 39) & 0x1FF) as u32) << 3);
     let pml4e = memory::read64s(pml4_addr);
     pte64_check_phys32(pml4e);
     if pml4e as i32 & PAGE_TABLE_PRESENT_MASK == 0 {
         if side_effects {
-            trigger_pagefault(addr, false, for_writing, user, jit);
+            trigger_pagefault(addr as i32, false, for_writing, user, jit);
         }
         return Err(());
     }
@@ -2390,12 +2402,12 @@ unsafe fn walk_ia32e_to_pd(
         }
     }
 
-    let pdpt_addr = (pml4e as u32 & 0xFFFFF000) + (((addr as u32 >> 30) & 0x1FF) << 3);
+    let pdpt_addr = (pml4e as u32 & 0xFFFFF000) + ((((addr >> 30) & 0x1FF) as u32) << 3);
     let pdpte = memory::read64s(pdpt_addr);
     pte64_check_phys32(pdpte);
     if pdpte as i32 & PAGE_TABLE_PRESENT_MASK == 0 {
         if side_effects {
-            trigger_pagefault(addr, false, for_writing, user, jit);
+            trigger_pagefault(addr as i32, false, for_writing, user, jit);
         }
         return Err(());
     }
@@ -2405,7 +2417,7 @@ unsafe fn walk_ia32e_to_pd(
         dbg_log!("Unsupported: 1GB page");
         dbg_assert!(false, "Unsupported: 1GB page");
         if side_effects {
-            trigger_pagefault(addr, true, for_writing, user, jit);
+            trigger_pagefault(addr as i32, true, for_writing, user, jit);
         }
         return Err(());
     }
@@ -2416,7 +2428,7 @@ unsafe fn walk_ia32e_to_pd(
         }
     }
 
-    Ok((pdpte as u32 & 0xFFFFF000) + (((addr as u32 >> 21) & 0x1FF) << 3))
+    Ok((pdpte as u32 & 0xFFFFF000) + ((((addr >> 21) & 0x1FF) as u32) << 3))
 }
 
 #[cold]
@@ -2450,7 +2462,7 @@ pub unsafe fn do_page_walk(
         let (page_dir_addr, page_dir_entry) = if lma {
             let mut allow_write = true;
             let page_dir_addr = walk_ia32e_to_pd(
-                addr,
+                addr as u32 as u64,
                 for_writing,
                 user,
                 jit,
@@ -2636,11 +2648,150 @@ pub unsafe fn do_page_walk(
     })
 }
 
+unsafe fn do_page_walk_high(
+    addr: u64,
+    for_writing: bool,
+    user: bool,
+    jit: bool,
+    side_effects: bool,
+) -> OrPageFault<std::num::NonZeroI32> {
+    dbg_assert!(efer_lma());
+    profiler::stat_increment(stat::TLB_MISS);
+
+    let cr0 = *cr;
+    let cr4 = *cr.offset(4);
+    let mut allow_user = true;
+    let mut allow_write = true;
+    let page_dir_addr = walk_ia32e_to_pd(
+        addr,
+        for_writing,
+        user,
+        jit,
+        side_effects,
+        &mut allow_user,
+        &mut allow_write,
+    )?;
+    let page_dir_entry64 = memory::read64s(page_dir_addr);
+    pte64_check_phys32(page_dir_entry64);
+    let page_dir_entry = page_dir_entry64 as i32;
+
+    if page_dir_entry & PAGE_TABLE_PRESENT_MASK == 0 {
+        if side_effects {
+            trigger_pagefault(addr as i32, false, for_writing, user, jit);
+        }
+        return Err(());
+    }
+
+    let kernel_write_override = !user && 0 == cr0 & CR0_WP;
+    allow_write = allow_write && page_dir_entry & PAGE_TABLE_RW_MASK != 0;
+    allow_user &= page_dir_entry & PAGE_TABLE_USER_MASK != 0;
+
+    let (high, global) = if page_dir_entry & PAGE_TABLE_PSE_MASK != 0 {
+        if for_writing && !allow_write && !kernel_write_override || user && !allow_user {
+            if side_effects {
+                trigger_pagefault(addr as i32, true, for_writing, user, jit);
+            }
+            return Err(());
+        }
+        let new_page_dir_entry = page_dir_entry
+            | PAGE_TABLE_ACCESSED_MASK
+            | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
+        if side_effects && page_dir_entry != new_page_dir_entry {
+            memory::write8(page_dir_addr, new_page_dir_entry);
+        }
+        (
+            page_dir_entry as u32 & 0xFFE00000 | (addr as u32 & 0x1FF000),
+            page_dir_entry & PAGE_TABLE_GLOBAL_MASK == PAGE_TABLE_GLOBAL_MASK,
+        )
+    }
+    else {
+        let page_table_addr =
+            (page_dir_entry as u32 & 0xFFFFF000) + (((addr as u32 >> 12) & 0x1FF) << 3);
+        let page_table_entry64 = memory::read64s(page_table_addr);
+        pte64_check_phys32(page_table_entry64);
+        let page_table_entry = page_table_entry64 as i32;
+        let present = page_table_entry & PAGE_TABLE_PRESENT_MASK != 0;
+        allow_write &= page_table_entry & PAGE_TABLE_RW_MASK != 0;
+        allow_user &= page_table_entry & PAGE_TABLE_USER_MASK != 0;
+        if !present || for_writing && !allow_write && !kernel_write_override || user && !allow_user
+        {
+            if side_effects {
+                trigger_pagefault(addr as i32, present, for_writing, user, jit);
+            }
+            return Err(());
+        }
+        let new_page_dir_entry = page_dir_entry | PAGE_TABLE_ACCESSED_MASK;
+        if side_effects && new_page_dir_entry != page_dir_entry {
+            memory::write8(page_dir_addr, new_page_dir_entry);
+        }
+        let new_page_table_entry = page_table_entry
+            | PAGE_TABLE_ACCESSED_MASK
+            | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
+        if side_effects && page_table_entry != new_page_table_entry {
+            memory::write8(page_table_addr, new_page_table_entry);
+        }
+        (
+            page_table_entry as u32 & 0xFFFFF000,
+            page_table_entry & PAGE_TABLE_GLOBAL_MASK == PAGE_TABLE_GLOBAL_MASK,
+        )
+    };
+
+    let is_in_mapped_range = memory::in_mapped_range(high);
+    let info_bits = TLB_VALID
+        | if for_writing { 0 } else { TLB_READONLY }
+        | if allow_user { 0 } else { TLB_NO_USER }
+        | if is_in_mapped_range { TLB_IN_MAPPED_RANGE } else { 0 }
+        | if global && 0 != cr4 & CR4_PGE { TLB_GLOBAL } else { 0 };
+    let page = (addr as u32 >> 12) as i32;
+    let tlb_entry = (high + memory::mem8 as u32) as i32 ^ page << 12 | info_bits as i32;
+    if side_effects {
+        let idx = hash_tlb_index(addr);
+        tlb_hash_tag[idx] = addr & !0xFFF;
+        tlb_hash_data[idx] = tlb_entry;
+    }
+    Ok(if DEBUG {
+        std::num::NonZeroI32::new(tlb_entry).unwrap()
+    }
+    else {
+        std::num::NonZeroI32::new_unchecked(tlb_entry)
+    })
+}
+
+pub unsafe fn translate_address64(
+    address: u64,
+    for_writing: bool,
+    user: bool,
+    jit: bool,
+    side_effects: bool,
+) -> OrPageFault<u32> {
+    if gp_if_noncanonical(address) {
+        return Err(());
+    }
+    if address <= 0xFFFF_FFFF {
+        return translate_address(address as i32, for_writing, user, jit, side_effects);
+    }
+    let idx = hash_tlb_index(address);
+    let tag = address & !0xFFF;
+    let mut entry = tlb_hash_data[idx];
+    if tlb_hash_tag[idx] != tag
+        || entry
+            & (TLB_VALID
+                | if user { TLB_NO_USER } else { 0 }
+                | if for_writing { TLB_READONLY } else { 0 })
+            != TLB_VALID
+    {
+        entry = do_page_walk_high(address, for_writing, user, jit, side_effects)?.get();
+    }
+    Ok((entry & !0xFFF ^ address as u32 as i32) as u32 - memory::mem8 as u32)
+}
+
 #[no_mangle]
 pub unsafe fn full_clear_tlb() {
     profiler::stat_increment(stat::FULL_CLEAR_TLB);
     // clear tlb including global pages
     *last_virt_eip = -1;
+    *last_virt_rip = !0;
+    clear_hash_tlb();
     for i in 0..valid_tlb_entries_count {
         let page = valid_tlb_entries[i as usize];
         clear_tlb_code(page);
@@ -2661,6 +2812,8 @@ pub unsafe fn clear_tlb() {
     profiler::stat_increment(stat::CLEAR_TLB);
     // clear tlb excluding global pages
     *last_virt_eip = -1;
+    *last_virt_rip = !0;
+    clear_hash_tlb();
     let mut global_page_offset = 0;
     for i in 0..valid_tlb_entries_count {
         let page = valid_tlb_entries[i as usize];
@@ -2863,6 +3016,15 @@ pub fn check_tlb_invariants() {
 pub const DISABLE_EIP_TRANSLATION_OPTIMISATION: bool = false;
 
 pub unsafe fn read_imm8() -> OrPageFault<i32> {
+    if *is_64 {
+        let eip = get_rip();
+        if eip > 0xFFFF_FFFF {
+            let phys = phys_of_linear_rip(eip)?;
+            let data8 = *memory::mem8.offset(phys as isize) as i32;
+            set_rip(eip + 1);
+            return Ok(data8);
+        }
+    }
     let eip = *instruction_pointer;
     if DISABLE_EIP_TRANSLATION_OPTIMISATION || 0 != eip & !0xFFF ^ *last_virt_eip {
         *eip_phys = (translate_address_read(eip)? ^ eip as u32) as i32;
@@ -2871,12 +3033,18 @@ pub unsafe fn read_imm8() -> OrPageFault<i32> {
     dbg_assert!(!memory::in_mapped_range((*eip_phys ^ eip) as u32));
     let data8 = *memory::mem8.offset((*eip_phys ^ eip) as isize) as i32;
     *instruction_pointer = eip + 1;
+    if *is_64 {
+        *rip = *instruction_pointer as u32 as u64;
+    }
     return Ok(data8);
 }
 
 pub unsafe fn read_imm8s() -> OrPageFault<i32> { return Ok(read_imm8()? << 24 >> 24); }
 
 pub unsafe fn read_imm16() -> OrPageFault<i32> {
+    if *is_64 && get_rip() > 0xFFFF_FFFF {
+        return Ok(read_imm8()? | read_imm8()? << 8);
+    }
     // Two checks in one comparison:
     // 1. Did the high 20 bits of eip change
     // or 2. Are the low 12 bits of eip 0xFFF (and this read crosses a page boundary)
@@ -2888,11 +3056,17 @@ pub unsafe fn read_imm16() -> OrPageFault<i32> {
     else {
         let data16 = memory::read16((*eip_phys ^ *instruction_pointer) as u32);
         *instruction_pointer = *instruction_pointer + 2;
+        if *is_64 {
+            *rip = *instruction_pointer as u32 as u64;
+        }
         return Ok(data16);
     };
 }
 
 pub unsafe fn read_imm32s() -> OrPageFault<i32> {
+    if *is_64 && get_rip() > 0xFFFF_FFFF {
+        return Ok(read_imm16()? | read_imm16()? << 16);
+    }
     // Analogue to the above comment
     if DISABLE_EIP_TRANSLATION_OPTIMISATION
         || (*instruction_pointer ^ *last_virt_eip) as u32 > 0xFFC
@@ -2902,6 +3076,9 @@ pub unsafe fn read_imm32s() -> OrPageFault<i32> {
     else {
         let data32 = memory::read32s((*eip_phys ^ *instruction_pointer) as u32);
         *instruction_pointer = *instruction_pointer + 4;
+        if *is_64 {
+            *rip = *instruction_pointer as u32 as u64;
+        }
         return Ok(data32);
     };
 }
@@ -3226,6 +3403,62 @@ pub unsafe fn efer_lma() -> bool { *efer & EFER_LMA != 0 }
 pub unsafe fn efer_lme() -> bool { *efer & EFER_LME != 0 }
 pub unsafe fn efer_sce() -> bool { *efer & EFER_SCE != 0 }
 
+/// 48-bit canonical: bits 63:47 are all 0 or all 1 (CPUID 0x80000008 virt=48).
+pub fn is_canonical_va(addr: u64) -> bool {
+    let s = addr as i64 >> 47;
+    s == 0 || s == -1
+}
+
+pub unsafe fn get_rip() -> u64 {
+    if *is_64 && *rip > 0xFFFF_FFFF {
+        *rip
+    }
+    else {
+        *instruction_pointer as u32 as u64
+    }
+}
+
+pub unsafe fn set_rip(value: u64) {
+    *rip = value;
+    *instruction_pointer = value as i32;
+}
+
+unsafe fn phys_of_linear_rip(eip: u64) -> OrPageFault<u32> {
+    if gp_if_noncanonical(eip) {
+        return Err(());
+    }
+    let phys = if eip <= 0xFFFF_FFFF {
+        translate_address_read(eip as i32)?
+    }
+    else {
+        translate_address64(eip, false, *cpl == 3, false, true)?
+    };
+    dbg_assert!(!memory::in_mapped_range(phys));
+    Ok(phys)
+}
+
+pub unsafe fn gp_if_noncanonical(addr: u64) -> bool {
+    if efer_lma() && !is_canonical_va(addr) {
+        dbg_log!("#gp non-canonical {:x}", addr);
+        trigger_gp(0);
+        true
+    }
+    else {
+        false
+    }
+}
+
+fn hash_tlb_index(addr: u64) -> usize {
+    ((addr >> 12) as usize ^ (addr >> 33) as usize) & (HASH_TLB_SIZE - 1)
+}
+
+unsafe fn clear_hash_tlb() {
+    for i in 0..HASH_TLB_SIZE {
+        tlb_hash_tag[i] = 0;
+        tlb_hash_data[i] = 0;
+    }
+}
+
 pub fn syscall_star_selectors(star: u64) -> (u16, u16, u16, u16) {
     let kernel_cs = (star >> 32) as u16 & !3;
     let kernel_ss = kernel_cs.wrapping_add(8);
@@ -3390,7 +3623,10 @@ pub unsafe fn load_pdpte(cr3: i32) {
     }
 }
 
-pub unsafe fn cpl_changed() { *last_virt_eip = -1 }
+pub unsafe fn cpl_changed() {
+    *last_virt_eip = -1;
+    *last_virt_rip = !0;
+}
 
 pub unsafe fn update_cs_size(new_size: bool) {
     if *is_64 {
@@ -3535,7 +3771,16 @@ pub unsafe fn get_seg_prefix_ss(offset: i32) -> OrPageFault<i32> {
 
 pub unsafe fn modrm_resolve(modrm_byte: i32) -> OrPageFault<i32> {
     if *is_64 {
-        resolve_modrm64(modrm_byte)
+        let a = resolve_modrm64(modrm_byte)?;
+        if a > 0xFFFF_FFFF {
+            dbg_log!(
+                "#gp 64-bit linear {:x} exceeds 4G on 32-bit operand path",
+                a
+            );
+            trigger_gp(0);
+            return Err(());
+        }
+        Ok(a as i32)
     }
     else if is_asize_32() {
         resolve_modrm32(modrm_byte)
@@ -3556,7 +3801,11 @@ pub unsafe fn cycle_internal() {
     let initial_state_flags = *state_flags;
 
     if *is_64 {
+        if *rip <= 0xFFFF_FFFF {
+            *rip = *instruction_pointer as u32 as u64;
+        }
         *previous_ip = initial_eip;
+        *previous_rip = get_rip();
         let phys_addr = return_on_pagefault!(get_phys_eip());
         let initial_instruction_counter = *instruction_counter;
         jit_run_interpreted(phys_addr);
@@ -3715,6 +3964,9 @@ pub unsafe fn cycle_internal() {
 }
 
 pub unsafe fn get_phys_eip() -> OrPageFault<u32> {
+    if *is_64 && get_rip() > 0xFFFF_FFFF {
+        return phys_of_linear_rip(get_rip());
+    }
     let eip = *instruction_pointer;
     if 0 != eip & !0xFFF ^ *last_virt_eip {
         *eip_phys = (translate_address_read(eip)? ^ eip as u32) as i32;
@@ -3744,6 +3996,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
 
         i += 1;
         let start_eip = *instruction_pointer;
+        let start_rip = if *is_64 { get_rip() } else { start_eip as u32 as u64 };
         if *is_64 {
             crate::cpu::long_mode::run_one();
         }
@@ -3755,17 +4008,20 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
             dbg_assert!(*prefixes == 0);
         }
 
+        let end_rip = if *is_64 { get_rip() } else { *instruction_pointer as u32 as u64 };
         if jit_block_boundary
-            || Page::page_of(start_eip as u32) != Page::page_of(*instruction_pointer as u32)
-                // Limit the number of iterations, as jumps within the same page are not counted as
-                // block boundaries for the interpreter, but only on the next backwards jump
-            || (i >= INTERPRETER_ITERATION_LIMIT
-                && (start_eip as u32) >= (*instruction_pointer as u32))
+            || (start_rip & !0xFFF) != (end_rip & !0xFFF)
+            // Limit the number of iterations, as jumps within the same page are not counted as
+            // block boundaries for the interpreter, but only on the next backwards jump
+            || (i >= INTERPRETER_ITERATION_LIMIT && start_rip >= end_rip)
         {
             break;
         }
 
         *previous_ip = *instruction_pointer;
+        if *is_64 {
+            *previous_rip = get_rip();
+        }
         phys_addr = return_on_pagefault!(get_phys_eip()) as u32;
     }
 
@@ -4940,6 +5196,7 @@ pub unsafe fn invlpg(addr: i32) {
     clear_tlb_code(page);
     tlb_data[page as usize] = 0;
     *last_virt_eip = -1;
+    *last_virt_rip = !0;
 }
 
 #[no_mangle]
@@ -5203,6 +5460,10 @@ pub unsafe fn reset_cpu() {
     *msr_fs_base = 0;
     *msr_gs_base = 0;
     *msr_kernel_gs_base = 0;
+    *rip = 0;
+    *previous_rip = 0;
+    *last_virt_rip = !0;
+    clear_hash_tlb();
 
     *last_virt_eip = -1;
 
