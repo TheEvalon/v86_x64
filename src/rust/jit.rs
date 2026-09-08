@@ -2178,9 +2178,16 @@ pub fn jit_increase_hotness_and_maybe_compile(
             if is_compiling {
                 None
             }
-            else if cpu::translate_address_read_no_side_effects(virt_address) == Ok(phys_address) {
+            else if cpu::translate_address_read_no_side_effects(virt_address) == Ok(phys_address)
+            {
                 *hotness = 0;
-                jit_analyze_and_generate(&mut ctx, virt_address, phys_address, cs_offset, state_flags)
+                jit_analyze_and_generate(
+                    &mut ctx,
+                    virt_address,
+                    phys_address,
+                    cs_offset,
+                    state_flags,
+                )
             }
             else {
                 profiler::stat_increment(stat::COMPILE_WRONG_ADDRESS_SPACE);

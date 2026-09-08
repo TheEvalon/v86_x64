@@ -244,7 +244,12 @@ mod tests {
 
     #[test]
     fn trampoline_rex_w_but_not_empty_rex() {
-        assert!(opcode_needs_long_trampoline(long_mode::REX_W, 0x01, 0xC0, false));
+        assert!(opcode_needs_long_trampoline(
+            long_mode::REX_W,
+            0x01,
+            0xC0,
+            false
+        ));
         assert!(!opcode_needs_long_trampoline(0x40, 0x33, 0xC0, false));
     }
 
