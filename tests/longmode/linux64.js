@@ -119,13 +119,15 @@ emulator.add_listener("emulator-loaded", function()
     emulator.cpu_exception_hook = function(n)
     {
         // Linux takes page faults, #NM (FPU), and probed #GPs. Deliver those.
-        if(n !== 6)
+        // #UD is a missing opcode. #DF is a nested-fault shutdown.
+        if(n !== 6 && n !== 8)
         {
             return false;
         }
         const cpu = emulator.v86.cpu;
         const rip = u64_from_pair(cpu.previous_rip64);
-        finish(1, "linux64: unexpected #UD rip=" + hex64(rip) +
+        const what = n === 8 ? "#DF" : "#UD";
+        finish(1, "linux64: unexpected " + what + " rip=" + hex64(rip) +
             " bytes=[" + dump_at(cpu, rip) + "]");
         return true;
     };

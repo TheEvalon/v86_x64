@@ -334,6 +334,7 @@ pub static mut tsc_speed: u64 = 1;
 // used for restoring the state
 pub static mut tsc_offset: u64 = 0;
 pub static mut cr8: u64 = 0;
+static mut in_lma_int_delivery: bool = false;
 
 pub struct Code {
     pub wasm_table_index: jit::WasmTableIndex,
@@ -956,6 +957,27 @@ unsafe fn call_interrupt_vector_lma(
 ) {
     dbg_assert!(efer_lma());
 
+    if in_lma_int_delivery {
+        dbg_log!(
+            "nested fault during long-mode IDT delivery int={}",
+            interrupt_nr
+        );
+        if DEBUG {
+            let _ = js::cpu_exception_hook(CPU_EXCEPTION_DF);
+        }
+        *in_hlt = true;
+        return;
+    }
+    in_lma_int_delivery = true;
+    deliver_interrupt_vector_lma(interrupt_nr, is_software_int, error_code);
+    in_lma_int_delivery = false;
+}
+
+unsafe fn deliver_interrupt_vector_lma(
+    interrupt_nr: i32,
+    is_software_int: bool,
+    error_code: Option<i32>,
+) {
     if interrupt_nr << 4 | 15 > *idtr_size {
         dbg_log!(
             "long-mode IDT limit interrupt_nr={:x} idtr_size={:x}",
@@ -3241,6 +3263,15 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
             Ok(desc) => desc,
             Err(SelectorNullOrInvalid::IsNull) => {
                 if reg == SS {
+                    // Null SS is valid in 64-bit mode at CPL0 (startup_64 does `mov ss, 0`).
+                    if *is_64 && *cpl == 0 {
+                        *sreg.offset(SS as isize) = selector_raw as u16;
+                        *segment_is_null.offset(SS as isize) = true;
+                        *segment_offsets.offset(SS as isize) = 0;
+                        *stack_size_32 = true;
+                        update_state_flags();
+                        return true;
+                    }
                     dbg_log!("#GP for loading 0 in SS sel={:x}", selector_raw);
                     trigger_gp(0);
                     return false;
@@ -3457,6 +3488,16 @@ pub unsafe fn log_segment_null(segment: i32) {
 
 pub unsafe fn get_seg(segment: i32) -> OrPageFault<i32> {
     dbg_assert!(segment >= 0 && segment < 8);
+    if *is_64 {
+        if segment == FS {
+            return Ok(*msr_fs_base as i32);
+        }
+        if segment == GS {
+            return Ok(*msr_gs_base as i32);
+        }
+        // CS/DS/ES/SS bases are treated as 0. Null DS/ES/SS is allowed.
+        return Ok(0);
+    }
     if *segment_is_null.offset(segment as isize) {
         dbg_assert!(segment != CS && segment != SS);
         dbg_log!("#gp: Access null segment {}", segment);
@@ -5587,6 +5628,7 @@ pub unsafe fn reset_cpu() {
     *cr.offset(3) = 0;
     *cr.offset(4) = 0;
     cr8 = 0;
+    in_lma_int_delivery = false;
     *dreg.offset(6) = 0xFFFF0FF0u32 as i32;
     *dreg.offset(7) = 0x400;
     *cpl = 0;
