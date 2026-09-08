@@ -149,6 +149,24 @@ back64:
     cmp [rel stos_guard], rax
     jne fail64
 
+    ; REX.W 0F BA /5 m64,imm8: imm8 is after the ModRM displacement.
+    ; Reading it first mis-parses RIP-relative BTS (Linux early_pmd_flags).
+    mov qword [rel pmd_flags], 0
+    bts qword [rel pmd_flags], 63
+    mov rax, [rel pmd_flags]
+    mov rbx, 0x8000000000000000
+    cmp rax, rbx
+    jne fail64
+    jc fail64
+    bts qword [rel pmd_flags], 63
+    jnc fail64
+    cmp qword [rel pmd_flags], rbx
+    jne fail64
+    xor eax, eax
+    bts rax, 63
+    cmp rax, rbx
+    jne fail64
+
     ; Null DS is valid in 64-bit CPL0. 32-bit JIT loads must not #GP.
     xor eax, eax
     mov ds, ax
@@ -172,6 +190,8 @@ fail64:
 
 align 8
 scratch:
+    dq 0
+pmd_flags:
     dq 0
 
 align 8

@@ -63,20 +63,78 @@ let finished = false;
 
 function u64_from_pair(view)
 {
-    return (view[0] >>> 0) + (view[1] >>> 0) * 0x100000000;
+    return BigInt(view[0] >>> 0) + (BigInt(view[1] >>> 0) << 32n);
+}
+
+function as_u64(n)
+{
+    return typeof n === "bigint" ? n : BigInt(n);
 }
 
 function hex64(n)
 {
-    return "0x" + n.toString(16);
+    return "0x" + as_u64(n).toString(16);
+}
+
+function rd64_phys(cpu, phys)
+{
+    let lo = 0, hi = 0;
+    for(let i = 0; i < 4; i++)
+    {
+        lo |= cpu.mem8[phys + i] << (8 * i);
+        hi |= cpu.mem8[phys + 4 + i] << (8 * i);
+    }
+    return BigInt(lo >>> 0) + (BigInt(hi >>> 0) << 32n);
+}
+
+function phys_of_virt(cpu, virt)
+{
+    const v = as_u64(virt);
+    const cr3 = cpu.cr[3] >>> 0;
+    const pml4i = Number((v >> 39n) & 0x1FFn);
+    const pdpti = Number((v >> 30n) & 0x1FFn);
+    const pdi = Number((v >> 21n) & 0x1FFn);
+    const pti = Number((v >> 12n) & 0x1FFn);
+    const pml4e = rd64_phys(cpu, cr3 + pml4i * 8);
+    if(!(pml4e & 1n))
+    {
+        return null;
+    }
+    const pdpte = rd64_phys(cpu, Number(pml4e & 0xFFFFF000n) + pdpti * 8);
+    if(!(pdpte & 1n))
+    {
+        return null;
+    }
+    if(pdpte & 0x80n)
+    {
+        return Number((pdpte & 0xFFFFC0000000n) + (v & 0x3FFFFFFFn));
+    }
+    const pde = rd64_phys(cpu, Number(pdpte & 0xFFFFF000n) + pdi * 8);
+    if(!(pde & 1n))
+    {
+        return null;
+    }
+    if(pde & 0x80n)
+    {
+        return Number((pde & 0xFFE00000n) + (v & 0x1FFFFFn));
+    }
+    const pte = rd64_phys(cpu, Number(pde & 0xFFFFF000n) + pti * 8);
+    if(!(pte & 1n))
+    {
+        return null;
+    }
+    return Number((pte & 0xFFFFF000n) + (v & 0xFFFn));
 }
 
 function dump_at(cpu, virt)
 {
-    const lo = virt | 0;
     try
     {
-        const phys = cpu.translate_address_system_read(lo) >>> 0;
+        const phys = phys_of_virt(cpu, virt);
+        if(phys === null)
+        {
+            return "(unreadable)";
+        }
         const bytes = [];
         for(let i = 0; i < 16; i++)
         {
@@ -90,20 +148,102 @@ function dump_at(cpu, virt)
     }
 }
 
+function dump_idt_gate(cpu, vec)
+{
+    const virt = u64_from_pair(cpu.idtr_offset64) + BigInt(vec * 16);
+    const phys = phys_of_virt(cpu, virt);
+    if(phys === null)
+    {
+        return "vec" + vec + "=(unreadable)";
+    }
+    const bytes = [];
+    for(let i = 0; i < 16; i++)
+    {
+        bytes.push(("0" + cpu.mem8[phys + i].toString(16)).slice(-2));
+    }
+    const low = cpu.mem8[phys] | cpu.mem8[phys + 1] << 8 |
+        cpu.mem8[phys + 2] << 16 | cpu.mem8[phys + 3] << 24;
+    const mid = cpu.mem8[phys + 4] | cpu.mem8[phys + 5] << 8 |
+        cpu.mem8[phys + 6] << 16 | cpu.mem8[phys + 7] << 24;
+    const hi = cpu.mem8[phys + 8] | cpu.mem8[phys + 9] << 8 |
+        cpu.mem8[phys + 10] << 16 | cpu.mem8[phys + 11] << 24;
+    const ist = (mid >>> 0) & 7;
+    const type = (mid >>> 8) & 0x1F;
+    const sel = (low >>> 16) & 0xFFFF;
+    const off = BigInt((low & 0xFFFF) | (mid & 0xFFFF0000)) + (BigInt(hi >>> 0) << 32n);
+    return "vec" + vec + "=[" + bytes.join(" ") + "] sel=" + hex64(sel) +
+        " ist=" + ist + " type=" + type + " off=" + hex64(off);
+}
+
+function dump_qword(cpu, virt)
+{
+    const v = as_u64(virt);
+    const phys = phys_of_virt(cpu, v);
+    if(phys === null)
+    {
+        return "0x" + v.toString(16) + "=(unmapped)";
+    }
+    return "0x" + v.toString(16) + "=" + hex64(rd64_phys(cpu, phys));
+}
+
+function dump_page_walk(cpu, virt)
+{
+    const v = as_u64(virt);
+    const cr3 = cpu.cr[3] >>> 0;
+    const pml4i = Number((v >> 39n) & 0x1FFn);
+    const pdpti = Number((v >> 30n) & 0x1FFn);
+    const pdi = Number((v >> 21n) & 0x1FFn);
+    const pti = Number((v >> 12n) & 0x1FFn);
+    const pml4e = rd64_phys(cpu, cr3 + pml4i * 8);
+    if(!(pml4e & 1n))
+    {
+        return "pml4[" + pml4i + "]=" + hex64(pml4e) + " !p";
+    }
+    const pdpte = rd64_phys(cpu, Number(pml4e & 0xFFFFF000n) + pdpti * 8);
+    if(!(pdpte & 1n))
+    {
+        return "pml4e=" + hex64(pml4e) + " pdpt[" + pdpti + "]=" + hex64(pdpte) + " !p";
+    }
+    if(pdpte & 0x80n)
+    {
+        return "pml4e=" + hex64(pml4e) + " 1G pdpte=" + hex64(pdpte);
+    }
+    const pde = rd64_phys(cpu, Number(pdpte & 0xFFFFF000n) + pdi * 8);
+    if(!(pde & 1n))
+    {
+        return "pml4e=" + hex64(pml4e) + " pdpte=" + hex64(pdpte) +
+            " pd[" + pdi + "]=" + hex64(pde) + " !p";
+    }
+    if(pde & 0x80n)
+    {
+        return "2M pml4e=" + hex64(pml4e) + " pdpte=" + hex64(pdpte) + " pde=" + hex64(pde);
+    }
+    const pte = rd64_phys(cpu, Number(pde & 0xFFFFF000n) + pti * 8);
+    return "4K pml4e=" + hex64(pml4e) + " pdpte=" + hex64(pdpte) +
+        " pde=" + hex64(pde) + " pte=" + hex64(pte);
+}
+
 function dump_regs(cpu)
 {
     const names = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"];
     const parts = [];
     for(let i = 0; i < 8; i++)
     {
-        const full = (cpu.reg32[i] >>> 0) + (cpu.reg_high32[i] >>> 0) * 0x100000000;
+        const full = BigInt(cpu.reg32[i] >>> 0) + (BigInt(cpu.reg_high32[i] >>> 0) << 32n);
         parts.push(names[i] + "=" + hex64(full));
     }
-    const efer = (cpu.efer[0] >>> 0) + (cpu.efer[1] >>> 0) * 0x100000000;
+    const efer = u64_from_pair(cpu.efer);
+    const cr2 = u64_from_pair(cpu.cr2_64);
+    const idtr = u64_from_pair(cpu.idtr_offset64);
+    const gdtr = u64_from_pair(cpu.gdtr_offset64);
     parts.push("cs=" + hex64(cpu.sreg[1]));
     parts.push("ss=" + hex64(cpu.sreg[2]));
     parts.push("is_64=" + (cpu.is_64[0] | 0));
     parts.push("efer=" + hex64(efer));
+    parts.push("cr2=" + hex64(cr2));
+    parts.push("cr3=" + hex64(cpu.cr[3] >>> 0));
+    parts.push("gdtr=" + hex64(gdtr) + "/" + hex64(cpu.gdtr_size[0] >>> 0));
+    parts.push("idtr=" + hex64(idtr) + "/" + hex64(cpu.idtr_size[0] >>> 0));
     return parts.join(" ");
 }
 
@@ -133,6 +273,24 @@ function finish(code, message)
 
 emulator.add_listener("emulator-loaded", function()
 {
+    const cpu0 = emulator.v86.cpu;
+    const orig_main_loop = cpu0.main_loop.bind(cpu0);
+    let ticks = 0;
+    let last_log = Date.now();
+    cpu0.main_loop = function()
+    {
+        ticks++;
+        const now = Date.now();
+        if(now - last_log >= 2000)
+        {
+            last_log = now;
+            const rip = u64_from_pair(cpu0.rip64);
+            console.error("linux64: ticks=" + ticks + " rip=" + hex64(rip) +
+                " bytes=[" + dump_at(cpu0, rip) + "] " + dump_regs(cpu0));
+        }
+        return orig_main_loop();
+    };
+
     emulator.cpu_exception_hook = function(n)
     {
         // Linux takes page faults, #NM (FPU), and probed #GPs. Deliver those.
@@ -144,8 +302,24 @@ emulator.add_listener("emulator-loaded", function()
         const cpu = emulator.v86.cpu;
         const rip = u64_from_pair(cpu.previous_rip64);
         const what = n === 8 ? "#DF" : "#UD";
-        finish(1, "linux64: unexpected " + what + " rip=" + hex64(rip) +
-            " bytes=[" + dump_at(cpu, rip) + "] " + dump_regs(cpu));
+        const phys_hint = 0x1000000;
+        const phys_bytes = [];
+        for(let i = 0; i < 16; i++)
+        {
+            phys_bytes.push(("0" + cpu.mem8[phys_hint + i].toString(16)).slice(-2));
+        }
+        const cur = u64_from_pair(cpu.rip64);
+        finish(1, "linux64: unexpected " + what + " previous_rip=" + hex64(rip) +
+            " rip=" + hex64(cur) +
+            " bytes=[" + dump_at(cpu, rip) + "] cur_bytes=[" + dump_at(cpu, cur) +
+            "] phys1M=[" + phys_bytes.join(" ") + "] " +
+            dump_regs(cpu) + " walk=" + dump_page_walk(cpu, rip) +
+            " cr2walk=" + dump_page_walk(cpu, u64_from_pair(cpu.cr2_64)) +
+            " " + dump_idt_gate(cpu, 8) + " " + dump_idt_gate(cpu, 13) +
+            " " + dump_idt_gate(cpu, 14) +
+            " " + dump_qword(cpu, 0xffffffff829803e8n) +
+            " " + dump_qword(cpu, 0xffffffff8283d0c0n) +
+            " " + dump_qword(cpu, 0xffffffff8283d030n));
         return true;
     };
 });

@@ -1361,12 +1361,15 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
         0xBA => {
             let modrm = return_on_pagefault!(read_imm8());
             let extra = modrm >> 3 & 7;
-            let imm = return_on_pagefault!(read_imm8()) as u64;
             if extra < 4 {
                 trigger_ud();
                 return;
             }
+            // Imm8 follows the full ModRM address (disp8/disp32/SIB). Reading it
+            // first turns RIP-relative `btsq $63, m64` into a bogus canonical
+            // hole VA (Linux `early_pmd_flags` -> #PF with an empty IDT -> #DF).
             let (addr, val) = return_on_pagefault!(rm64_addr_val(modrm));
+            let imm = return_on_pagefault!(read_imm8()) as u64;
             bt64_flags(val, imm);
             let b = imm & 63;
             let new = match extra {
@@ -1575,6 +1578,14 @@ mod tests {
         assert_eq!((va >> 39) & 0x1FF, 511);
         assert_eq!((va >> 30) & 0x1FF, 510);
         assert_eq!((va >> 21) & 0x1FF, 0);
+    }
+
+    #[test]
+    fn linux_kernel_map_is_pd_index_8() {
+        let va = 0xFFFF_FFFF_8100_0000u64;
+        assert_eq!((va >> 39) & 0x1FF, 511);
+        assert_eq!((va >> 30) & 0x1FF, 510);
+        assert_eq!((va >> 21) & 0x1FF, 8);
     }
 
     #[test]

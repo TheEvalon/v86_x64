@@ -6,7 +6,8 @@ following list is roughtly sorted from most interesting/useful to least.
 - [longmode](longmode/): Enters IA-32e long mode from a multiboot payload and
   checks a 64-bit ADD, stack/RIP-relative ops, a 16-byte IDT,
   SYSCALL/SYSRET/SWAPGS, a canonical higher-half RIP, JIT of 32-bit-opsize
-  ops in 64-bit CS, and REX/higher-half data (`make longmode-test`).
+  ops in 64-bit CS, REX/higher-half data, and a higher-half IDT/#PF at
+  `0xffffffff81000000` (`make longmode-test`).
   `make linux64-test` boots a tiny x86_64 Linux bzImage until `Linux version`.
 - [qemu](qemu/): Based on tests from qemu. Builds a Linux binary, which tests
   many CPU features, which are then compared to a run on qemu.
