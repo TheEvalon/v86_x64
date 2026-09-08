@@ -295,12 +295,12 @@ pub fn gen_set_reg16_local(builder: &mut WasmBuilder, local: &WasmLocal) {
 
 pub fn gen_set_reg32(ctx: &mut JitContext, r: u32) {
     ctx.builder.set_local(&ctx.register_locals[r as usize]);
-    if ctx.cpu.state_flags.is_64() {
-        ctx.builder
-            .const_i32(global_pointers::get_reg_high32_offset(r) as i32);
-        ctx.builder.const_i32(0);
-        ctx.builder.store_aligned_i32(0);
-    }
+    // IA-32e zero-extends 32-bit GPR writes in both 64-bit and compatibility
+    // mode. Match write_reg32 even when this block was compiled with CS.L=0.
+    ctx.builder
+        .const_i32(global_pointers::get_reg_high32_offset(r) as i32);
+    ctx.builder.const_i32(0);
+    ctx.builder.store_aligned_i32(0);
 }
 
 pub fn decr_exc_asize(ctx: &mut JitContext) {

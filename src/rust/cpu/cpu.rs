@@ -3739,13 +3739,12 @@ pub unsafe fn cpl_changed() {
 }
 
 pub unsafe fn update_cs_size(new_size: bool) {
-    if *is_64 {
+    if *is_64 || *is_32 != new_size {
         after_block_boundary();
     }
     *is_64 = false;
-    if *is_32 != new_size {
-        *is_32 = new_size;
-    }
+    *is_32 = new_size;
+    update_state_flags();
 }
 
 pub unsafe fn update_cs_from_descriptor(info: SegmentDescriptor) {
@@ -3754,15 +3753,16 @@ pub unsafe fn update_cs_from_descriptor(info: SegmentDescriptor) {
         !(long && info.is_32()),
         "Invalid CS descriptor: L and D both set"
     );
-    if *is_64 != long {
+    // 64-bit CS defaults to 32-bit operand size even though D/B is 0.
+    let new_size = long || info.is_32();
+    if *is_64 != long || *is_32 != new_size {
         after_block_boundary();
     }
     *is_64 = long;
-    // 64-bit CS defaults to 32-bit operand size even though D/B is 0.
-    let new_size = long || info.is_32();
-    if *is_32 != new_size {
-        *is_32 = new_size;
-    }
+    *is_32 = new_size;
+    // Interpreter reads *is_64; JIT modules are keyed on CachedStateFlags.
+    // lretq/far JMP must flip both together or 32-bit JIT runs in 64-bit CS.
+    update_state_flags();
 }
 
 #[inline(never)]

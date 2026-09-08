@@ -99,6 +99,29 @@ start64:
     cmp rax, [scratch]
     jne fail64
 
+    ; 32-bit writes zero-extend (IA-32e, including compatibility mode).
+    mov rax, 0xFFFFFFFFFFFFFFFF
+    mov eax, 0x12345678
+    mov rbx, 0x12345678
+    cmp rax, rbx
+    jne fail64
+
+    ; Linux's 32-bit decompressor JITs `mov edi, 0xb8000` after LMA but before
+    ; CS.L. A stale high half makes the later 64-bit VGA write non-canonical.
+    mov rdi, 0x0200000000B8000
+    jmp far [compat_ptr]
+
+BITS 32
+compat32:
+    mov edi, 0xB8000
+    jmp 0x08:back64
+
+BITS 64
+back64:
+    mov rsi, 0xB8000
+    cmp rdi, rsi
+    jne fail64
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -117,10 +140,16 @@ scratch:
     dq 0
 
 align 8
+compat_ptr:
+    dq compat32
+    dw 0x18
+
+align 8
 gdt:
     dq 0
     dq 0x00AF9B000000FFFF
     dq 0x00CF93000000FFFF
+    dq 0x00CF9B000000FFFF
 gdt_end:
 
 gdt_desc:
