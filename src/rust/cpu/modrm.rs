@@ -320,4 +320,10 @@ mod tests {
         assert_eq!(trailing_imm_after_modrm(0x1F7, false, 0x05), 4);
         assert_eq!(trailing_imm_after_modrm(0x1F7, false, 0x0D), 0);
     }
+
+    #[test]
+    fn call_m64_has_no_trailing_imm() {
+        assert_eq!(trailing_imm_after_modrm(0x1FF, false, 0x15), 0);
+        assert_eq!(trailing_imm_after_modrm(0x183, false, 0x05), 1);
+    }
 }

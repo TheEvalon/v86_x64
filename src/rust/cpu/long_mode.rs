@@ -311,6 +311,8 @@ unsafe fn finish_instruction() {
     *prefixes = 0;
     *rex_prefix = 0;
     *pending_linear64 = 0;
+    current_interp_opcode = 0;
+    current_interp_0f = false;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -983,6 +985,8 @@ unsafe fn jmp_far64(addr: i32) {
 }
 
 unsafe fn dispatch_forced64(opcode: i32) {
+    current_interp_opcode = opcode as u32 | 0x100;
+    current_interp_0f = false;
     match opcode {
         0x50..=0x57 => {
             return_on_pagefault!(push64(read_reg64(gpr_opcode(opcode))));
@@ -1414,6 +1418,8 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
 }
 
 unsafe fn dispatch_opcode(opcode: i32) {
+    current_interp_opcode = opcode as u32 | 0x100;
+    current_interp_0f = false;
     if opcode == 0x63 {
         dispatch_movsxd();
         return;
@@ -1453,6 +1459,8 @@ pub unsafe fn run_one() {
     *rex_prefix = 0;
     *prefixes = 0;
     *pending_linear64 = 0;
+    current_interp_opcode = 0;
+    current_interp_0f = false;
 
     loop {
         let byte = return_on_pagefault!(read_imm8());

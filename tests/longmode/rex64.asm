@@ -149,8 +149,16 @@ back64:
     cmp [rel stos_guard], rax
     jne fail64
 
-    ; REX.W 0F BA /5 m64,imm8: imm8 is after the ModRM displacement.
-    ; Reading it first mis-parses RIP-relative BTS (Linux early_pmd_flags).
+    ; RIP-relative CALL m64 must not inherit trailing_imm from a prior
+    ; `add r/m32, imm8` (Linux C `call *pv_ops(%rip)` after an ADD).
+    mov dword [rel scratch32], 0
+    add dword [rel scratch32], 1
+    call qword [rel call_slot]
+    mov rbx, 0xAABBCCDD
+    cmp rax, rbx
+    jne fail64
+    cmp dword [rel scratch32], 1
+    jne fail64
     mov qword [rel pmd_flags], 0
     bts qword [rel pmd_flags], 63
     mov rax, [rel pmd_flags]
@@ -166,7 +174,13 @@ back64:
     bts rax, 63
     cmp rax, rbx
     jne fail64
+    jmp after_call_target
 
+call_target:
+    mov rax, 0xAABBCCDD
+    ret
+
+after_call_target:
     ; Null DS is valid in 64-bit CPL0. 32-bit JIT loads must not #GP.
     xor eax, eax
     mov ds, ax
@@ -193,6 +207,10 @@ scratch:
     dq 0
 pmd_flags:
     dq 0
+call_slot:
+    dq call_target
+scratch32:
+    dd 0
 
 align 8
 vidmem_sim:
