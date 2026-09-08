@@ -810,6 +810,75 @@ unsafe fn jump_near64(target: u64) {
     set_rip(target);
 }
 
+unsafe fn load_cs_64(selector: i32) -> bool {
+    let cs_selector = SegmentSelector::of_u16(selector as u16);
+    let info = match return_on_pagefault!(lookup_segment_selector(cs_selector), false) {
+        Ok((desc, _)) => desc,
+        Err(SelectorNullOrInvalid::IsNull) => {
+            trigger_gp(0);
+            return false;
+        },
+        Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
+            trigger_gp(selector & !3);
+            return false;
+        },
+    };
+    if info.is_system() || !info.is_executable() {
+        trigger_gp(selector & !3);
+        return false;
+    }
+    if cs_selector.rpl() < *cpl {
+        trigger_gp(selector & !3);
+        return false;
+    }
+    if info.is_dc() && info.dpl() > cs_selector.rpl() {
+        trigger_gp(selector & !3);
+        return false;
+    }
+    if !info.is_dc() && info.dpl() != cs_selector.rpl() {
+        trigger_gp(selector & !3);
+        return false;
+    }
+    if !info.is_present() {
+        trigger_np(selector & !3);
+        return false;
+    }
+    if cs_selector.rpl() > *cpl {
+        dbg_log!("far jump/return privilege change not implemented in 64-bit");
+        trigger_gp(selector & !3);
+        return false;
+    }
+    update_cs_from_descriptor(info);
+    *segment_is_null.offset(CS as isize) = false;
+    *segment_limits.offset(CS as isize) = info.effective_limit();
+    *segment_access_bytes.offset(CS as isize) = info.access_byte();
+    *segment_offsets.offset(CS as isize) = info.base();
+    *sreg.offset(CS as isize) = selector as u16;
+    true
+}
+
+unsafe fn retf64(stack_adjust: i32) {
+    let new_rip = return_on_pagefault!(pop64());
+    let new_cs = return_on_pagefault!(pop64()) as u16 as i32;
+    if !load_cs_64(new_cs) {
+        return;
+    }
+    if stack_adjust != 0 {
+        adjust_stack_reg(stack_adjust);
+    }
+    jump_near64(new_rip);
+}
+
+unsafe fn jmp_far64(addr: i32) {
+    let target = return_on_pagefault!(safe_read64s(addr));
+    *pending_linear64 = virt64_from_i32(addr).wrapping_add(8);
+    let sel = return_on_pagefault!(safe_read16(addr.wrapping_add(8)));
+    if !load_cs_64(sel) {
+        return;
+    }
+    jump_near64(target);
+}
+
 unsafe fn dispatch_forced64(opcode: i32) {
     match opcode {
         0x50..=0x57 => {
@@ -882,10 +951,11 @@ unsafe fn dispatch_forced64(opcode: i32) {
             write_reg64(ESP, rbp.wrapping_add(8));
             write_reg64(EBP, new_rbp);
         },
-        0xCA | 0xCB => {
-            dbg_log!("far RET not implemented in 64-bit CS");
-            trigger_ud();
+        0xCA => {
+            let imm16 = return_on_pagefault!(read_imm16());
+            retf64(imm16);
         },
+        0xCB => retf64(0),
         0xCF => iretq(),
         0xE8 => {
             let rel = return_on_pagefault!(read_imm32s());
@@ -927,6 +997,20 @@ unsafe fn dispatch_forced64(opcode: i32) {
                 6 => {
                     let value = return_on_pagefault!(load_rm64(modrm));
                     return_on_pagefault!(push64(value));
+                },
+                3 | 5 => {
+                    if modrm >= 0xC0 {
+                        trigger_ud();
+                        return;
+                    }
+                    let addr = return_on_pagefault!(modrm_resolve(modrm));
+                    if extra == 3 {
+                        let ret_cs = *sreg.offset(CS as isize) as u64;
+                        let ret_rip = get_rip();
+                        return_on_pagefault!(push64(ret_cs));
+                        return_on_pagefault!(push64(ret_rip));
+                    }
+                    jmp_far64(addr);
                 },
                 _ => {
                     set_rip(saved_rip);
