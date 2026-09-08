@@ -434,6 +434,45 @@ unsafe fn string64(kind: String64, width: i64) {
         }
     }
 
+    if kind == String64::Movs
+        && rep
+        && dir > 0
+        && rdi & (width as u64 - 1) == 0
+        && rsi & (width as u64 - 1) == 0
+    {
+        let max_bytes = (0x1000 - (rdi & 0xFFF))
+            .min(0x1000 - (rsi & 0xFFF))
+            .min(rcx.saturating_mul(width as u64));
+        let n = max_bytes / width as u64;
+        if n > 0 {
+            *pending_linear64 = rsi;
+            let src = match translate_address_read(rsi as i32) {
+                Ok(p) => p,
+                Err(()) => return,
+            };
+            *pending_linear64 = rdi;
+            match translate_address_write_and_can_skip_dirty(rdi as i32) {
+                Ok((dst, skip)) => {
+                    let nbytes = (n * width as u64) as u32;
+                    if !memory::in_mapped_range(src)
+                        && !memory::in_mapped_range(dst)
+                        && (src & 0xFFF) + nbytes <= 0x1000
+                        && (dst & 0xFFF) + nbytes <= 0x1000
+                    {
+                        if !skip {
+                            jit::jit_dirty_page(Page::page_of(dst));
+                        }
+                        memory::memcpy_no_mmap_or_dirty_check(src, dst, nbytes);
+                        rsi = rsi.wrapping_add(n * width as u64);
+                        rdi = rdi.wrapping_add(n * width as u64);
+                        rcx -= n;
+                    }
+                },
+                Err(()) => return,
+            }
+        }
+    }
+
     let start_rdi_page = page_of(rdi);
     let start_rsi_page = page_of(rsi);
     let mut slow = 0u32;

@@ -76,12 +76,19 @@ pub union reg128 {
 pub const CHECK_MISSED_ENTRY_POINTS: bool = false;
 
 pub const INTERPRETER_ITERATION_LIMIT: u32 = 100_001;
+/// 64-bit CS: stop the interpreter even on forward jumps so inflate-style
+/// loops cannot spend a whole `do_many` inside one `cycle_internal`.
+pub const INTERPRETER_ITERATION_LIMIT_64: u32 = 4_096;
 
 // How often, in milliseconds, to yield to the browser for rendering and running events
 pub const TIME_PER_FRAME: f64 = 1.0;
 /// `performance.now()` can stay frozen for the whole WASM `main_loop` call.
 /// Cap slices so we still return to JS (timers, linux64 timeout) in that case.
 pub const MAX_SLICES_PER_FRAME: u32 = 4;
+pub const MAX_SLICES_PER_FRAME_64: u32 = 1;
+/// JIT trampolines often bump `instruction_counter` by 1 per call. A high
+/// step cap lets one `do_many` run for tens of seconds without returning.
+pub const MAX_64BIT_STEPS: u32 = 16;
 
 pub const FLAG_SUB: i32 = -0x8000_0000;
 pub const FLAG_CARRY: i32 = 1;
@@ -308,6 +315,7 @@ pub const CHECK_TLB_INVARIANTS: bool = false;
 pub const DEBUG: bool = cfg!(debug_assertions);
 
 pub const LOOP_COUNTER: i32 = 100_003;
+pub const LOOP_COUNTER_64: i32 = 8_192;
 
 // should probably be kept in sync with APIC_TIMER_FREQ in apic.js
 pub const TSC_RATE: f64 = 1_000_000.0;
@@ -4170,6 +4178,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
             // Limit the number of iterations, as jumps within the same page are not counted as
             // block boundaries for the interpreter, but only on the next backwards jump
             || (i >= INTERPRETER_ITERATION_LIMIT && start_rip >= end_rip)
+            || (*is_64 && i >= INTERPRETER_ITERATION_LIMIT_64)
         {
             break;
         }
@@ -4258,7 +4267,8 @@ pub unsafe fn main_loop() -> f64 {
             return t;
         }
 
-        if now - start > TIME_PER_FRAME || slices >= MAX_SLICES_PER_FRAME {
+        let max_slices = if *is_64 { MAX_SLICES_PER_FRAME_64 } else { MAX_SLICES_PER_FRAME };
+        if now - start > TIME_PER_FRAME || slices >= max_slices {
             break;
         }
     }
@@ -4269,10 +4279,20 @@ pub unsafe fn main_loop() -> f64 {
 pub unsafe fn do_many_cycles_native() {
     profiler::stat_increment(stat::DO_MANY_CYCLES);
     let initial_instruction_counter = *instruction_counter;
+    let mut steps = 0u32;
     while (*instruction_counter).wrapping_sub(initial_instruction_counter) < LOOP_COUNTER as u32
         && !*in_hlt
     {
+        let before = *instruction_counter;
         cycle_internal();
+        // 64-bit trampolines often count as 1 instruction. Cap turns so a
+        // frozen performance.now() still returns to JS.
+        if *is_64 {
+            steps += 1;
+            if steps >= MAX_64BIT_STEPS || *instruction_counter == before {
+                break;
+            }
+        }
     }
 }
 

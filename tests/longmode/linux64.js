@@ -170,7 +170,8 @@ setTimeout(() => {
     {
         const cpu = emulator.v86.cpu;
         const rip = u64_from_pair(cpu.rip64);
-        finish(1, "linux64: timed out after " + TIMEOUT_MS + "ms rip=" + hex64(rip));
+        finish(1, "linux64: timed out after " + TIMEOUT_MS + "ms rip=" + hex64(rip) +
+            " bytes=[" + dump_at(cpu, rip) + "] " + dump_regs(cpu));
     }
     catch(_e)
     {
