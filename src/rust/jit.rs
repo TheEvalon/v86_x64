@@ -1904,29 +1904,34 @@ fn jit_generate_module(
                 let label = ctx.builder.loop_void();
                 codegen::gen_profiler_stat_increment(ctx.builder, stat::LOOP);
 
-                profiler::stat_increment(stat::COMPILE_WITH_LOOP_SAFETY);
-                codegen::gen_profiler_stat_increment(ctx.builder, stat::LOOP_SAFETY);
-                if unsafe { JIT_USE_LOOP_SAFETY } {
-                    ctx.builder.get_local(&ctx.instruction_counter);
-                    ctx.builder.const_i32(loop_safety_limit(state_flags));
-                    ctx.builder.geu_i32();
-                    if cfg!(feature = "profiler") {
-                        ctx.builder.if_void();
-                        codegen::gen_debug_track_jit_exit(
-                            ctx.builder,
-                            entries.first().copied().unwrap_or(0),
-                        );
-                        ctx.builder.br(exit_label);
-                        ctx.builder.block_end();
-                    }
-                    else {
-                        ctx.builder.br_if(exit_label);
-                    }
-                }
-
                 if entries.len() == 1 {
                     let addr = entries[0];
                     codegen::gen_set_eip_low_bits(ctx.builder, addr as i32 & 0xFFF);
+                }
+
+                // Multi-entry LOOP_SAFETY used to be skipped. Enabling it for
+                // 32-bit exits with a stale EIP and #GP's SeaBIOS (clean-shutdown).
+                // 64-bit still needs it so gzip inflate cannot monopolize main_loop.
+                if entries.len() == 1 || state_flags.is_64() {
+                    profiler::stat_increment(stat::COMPILE_WITH_LOOP_SAFETY);
+                    codegen::gen_profiler_stat_increment(ctx.builder, stat::LOOP_SAFETY);
+                    if unsafe { JIT_USE_LOOP_SAFETY } {
+                        ctx.builder.get_local(&ctx.instruction_counter);
+                        ctx.builder.const_i32(loop_safety_limit(state_flags));
+                        ctx.builder.geu_i32();
+                        if cfg!(feature = "profiler") {
+                            ctx.builder.if_void();
+                            codegen::gen_debug_track_jit_exit(
+                                ctx.builder,
+                                entries.first().copied().unwrap_or(0),
+                            );
+                            ctx.builder.br(exit_label);
+                            ctx.builder.block_end();
+                        }
+                        else {
+                            ctx.builder.br_if(exit_label);
+                        }
+                    }
                 }
 
                 let mut olds = HashMap::new();
