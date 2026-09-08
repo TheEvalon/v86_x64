@@ -83,6 +83,9 @@
                   (i32.sub
                     (get_local $l1)
                     (i32.const 1)))
+                (i32.store
+                  (i32.const 2084)
+                  (i32.const 0))
                 (br_if $L6
                   (get_local $l1))))
             (set_local $l8

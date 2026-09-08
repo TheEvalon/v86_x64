@@ -207,11 +207,17 @@
               (i32.add
                 (get_local $l4)
                 (i32.const 4)))
+            (i32.store
+              (i32.const 2096)
+              (i32.const 0))
             (set_local $l10)
             (set_local $l4
               (i32.add
                 (get_local $l4)
                 (i32.const -4)))
+            (i32.store
+              (i32.const 2096)
+              (i32.const 0))
             (block $B7
               (br_if $B7
                 (i32.and
@@ -250,6 +256,9 @@
               (i32.add
                 (get_local $l4)
                 (i32.const 4)))
+            (i32.store
+              (i32.const 2096)
+              (i32.const 0))
             (br $B0))
           (unreachable)))
       (i32.store

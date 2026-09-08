@@ -196,6 +196,9 @@
               (get_local $l9))
             (set_local $l4
               (get_local $l10))
+            (i32.store
+              (i32.const 2096)
+              (i32.const 0))
             (set_local $l8
               (i32.add
                 (get_local $l8)
@@ -287,6 +290,9 @@
               (i32.add
                 (get_local $l4)
                 (i32.const 4)))
+            (i32.store
+              (i32.const 2096)
+              (i32.const 0))
             (i32.load
               (i32.const 740))
             (i32.add)

@@ -246,6 +246,9 @@
               (get_local $l10))
             (set_local $l4
               (get_local $l11))
+            (i32.store
+              (i32.const 2096)
+              (i32.const 0))
             (i32.store offset=556
               (i32.const 0)
               (get_local $l9))
