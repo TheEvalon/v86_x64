@@ -130,6 +130,8 @@ pub const ESP: i32 = 4;
 pub const EBP: i32 = 5;
 pub const ESI: i32 = 6;
 pub const EDI: i32 = 7;
+pub const R8: i32 = 8;
+pub const R11: i32 = 11;
 
 pub const AX: i32 = 0;
 pub const CX: i32 = 1;
@@ -237,7 +239,13 @@ pub const IA32_PAT: i32 = 0x277;
 pub const IA32_RTIT_CTL: i32 = 0x570;
 pub const MSR_PKG_C2_RESIDENCY: i32 = 0x60D;
 pub const IA32_EFER: i32 = 0xC0000080u32 as i32;
-pub const IA32_KERNEL_GS_BASE: i32 = 0xC0000101u32 as i32;
+pub const MSR_STAR: i32 = 0xC0000081u32 as i32;
+pub const MSR_LSTAR: i32 = 0xC0000082u32 as i32;
+pub const MSR_CSTAR: i32 = 0xC0000083u32 as i32;
+pub const MSR_SFMASK: i32 = 0xC0000084u32 as i32;
+pub const IA32_FS_BASE: i32 = 0xC0000100u32 as i32;
+pub const IA32_GS_BASE: i32 = 0xC0000101u32 as i32;
+pub const IA32_KERNEL_GS_BASE: i32 = 0xC0000102u32 as i32;
 pub const MSR_AMD64_LS_CFG: i32 = 0xC0011020u32 as i32;
 pub const MSR_AMD64_DE_CFG: i32 = 0xC0011029u32 as i32;
 
@@ -3216,6 +3224,76 @@ pub unsafe fn get_seg(segment: i32) -> OrPageFault<i32> {
 
 pub unsafe fn efer_lma() -> bool { *efer & EFER_LMA != 0 }
 pub unsafe fn efer_lme() -> bool { *efer & EFER_LME != 0 }
+pub unsafe fn efer_sce() -> bool { *efer & EFER_SCE != 0 }
+
+pub fn syscall_star_selectors(star: u64) -> (u16, u16, u16, u16) {
+    let kernel_cs = (star >> 32) as u16 & !3;
+    let kernel_ss = kernel_cs.wrapping_add(8);
+    let sysret_cs_base = (star >> 48) as u16;
+    let user_cs = sysret_cs_base.wrapping_add(16) | 3;
+    let user_ss = sysret_cs_base.wrapping_add(8) | 3;
+    (kernel_cs, kernel_ss, user_cs, user_ss)
+}
+
+/// Load CS/SS caches the way SYSCALL/SYSRET do: flat, no GDT lookup.
+pub unsafe fn load_ia32e_cs_ss(cs_sel: i32, ss_sel: i32, new_cpl: u8, long: bool) {
+    let cs_raw = if long {
+        if new_cpl == 0 {
+            0x00AF_9B00_0000_FFFF
+        }
+        else {
+            0x00AF_FB00_0000_FFFF
+        }
+    }
+    else if new_cpl == 0 {
+        0x00CF_9B00_0000_FFFF
+    }
+    else {
+        0x00CF_FB00_0000_FFFF
+    };
+    let ss_raw = if new_cpl == 0 { 0x00CF_9300_0000_FFFF } else { 0x00CF_F300_0000_FFFF };
+    let cs = SegmentDescriptor::of_u64(cs_raw);
+    let ss = SegmentDescriptor::of_u64(ss_raw);
+
+    *sreg.offset(CS as isize) = cs_sel as u16;
+    *segment_is_null.offset(CS as isize) = false;
+    *segment_limits.offset(CS as isize) = cs.effective_limit();
+    *segment_offsets.offset(CS as isize) = 0;
+    *segment_access_bytes.offset(CS as isize) = cs.access_byte();
+    update_cs_from_descriptor(cs);
+
+    *sreg.offset(SS as isize) = ss_sel as u16;
+    *segment_is_null.offset(SS as isize) = false;
+    *segment_limits.offset(SS as isize) = ss.effective_limit();
+    *segment_offsets.offset(SS as isize) = 0;
+    *segment_access_bytes.offset(SS as isize) = ss.access_byte();
+    *stack_size_32 = ss.is_32();
+
+    *cpl = new_cpl;
+    cpl_changed();
+    update_state_flags();
+}
+
+pub unsafe fn set_fs_gs_base_msr(which: i32, value: u64) {
+    if value >> 32 != 0 {
+        dbg_log!("#gp FS/GS base {:x} exceeds 4G", value);
+        trigger_gp(0);
+        return;
+    }
+    if which == FS {
+        *msr_fs_base = value;
+        if efer_lma() {
+            *segment_offsets.offset(FS as isize) = value as i32;
+        }
+    }
+    else {
+        dbg_assert!(which == GS);
+        *msr_gs_base = value;
+        if efer_lma() {
+            *segment_offsets.offset(GS as isize) = value as i32;
+        }
+    }
+}
 
 pub unsafe fn update_efer_lma() {
     let lma = crate::cpu::long_mode::efer_compute_lma(
@@ -5118,6 +5196,13 @@ pub unsafe fn reset_cpu() {
     *prefixes = 0;
     *rex_prefix = 0;
     *efer = 0;
+    *msr_star = 0;
+    *msr_lstar = 0;
+    *msr_cstar = 0;
+    *msr_fmask = 0;
+    *msr_fs_base = 0;
+    *msr_gs_base = 0;
+    *msr_kernel_gs_base = 0;
 
     *last_virt_eip = -1;
 

@@ -459,6 +459,12 @@ pub unsafe fn run_one() {
             0x40..=0x4F => {
                 *rex_prefix = byte as u8;
                 let opcode = return_on_pagefault!(read_imm8());
+                if opcode == 0x0F {
+                    let opcode = return_on_pagefault!(read_imm8());
+                    run_instruction0f_32(opcode);
+                    finish_instruction();
+                    return;
+                }
                 dispatch_opcode(opcode);
                 return;
             },
@@ -509,5 +515,15 @@ mod tests {
         assert_eq!(gate.ist(), 0);
         assert!(gate.is_present());
         assert_eq!(gate.gate_type(), 0b110);
+    }
+
+    #[test]
+    fn syscall_star_selectors_match_amd64() {
+        let star = 0x0010_0008_0000_0000;
+        let (kcs, kss, ucs, uss) = crate::cpu::cpu::syscall_star_selectors(star);
+        assert_eq!(kcs, 0x08);
+        assert_eq!(kss, 0x10);
+        assert_eq!(ucs, 0x23);
+        assert_eq!(uss, 0x1B);
     }
 }

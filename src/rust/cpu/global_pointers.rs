@@ -80,6 +80,13 @@ pub const is_64: *mut bool = 2056 as *mut bool;
 pub const rex_prefix: *mut u8 = 2060 as *mut u8;
 pub const reg_high32: *mut u32 = 2080 as *mut u32; // high halves of RAX–RDI
 pub const reg_r8: *mut u64 = 2112 as *mut u64; // R8–R15
+pub const msr_star: *mut u64 = 2176 as *mut u64;
+pub const msr_lstar: *mut u64 = 2184 as *mut u64;
+pub const msr_cstar: *mut u64 = 2192 as *mut u64;
+pub const msr_fmask: *mut u64 = 2200 as *mut u64;
+pub const msr_fs_base: *mut u64 = 2208 as *mut u64;
+pub const msr_gs_base: *mut u64 = 2216 as *mut u64;
+pub const msr_kernel_gs_base: *mut u64 = 2224 as *mut u64;
 
 pub fn get_reg32_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);

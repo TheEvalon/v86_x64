@@ -177,6 +177,13 @@ export function CPU(bus, wm, stop_idling)
     this.is_64 = view(Int32Array, memory, 2056, 1);
     this.reg_high32 = view(Uint32Array, memory, 2080, 8);
     this.reg_r8 = view(Uint32Array, memory, 2112, 16);
+    this.msr_star = view(Uint32Array, memory, 2176, 2);
+    this.msr_lstar = view(Uint32Array, memory, 2184, 2);
+    this.msr_cstar = view(Uint32Array, memory, 2192, 2);
+    this.msr_fmask = view(Uint32Array, memory, 2200, 2);
+    this.msr_fs_base = view(Uint32Array, memory, 2208, 2);
+    this.msr_gs_base = view(Uint32Array, memory, 2216, 2);
+    this.msr_kernel_gs_base = view(Uint32Array, memory, 2224, 2);
 
     this.fpu_st = view(Int32Array, memory, 1152, 4 * 8);
 
@@ -578,6 +585,13 @@ CPU.prototype.get_state = function()
     state[93] = this.is_64[0];
     state[94] = this.reg_high32;
     state[95] = this.reg_r8;
+    state[96] = this.msr_star;
+    state[97] = this.msr_lstar;
+    state[98] = this.msr_cstar;
+    state[99] = this.msr_fmask;
+    state[100] = this.msr_fs_base;
+    state[101] = this.msr_gs_base;
+    state[102] = this.msr_kernel_gs_base;
 
     return state;
 };
@@ -753,6 +767,13 @@ CPU.prototype.set_state = function(state)
     if(state[93] !== undefined) this.is_64[0] = state[93];
     if(state[94] !== undefined) this.reg_high32.set(state[94]);
     if(state[95] !== undefined) this.reg_r8.set(state[95]);
+    if(state[96] !== undefined) this.msr_star.set(state[96]);
+    if(state[97] !== undefined) this.msr_lstar.set(state[97]);
+    if(state[98] !== undefined) this.msr_cstar.set(state[98]);
+    if(state[99] !== undefined) this.msr_fmask.set(state[99]);
+    if(state[100] !== undefined) this.msr_fs_base.set(state[100]);
+    if(state[101] !== undefined) this.msr_gs_base.set(state[101]);
+    if(state[102] !== undefined) this.msr_kernel_gs_base.set(state[102]);
 
     this.fw_value = state[62];
 
