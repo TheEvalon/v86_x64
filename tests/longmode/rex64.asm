@@ -174,6 +174,33 @@ back64:
     bts rax, 63
     cmp rax, rbx
     jne fail64
+
+    ; MOV CRn is 64-bit in long mode even without REX.W (Linux native_read_cr2).
+    mov rax, 0xffff888000083cb0
+    db 0x0f, 0x22, 0xd0
+    xor eax, eax
+    db 0x0f, 0x20, 0xd0
+    mov rbx, 0xffff888000083cb0
+    cmp rax, rbx
+    jne fail64
+
+    ; __pa() uses ADD r64,imm32 carry: 0x80000000 + 0xffffffff82e88000 -> 0x2e88000, CF=1.
+    mov edx, 0x80000000
+    add rdx, 0xffffffff82e88000
+    jnc fail64
+    mov rax, 0x2e88000
+    cmp rdx, rax
+    jne fail64
+
+    ; LEA must not #GP on a non-canonical offset. Linux FineIBT does
+    ; `lea (%rax,%rdx),%rbx` with hash values that wrap bit 63.
+    mov rax, 0xF000000000000000
+    mov rdx, 0xF000000000000000
+    lea rbx, [rax + rdx]
+    mov rcx, 0xE000000000000000
+    cmp rbx, rcx
+    jne fail64
+
     jmp after_call_target
 
 call_target:

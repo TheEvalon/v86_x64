@@ -128,6 +128,19 @@ high_entry:
     jne fail_pf
     cmp ebx, 0
     jne fail_pf
+    mov rax, [rel saved_cr2]
+    mov rcx, 0xFFFFFFFF90000000
+    cmp rax, rcx
+    jne fail_cr2
+
+    ; Direct-map VA (PML4[273]). Linux copy_bootdata uses __va(boot_params).
+    mov qword [rel saved_cr2], 0
+    mov rax, 0xffff888000083cb0
+    mov rbx, [rax]
+    mov rax, [rel saved_cr2]
+    mov rcx, 0xffff888000083cb0
+    cmp rax, rcx
+    jne fail_cr2
 
     xor eax, eax
     out 0xF4, al
@@ -141,6 +154,8 @@ handler:
 
 pf_handler:
     add rsp, 8
+    db 0x0f, 0x20, 0xd0
+    mov [rel saved_cr2], rax
     add qword [rsp], 3
     mov rax, 0xAABBCCDD
     iretq
@@ -157,6 +172,11 @@ fail_int:
 
 fail_pf:
     mov al, 4
+    out 0xF4, al
+    jmp hang64
+
+fail_cr2:
+    mov al, 5
     out 0xF4, al
     jmp hang64
 hang64:
@@ -190,6 +210,10 @@ idt_end:
 idt_desc_high:
     dw idt_end - idt - 1
     dq idt
+
+align 8
+saved_cr2:
+    dq 0
 
 align 16
     times 4096 db 0

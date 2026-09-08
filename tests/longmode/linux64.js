@@ -232,20 +232,67 @@ function dump_regs(cpu)
         const full = BigInt(cpu.reg32[i] >>> 0) + (BigInt(cpu.reg_high32[i] >>> 0) << 32n);
         parts.push(names[i] + "=" + hex64(full));
     }
+    const rnames = ["r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
+    for(let i = 0; i < 8; i++)
+    {
+        const full = BigInt(cpu.reg_r8[i * 2] >>> 0) + (BigInt(cpu.reg_r8[i * 2 + 1] >>> 0) << 32n);
+        parts.push(rnames[i] + "=" + hex64(full));
+    }
     const efer = u64_from_pair(cpu.efer);
     const cr2 = u64_from_pair(cpu.cr2_64);
     const idtr = u64_from_pair(cpu.idtr_offset64);
     const gdtr = u64_from_pair(cpu.gdtr_offset64);
+    const prev = u64_from_pair(cpu.previous_rip64);
     parts.push("cs=" + hex64(cpu.sreg[1]));
     parts.push("ss=" + hex64(cpu.sreg[2]));
     parts.push("is_64=" + (cpu.is_64[0] | 0));
+    parts.push("is_32=" + (cpu.is_32[0] | 0));
+    parts.push("in_hlt=" + (cpu.in_hlt[0] | 0));
     parts.push("efer=" + hex64(efer));
     parts.push("cr2=" + hex64(cr2));
     parts.push("cr3=" + hex64(cpu.cr[3] >>> 0));
     parts.push("gdtr=" + hex64(gdtr) + "/" + hex64(cpu.gdtr_size[0] >>> 0));
     parts.push("idtr=" + hex64(idtr) + "/" + hex64(cpu.idtr_size[0] >>> 0));
     parts.push("flags=" + hex64(cpu.flags[0] >>> 0));
+    parts.push("prev=" + hex64(prev));
     return parts.join(" ");
+}
+
+function dump_early_pgt(cpu)
+{
+    const cr3 = cpu.cr[3] >>> 0;
+    const pml4_273 = rd64_phys(cpu, cr3 + 273 * 8);
+    const pml4_511 = rd64_phys(cpu, cr3 + 511 * 8);
+    const pml4_0 = rd64_phys(cpu, cr3);
+    const next_early = dump_qword(cpu, 0xffffffff82eca004n);
+    const recursion = dump_qword(cpu, 0xffffffff82eca000n);
+    const page_offset = dump_qword(cpu, 0xffffffff821d25b8n);
+    const pmd_flags = dump_qword(cpu, 0xffffffff8283d0c0n);
+    const r12 = BigInt(cpu.reg_r8[8] >>> 0) + (BigInt(cpu.reg_r8[9] >>> 0) << 32n);
+    const regs_ip = dump_qword(cpu, r12 + 0x80n);
+    const regs_cs = dump_qword(cpu, r12 + 0x88n);
+    const regs_orig = dump_qword(cpu, r12 + 0x78n);
+    const regs_flags = dump_qword(cpu, r12 + 0x90n);
+    const regs_sp = dump_qword(cpu, r12 + 0x98n);
+    let fault_ip = 0n;
+    try
+    {
+        const phys = phys_of_virt(cpu, r12 + 0x80n);
+        if(phys !== null)
+        {
+            fault_ip = rd64_phys(cpu, phys);
+        }
+    }
+    catch(_e) {}
+    return "pml4[0]=" + hex64(pml4_0) +
+        " pml4[273]=" + hex64(pml4_273) +
+        " pml4[511]=" + hex64(pml4_511) +
+        " " + next_early + " " + recursion +
+        " " + page_offset + " " + pmd_flags +
+        " regs=" + hex64(r12) +
+        " " + regs_ip + " " + regs_cs + " " + regs_orig +
+        " " + regs_flags + " " + regs_sp +
+        " fault_bytes=[" + dump_at(cpu, fault_ip) + "]";
 }
 
 function dump_stack(cpu)
@@ -360,7 +407,9 @@ setTimeout(() => {
         finish(1, "linux64: timed out after " + TIMEOUT_MS + "ms rip=" + hex64(rip) +
             " bytes=[" + dump_at(cpu, rip) + "] " + dump_regs(cpu) + " " + dump_stack(cpu) +
             " walk=" + dump_page_walk(cpu, rip) +
-            " cr2walk=" + dump_page_walk(cpu, u64_from_pair(cpu.cr2_64)));
+            " cr2walk=" + dump_page_walk(cpu, u64_from_pair(cpu.cr2_64)) +
+            " " + dump_idt_gate(cpu, 13) + " " + dump_idt_gate(cpu, 14) +
+            " " + dump_early_pgt(cpu));
     }
     catch(_e)
     {
