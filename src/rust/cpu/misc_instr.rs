@@ -131,7 +131,11 @@ pub unsafe fn cmovcc32(condition: bool, value: i32, r: i32) {
 }
 
 pub unsafe fn get_stack_pointer(offset: i32) -> i32 {
-    if *stack_size_32 {
+    if *is_64 {
+        let rsp = read_reg64(ESP).wrapping_add(offset as i64 as u64);
+        return get_seg_ss() + rsp as i32;
+    }
+    else if *stack_size_32 {
         return get_seg_ss() + read_reg32(ESP) + offset;
     }
     else {
@@ -139,12 +143,38 @@ pub unsafe fn get_stack_pointer(offset: i32) -> i32 {
     };
 }
 pub unsafe fn adjust_stack_reg(adjustment: i32) {
-    if *stack_size_32 {
+    if *is_64 {
+        write_reg64(ESP, read_reg64(ESP).wrapping_add(adjustment as i64 as u64));
+    }
+    else if *stack_size_32 {
         write_reg32(ESP, read_reg32(ESP) + adjustment);
     }
     else {
         write_reg16(SP, read_reg16(SP) + adjustment);
     };
+}
+
+unsafe fn stack_addr64(rsp: u64) -> OrPageFault<i32> {
+    if rsp >> 32 != 0 {
+        dbg_log!("#gp stack pointer {:x} exceeds 4G", rsp);
+        trigger_gp(0);
+        return Err(());
+    }
+    Ok(get_seg_ss() + rsp as i32)
+}
+
+pub unsafe fn push64(imm64: u64) -> OrPageFault<()> {
+    let new_rsp = read_reg64(ESP).wrapping_sub(8);
+    safe_write64(stack_addr64(new_rsp)?, imm64)?;
+    write_reg64(ESP, new_rsp);
+    Ok(())
+}
+
+pub unsafe fn pop64() -> OrPageFault<u64> {
+    let rsp = read_reg64(ESP);
+    let result = safe_read64s(stack_addr64(rsp)?)?;
+    write_reg64(ESP, rsp.wrapping_add(8));
+    Ok(result)
 }
 
 pub unsafe fn push16_ss16(imm16: i32) -> OrPageFault<()> {
