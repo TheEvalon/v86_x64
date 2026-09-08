@@ -1,0 +1,68 @@
+#!/usr/bin/env node
+
+import fs from "node:fs";
+import path from "node:path";
+import url from "node:url";
+
+const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
+
+process.on("unhandledRejection", exn => { throw exn; });
+
+const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
+const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+
+const TIMEOUT_MS = 15000;
+const IMAGE = path.join(__dirname, "enter64.bin");
+
+const emulator = new V86({
+    autostart: false,
+    memory_size: 32 * 1024 * 1024,
+    disable_jit: +process.env.DISABLE_JIT,
+    log_level: 0,
+});
+
+let finished = false;
+
+function finish(code, message) {
+    if(finished) {
+        return;
+    }
+    finished = true;
+    if(message) {
+        console.error(message);
+    }
+    process.exit(code);
+}
+
+emulator.add_listener("emulator-loaded", function() {
+    const cpu = emulator.v86.cpu;
+
+    emulator.cpu_exception_hook = function(n) {
+        const names = { 0: "DE", 6: "UD", 13: "GP", 14: "PF" };
+        finish(1, "long mode enter64: unexpected exception #" + n + " (" + (names[n] || "?") + ")");
+        return true;
+    };
+
+    // load_multiboot registers a 0xF4 write that throws "HALT"; overwrite after.
+    cpu.load_multiboot(fs.readFileSync(IMAGE).buffer);
+
+    cpu.io.register_write_consecutive(0xF4, {},
+        function(value) {
+            if(value === 0) {
+                console.log("long mode enter64: pass");
+                finish(0);
+            }
+            else {
+                finish(1, "long mode enter64: guest reported failure (" + value + ")");
+            }
+        },
+        function() {},
+        function() {},
+        function() {});
+
+    emulator.run();
+});
+
+setTimeout(() => {
+    finish(1, "long mode enter64: timed out");
+}, TIMEOUT_MS);

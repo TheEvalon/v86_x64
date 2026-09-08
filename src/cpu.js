@@ -173,6 +173,10 @@ export function CPU(bus, wm, stop_idling)
 
     // registers
     this.reg32 = view(Int32Array, memory, 64, 8);
+    this.efer = view(Uint32Array, memory, 2048, 2);
+    this.is_64 = view(Int32Array, memory, 2056, 1);
+    this.reg_high32 = view(Uint32Array, memory, 2080, 8);
+    this.reg_r8 = view(Uint32Array, memory, 2112, 16);
 
     this.fpu_st = view(Int32Array, memory, 1152, 4 * 8);
 
@@ -570,6 +574,10 @@ CPU.prototype.get_state = function()
     state[89] = this.devices.vmware;
     state[90] = this.devices.parallel0;
     state[91] = this.devices.parallel1;
+    state[92] = this.efer;
+    state[93] = this.is_64[0];
+    state[94] = this.reg_high32;
+    state[95] = this.reg_r8;
 
     return state;
 };
@@ -740,6 +748,11 @@ CPU.prototype.set_state = function(state)
     this.devices.vmware && state[89] && this.devices.vmware.set_state(state[89]);
     this.devices.parallel0 && state[90] && this.devices.parallel0.set_state(state[90]);
     this.devices.parallel1 && state[91] && this.devices.parallel1.set_state(state[91]);
+
+    if(state[92] !== undefined) this.efer.set(state[92]);
+    if(state[93] !== undefined) this.is_64[0] = state[93];
+    if(state[94] !== undefined) this.reg_high32.set(state[94]);
+    if(state[95] !== undefined) this.reg_r8.set(state[95]);
 
     this.fw_value = state[62];
 
@@ -1548,6 +1561,7 @@ CPU.prototype.load_multiboot_option_rom = function(buffer, initrd, cmdline)
             cpu.protected_mode[0] = +true;
             cpu.flags[0] = FLAGS_DEFAULT;
             cpu.is_32[0] = +true;
+            cpu.is_64[0] = 0;
             cpu.stack_size_32[0] = +true;
 
             for(var i = 0; i < 6; i++)
@@ -1994,7 +2008,7 @@ CPU.prototype.debug_get_state = function(where)
     var cpl = this.cpl[0];
     var cs_eip = h(this.sreg[REG_CS], 4) + ":" + h(this.get_real_eip() >>> 0, 8);
     var ss_esp = h(this.sreg[REG_SS], 4) + ":" + h(this.reg32[REG_ES] >>> 0, 8);
-    var op_size = this.is_32[0] ? "32" : "16";
+    var op_size = this.is_64[0] ? "64" : this.is_32[0] ? "32" : "16";
     var if_ = (this.flags[0] & FLAG_INTERRUPT) ? 1 : 0;
 
     var flag_names = {
@@ -2027,6 +2041,7 @@ CPU.prototype.debug_get_state = function(where)
 
     return ("mode=" + mode + "/" + op_size + " paging=" + (+((this.cr[0] & CR0_PG) !== 0)) +
         " pae=" + (+((this.cr[4] & CR4_PAE) !== 0)) +
+        " lma=" + (+((this.efer[0] & (1 << 10)) !== 0)) +
         " iopl=" + iopl + " cpl=" + cpl + " if=" + if_ + " cs:eip=" + cs_eip +
         " cs_off=" + h(this.get_seg_cs() >>> 0, 8) +
         " flgs=" + h(this.get_eflags() >>> 0, 6) + " (" + flag_string + ")" +

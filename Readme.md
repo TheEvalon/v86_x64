@@ -11,7 +11,8 @@ list of emulated hardware:
   - Single stepping (trap flag, debug registers)
   - Some exceptions, especially floating point and SSE
   - Multicore
-  - 64-bit extensions
+  - 64-bit extensions (long-mode entry and a small 64-bit subset are in
+    progress; see [docs/plans/2026-09-08-001-amd64-long-mode-plan.md](docs/plans/2026-09-08-001-amd64-long-mode-plan.md))
 - A floating point unit (FPU). Calculations are done using the Berkeley
   SoftFloat library and therefore should be precise (but slow). Trigonometric
   and log functions are emulated using 64-bit floats and may be less precise.
@@ -78,7 +79,8 @@ list of emulated hardware:
 
 Here's an overview of the operating systems supported in v86:
 
-- Linux works pretty well. 64-bit kernels are not supported.
+- Linux works pretty well. 64-bit kernels are not supported yet (long mode
+  foundation is in progress; `make longmode-test` covers CPU entry).
   - [Buildroot](https://buildroot.org/) can be used to build a minimal image.
     [humphd/browser-vm](https://github.com/humphd/browser-vm) and
     [darin755/browser-buildroot](https://github.com/Darin755/browser-buildroot) have some useful scripts for building one.

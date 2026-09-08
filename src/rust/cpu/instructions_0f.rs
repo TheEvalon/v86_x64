@@ -807,16 +807,23 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
                 trigger_gp(0);
                 return;
             }
+            else if efer_lma() && data & CR4_PAE == 0 {
+                dbg_log!("#GP: clearing CR4.PAE while LMA");
+                trigger_gp(0);
+                return;
+            }
             else {
                 if 0 != (*cr.offset(4) ^ data) & (CR4_PGE | CR4_PSE | CR4_PAE) {
                     full_clear_tlb();
                 }
-                if data & CR4_PAE != 0
+                if !efer_lme()
+                    && data & CR4_PAE != 0
                     && 0 != (*cr.offset(4) ^ data) & (CR4_PGE | CR4_PSE | CR4_SMEP)
                 {
                     load_pdpte(*cr.offset(3));
                 }
                 *cr.offset(4) = data;
+                update_efer_lma();
             }
         },
         _ => {
@@ -1227,6 +1234,16 @@ pub unsafe fn instr_0F30() {
             // Only used in 64 bit mode (by SWAPGS), but set by kvm-unit-test
             dbg_log!("GS Base written");
         },
+        IA32_EFER => {
+            let value = low as u32 as u64 | (high as u32 as u64) << 32;
+            if *cr & CR0_PG != 0 && (value & EFER_LME == 0) != (*efer & EFER_LME == 0) {
+                dbg_log!("#GP: cannot change EFER.LME while paging is enabled");
+                trigger_gp(0);
+                return;
+            }
+            *efer = *efer & EFER_LMA | value & EFER_WRITABLE;
+            update_efer_lma();
+        },
         IA32_PERFEVTSEL0 | IA32_PERFEVTSEL1 => {}, // linux/9legacy
         IA32_PMC0 | IA32_PMC1 => {},               // linux
         IA32_PAT => {},
@@ -1312,6 +1329,10 @@ pub unsafe fn instr_0F32() {
         IA32_MCU_OPT_CTRL => {},   // linux 5.19
         MSR_AMD64_LS_CFG => {},    // linux 5.19
         MSR_AMD64_DE_CFG => {},    // linux 6.1
+        IA32_EFER => {
+            low = *efer as i32;
+            high = (*efer >> 32) as i32;
+        },
         _ => {
             dbg_log!("Unknown msr: {:x}", index);
             dbg_assert!(false);
@@ -3314,8 +3335,23 @@ pub unsafe fn instr_0FA2() {
 
         0x80000000 => {
             // maximum supported extended level
-            eax = 5;
-            // other registers are reserved
+            eax = 0x80000008u32 as i32;
+        },
+
+        0x80000001 => {
+            // AMD64 feature flags (NX + long mode). SYSCALL is omitted until implemented.
+            eax = 0;
+            ebx = 0;
+            ecx = 0;
+            edx = 1 << 20 | 1 << 29; // NX, LM
+        },
+
+        0x80000008 => {
+            // Physical / virtual address size
+            eax = 32 | 48 << 8;
+            ebx = 0;
+            ecx = 0;
+            edx = 0;
         },
 
         0x40000000 => {

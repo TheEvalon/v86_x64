@@ -315,6 +315,12 @@ nasmtests-force-jit: build/v86-debug.wasm
 	$(NASM_TEST_DIR)/gen_fixtures.js
 	$(NASM_TEST_DIR)/run.js --force-jit
 
+longmode-test: build/v86-debug.wasm tests/longmode/enter64.bin
+	./tests/longmode/run.js
+
+tests/longmode/enter64.bin: tests/longmode/enter64.asm
+	nasm -f bin -o $@ $<
+
 jitpagingtests: build/v86-debug.wasm
 	$(MAKE) -C tests/jit-paging test-jit test-jit-smc
 	./tests/jit-paging/run.js
@@ -377,7 +383,7 @@ api-tests: build/v86-debug.wasm
 	#./tests/api/reboot-buildroot.js # https://github.com/copy/v86/issues/636
 	./tests/api/pic.js
 
-all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests
+all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test longmode-test tests expect-tests
 	# Skipping:
 	# - devices-test (hangs)
 
