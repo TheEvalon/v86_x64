@@ -244,7 +244,19 @@ function dump_regs(cpu)
     parts.push("cr3=" + hex64(cpu.cr[3] >>> 0));
     parts.push("gdtr=" + hex64(gdtr) + "/" + hex64(cpu.gdtr_size[0] >>> 0));
     parts.push("idtr=" + hex64(idtr) + "/" + hex64(cpu.idtr_size[0] >>> 0));
+    parts.push("flags=" + hex64(cpu.flags[0] >>> 0));
     return parts.join(" ");
+}
+
+function dump_stack(cpu)
+{
+    const rsp = BigInt(cpu.reg32[4] >>> 0) + (BigInt(cpu.reg_high32[4] >>> 0) << 32n);
+    const stack = [];
+    for(let i = 0; i < 6; i++)
+    {
+        stack.push(dump_qword(cpu, rsp + BigInt(i * 8)));
+    }
+    return "stack=[" + stack.join(" ") + "]";
 }
 
 function finish(code, message)
@@ -319,7 +331,8 @@ emulator.add_listener("emulator-loaded", function()
             " " + dump_idt_gate(cpu, 14) +
             " " + dump_qword(cpu, 0xffffffff829803e8n) +
             " " + dump_qword(cpu, 0xffffffff8283d0c0n) +
-            " " + dump_qword(cpu, 0xffffffff8283d030n));
+            " " + dump_qword(cpu, 0xffffffff8283d030n) +
+            " " + dump_stack(cpu));
         return true;
     };
 });
@@ -345,7 +358,9 @@ setTimeout(() => {
         const cpu = emulator.v86.cpu;
         const rip = u64_from_pair(cpu.rip64);
         finish(1, "linux64: timed out after " + TIMEOUT_MS + "ms rip=" + hex64(rip) +
-            " bytes=[" + dump_at(cpu, rip) + "] " + dump_regs(cpu));
+            " bytes=[" + dump_at(cpu, rip) + "] " + dump_regs(cpu) + " " + dump_stack(cpu) +
+            " walk=" + dump_page_walk(cpu, rip) +
+            " cr2walk=" + dump_page_walk(cpu, u64_from_pair(cpu.cr2_64)));
     }
     catch(_e)
     {
