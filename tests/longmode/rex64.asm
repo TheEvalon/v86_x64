@@ -201,6 +201,11 @@ back64:
     cmp rbx, rcx
     jne fail64
 
+    ; Multi-byte NOP must not #GP on a non-canonical ModRM address.
+    ; Linux FineIBT / kCFI uses `nopl 0x0(%rax,%rax,1)`.
+    mov rax, 0xF000000000000000
+    db 0x0f, 0x1f, 0x44, 0x00, 0x00
+
     jmp after_call_target
 
 call_target:

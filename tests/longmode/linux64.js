@@ -161,16 +161,16 @@ function dump_idt_gate(cpu, vec)
     {
         bytes.push(("0" + cpu.mem8[phys + i].toString(16)).slice(-2));
     }
-    const low = cpu.mem8[phys] | cpu.mem8[phys + 1] << 8 |
-        cpu.mem8[phys + 2] << 16 | cpu.mem8[phys + 3] << 24;
-    const mid = cpu.mem8[phys + 4] | cpu.mem8[phys + 5] << 8 |
-        cpu.mem8[phys + 6] << 16 | cpu.mem8[phys + 7] << 24;
-    const hi = cpu.mem8[phys + 8] | cpu.mem8[phys + 9] << 8 |
-        cpu.mem8[phys + 10] << 16 | cpu.mem8[phys + 11] << 24;
-    const ist = (mid >>> 0) & 7;
+    const low = (cpu.mem8[phys] | cpu.mem8[phys + 1] << 8 |
+        cpu.mem8[phys + 2] << 16 | cpu.mem8[phys + 3] << 24) >>> 0;
+    const mid = (cpu.mem8[phys + 4] | cpu.mem8[phys + 5] << 8 |
+        cpu.mem8[phys + 6] << 16 | cpu.mem8[phys + 7] << 24) >>> 0;
+    const hi = (cpu.mem8[phys + 8] | cpu.mem8[phys + 9] << 8 |
+        cpu.mem8[phys + 10] << 16 | cpu.mem8[phys + 11] << 24) >>> 0;
+    const ist = mid & 7;
     const type = (mid >>> 8) & 0x1F;
     const sel = (low >>> 16) & 0xFFFF;
-    const off = BigInt((low & 0xFFFF) | (mid & 0xFFFF0000)) + (BigInt(hi >>> 0) << 32n);
+    const off = BigInt(((low & 0xFFFF) | (mid & 0xFFFF0000)) >>> 0) + (BigInt(hi) << 32n);
     return "vec" + vec + "=[" + bytes.join(" ") + "] sel=" + hex64(sel) +
         " ist=" + ist + " type=" + type + " off=" + hex64(off);
 }
