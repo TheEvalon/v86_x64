@@ -74,6 +74,13 @@ pub const sse_scratch_register: *mut reg128 = 1136 as *mut reg128;
 
 pub const fpu_st: *mut F80 = 1152 as *mut F80;
 
+// Long-mode CPU state lives below rustc's WASM global-base (4096).
+pub const efer: *mut u64 = 2048 as *mut u64;
+pub const is_64: *mut bool = 2056 as *mut bool;
+pub const rex_prefix: *mut u8 = 2060 as *mut u8;
+pub const reg_high32: *mut u32 = 2080 as *mut u32; // high halves of RAX–RDI
+pub const reg_r8: *mut u64 = 2112 as *mut u64; // R8–R15
+
 pub fn get_reg32_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);
     (unsafe { reg32.offset(r as isize) }) as u32

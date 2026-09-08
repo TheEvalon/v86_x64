@@ -236,9 +236,16 @@ pub const IA32_MISC_ENABLE: i32 = 0x1A0;
 pub const IA32_PAT: i32 = 0x277;
 pub const IA32_RTIT_CTL: i32 = 0x570;
 pub const MSR_PKG_C2_RESIDENCY: i32 = 0x60D;
+pub const IA32_EFER: i32 = 0xC0000080u32 as i32;
 pub const IA32_KERNEL_GS_BASE: i32 = 0xC0000101u32 as i32;
 pub const MSR_AMD64_LS_CFG: i32 = 0xC0011020u32 as i32;
 pub const MSR_AMD64_DE_CFG: i32 = 0xC0011029u32 as i32;
+
+pub const EFER_SCE: u64 = 1 << 0;
+pub const EFER_LME: u64 = 1 << 8;
+pub const EFER_LMA: u64 = 1 << 10;
+pub const EFER_NXE: u64 = 1 << 11;
+pub const EFER_WRITABLE: u64 = EFER_SCE | EFER_LME | EFER_NXE;
 
 pub const IA32_APIC_BASE_BSP: i32 = 1 << 8;
 pub const IA32_APIC_BASE_EXTD: i32 = 1 << 10;
@@ -394,6 +401,7 @@ pub enum SelectorNullOrInvalid {
     OutsideOfTableLimit,
 }
 
+#[derive(Copy, Clone)]
 pub struct SegmentDescriptor {
     pub raw: u64,
 }
@@ -421,6 +429,7 @@ impl SegmentDescriptor {
     pub fn is_conforming_executable(&self) -> bool { self.is_dc() && self.is_executable() }
     pub fn dpl(&self) -> u8 { (self.access_byte() >> 5) & 3 }
     pub fn is_32(&self) -> bool { self.flags() & 4 == 4 }
+    pub fn is_long(&self) -> bool { self.flags() & 2 == 2 }
     pub fn effective_limit(&self) -> u32 {
         if self.flags() & 8 == 8 {
             self.limit() << 12 | 0xFFF
@@ -777,7 +786,7 @@ pub unsafe fn iret(is_16: bool) {
     *sreg.offset(CS as isize) = new_cs as u16;
     dbg_assert!((new_cs & 3) == *cpl as i32);
 
-    update_cs_size(cs_descriptor.is_32());
+    update_cs_from_descriptor(cs_descriptor);
 
     *segment_limits.offset(CS as isize) = cs_descriptor.effective_limit();
     *segment_offsets.offset(CS as isize) = cs_descriptor.base();
@@ -974,7 +983,7 @@ pub unsafe fn call_interrupt_vector(
             *cpl = cs_segment_descriptor.dpl();
             cpl_changed();
 
-            update_cs_size(cs_segment_descriptor.is_32());
+            update_cs_from_descriptor(cs_segment_descriptor);
 
             *flags &= !FLAG_VM & !FLAG_RF;
 
@@ -1072,7 +1081,7 @@ pub unsafe fn call_interrupt_vector(
         *sreg.offset(CS as isize) = (selector as u16) & !3 | *cpl as u16;
         dbg_assert!((*sreg.offset(CS as isize) & 3) == *cpl as u16);
 
-        update_cs_size(cs_segment_descriptor.is_32());
+        update_cs_from_descriptor(cs_segment_descriptor);
 
         *segment_limits.offset(CS as isize) = cs_segment_descriptor.effective_limit();
         *segment_offsets.offset(CS as isize) = cs_segment_descriptor.base();
@@ -1293,7 +1302,7 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
                 *cpl = cs_info.dpl();
                 cpl_changed();
 
-                update_cs_size(cs_info.is_32());
+                update_cs_from_descriptor(cs_info);
 
                 dbg_assert!(new_ss & 3 == cs_info.dpl() as i32);
                 // XXX: Should be checked before side effects
@@ -1378,7 +1387,7 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
             );
             dbg_assert!((new_eip as u32) <= cs_info.effective_limit(), "todo: #gp");
 
-            update_cs_size(cs_info.is_32());
+            update_cs_from_descriptor(cs_info);
 
             *segment_is_null.offset(CS as isize) = false;
             *segment_limits.offset(CS as isize) = cs_info.effective_limit();
@@ -1485,7 +1494,7 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
 
         dbg_assert!((eip as u32) <= info.effective_limit(), "todo: #gp");
 
-        update_cs_size(info.is_32());
+        update_cs_from_descriptor(info);
 
         *segment_is_null.offset(CS as isize) = false;
         *segment_limits.offset(CS as isize) = info.effective_limit();
@@ -1635,7 +1644,7 @@ pub unsafe fn far_return(eip: i32, selector: i32, stack_adjust: i32, is_osize_32
 
     //dbg_assert(*cpl == info.dpl);
 
-    update_cs_size(info.is_32());
+    update_cs_from_descriptor(info);
 
     *segment_is_null.offset(CS as isize) = false;
     *segment_limits.offset(CS as isize) = info.effective_limit();
@@ -1833,7 +1842,7 @@ pub unsafe fn do_task_switch(selector: i32, error_code: Option<i32>, source: Tas
             new_eip as u32 <= new_cs_descriptor.effective_limit(),
             "todo: #gp"
         );
-        update_cs_size(new_cs_descriptor.is_32());
+        update_cs_from_descriptor(new_cs_descriptor);
 
         new_cpl = new_cs_selector.rpl();
     }
@@ -2035,9 +2044,78 @@ pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPage
 // - 2 bits PDPT | 9 bits PD | 9 bits PT | 12 bits offset
 // - 2 bits PDPT | 9 bits PD | 21 bits offset (2MB huge page)
 //
-// Note that PAE entries are 64-bit, and can describe physical addresses over 32
-// bits. However, since we support only 32-bit physical addresses, we require
-// the high half of the entry to be 0.
+// IA-32e (long mode) paging:
+// - 9 bits PML4 | 9 bits PDPT | 9 bits PD | 9 bits PT | 12 bits offset
+// - 2MB pages via PDE.PS (CR4.PSE is ignored)
+//
+// 64-bit entries can describe physical addresses over 32 bits and an NX bit
+// (bit 63). Physical addresses above 32 bits are still unsupported.
+unsafe fn pte64_check_phys32(entry: i64) {
+    dbg_assert!(
+        entry as u64 & 0x000F_FFFF_0000_0000 == 0,
+        "Unsupported: Page table entry larger than 32 bits"
+    );
+}
+
+unsafe fn walk_ia32e_to_pd(
+    addr: i32,
+    for_writing: bool,
+    user: bool,
+    jit: bool,
+    side_effects: bool,
+    allow_user: &mut bool,
+    allow_write: &mut bool,
+) -> OrPageFault<u32> {
+    // Zero-extend the 32-bit linear address; sign-extending i32 would treat
+    // 0x80000000 as the 64-bit higher-half canonical form.
+    let pml4_addr =
+        (*cr.offset(3) as u32 & 0xFFFFF000) + ((((addr as u32 as u64 >> 39) & 0x1FF) as u32) << 3);
+    let pml4e = memory::read64s(pml4_addr);
+    pte64_check_phys32(pml4e);
+    if pml4e as i32 & PAGE_TABLE_PRESENT_MASK == 0 {
+        if side_effects {
+            trigger_pagefault(addr, false, for_writing, user, jit);
+        }
+        return Err(());
+    }
+    *allow_write &= pml4e as i32 & PAGE_TABLE_RW_MASK != 0;
+    *allow_user &= pml4e as i32 & PAGE_TABLE_USER_MASK != 0;
+    if side_effects {
+        let new_pml4e = pml4e as i32 | PAGE_TABLE_ACCESSED_MASK;
+        if new_pml4e != pml4e as i32 {
+            memory::write8(pml4_addr, new_pml4e);
+        }
+    }
+
+    let pdpt_addr = (pml4e as u32 & 0xFFFFF000) + (((addr as u32 >> 30) & 0x1FF) << 3);
+    let pdpte = memory::read64s(pdpt_addr);
+    pte64_check_phys32(pdpte);
+    if pdpte as i32 & PAGE_TABLE_PRESENT_MASK == 0 {
+        if side_effects {
+            trigger_pagefault(addr, false, for_writing, user, jit);
+        }
+        return Err(());
+    }
+    *allow_write &= pdpte as i32 & PAGE_TABLE_RW_MASK != 0;
+    *allow_user &= pdpte as i32 & PAGE_TABLE_USER_MASK != 0;
+    if pdpte as i32 & PAGE_TABLE_PSE_MASK != 0 {
+        dbg_log!("Unsupported: 1GB page");
+        dbg_assert!(false, "Unsupported: 1GB page");
+        if side_effects {
+            trigger_pagefault(addr, true, for_writing, user, jit);
+        }
+        return Err(());
+    }
+    if side_effects {
+        let new_pdpte = pdpte as i32 | PAGE_TABLE_ACCESSED_MASK;
+        if new_pdpte != pdpte as i32 {
+            memory::write8(pdpt_addr, new_pdpte);
+        }
+    }
+
+    Ok((pdpte as u32 & 0xFFFFF000) + (((addr as u32 >> 21) & 0x1FF) << 3))
+}
+
 #[cold]
 pub unsafe fn do_page_walk(
     addr: i32,
@@ -2062,9 +2140,27 @@ pub unsafe fn do_page_walk(
     else {
         profiler::stat_increment(stat::TLB_MISS);
 
-        let pae = cr4 & CR4_PAE != 0;
+        let lma = efer_lma();
+        let pae = cr4 & CR4_PAE != 0 || lma;
+        let mut allow_write_upper = true;
 
-        let (page_dir_addr, page_dir_entry) = if pae {
+        let (page_dir_addr, page_dir_entry) = if lma {
+            let mut allow_write = true;
+            let page_dir_addr = walk_ia32e_to_pd(
+                addr,
+                for_writing,
+                user,
+                jit,
+                side_effects,
+                &mut allow_user,
+                &mut allow_write,
+            )?;
+            allow_write_upper = allow_write;
+            let page_dir_entry = memory::read64s(page_dir_addr);
+            pte64_check_phys32(page_dir_entry);
+            (page_dir_addr, page_dir_entry as i32)
+        }
+        else if pae {
             let pdpt_entry = *reg_pdpte.offset(((addr as u32) >> 30) as isize);
             if pdpt_entry as i32 & PAGE_TABLE_PRESENT_MASK == 0 {
                 if side_effects {
@@ -2076,14 +2172,7 @@ pub unsafe fn do_page_walk(
             let page_dir_addr =
                 (pdpt_entry as u32 & 0xFFFFF000) + ((((addr as u32) >> 21) & 0x1FF) << 3);
             let page_dir_entry = memory::read64s(page_dir_addr);
-            dbg_assert!(
-                page_dir_entry as u64 & 0x7FFF_FFFF_0000_0000 == 0,
-                "Unsupported: Page directory entry larger than 32 bits"
-            );
-            dbg_assert!(
-                page_dir_entry & 0x8000_0000_0000_0000u64 as i64 == 0,
-                "Unsupported: NX bit"
-            );
+            pte64_check_phys32(page_dir_entry);
 
             (page_dir_addr, page_dir_entry as i32)
         }
@@ -2101,10 +2190,10 @@ pub unsafe fn do_page_walk(
         }
 
         let kernel_write_override = !user && 0 == cr0 & CR0_WP;
-        let mut allow_write = page_dir_entry & PAGE_TABLE_RW_MASK != 0;
+        let mut allow_write = allow_write_upper && page_dir_entry & PAGE_TABLE_RW_MASK != 0;
         allow_user &= page_dir_entry & PAGE_TABLE_USER_MASK != 0;
 
-        if 0 != page_dir_entry & PAGE_TABLE_PSE_MASK && 0 != cr4 & CR4_PSE {
+        if 0 != page_dir_entry & PAGE_TABLE_PSE_MASK && (lma || 0 != cr4 & CR4_PSE) {
             // size bit is set
 
             if for_writing && !allow_write && !kernel_write_override || user && !allow_user {
@@ -2137,14 +2226,7 @@ pub unsafe fn do_page_walk(
                 let page_table_addr =
                     (page_dir_entry as u32 & 0xFFFFF000) + (((addr as u32 >> 12) & 0x1FF) << 3);
                 let page_table_entry = memory::read64s(page_table_addr);
-                dbg_assert!(
-                    page_table_entry as u64 & 0x7FFF_FFFF_0000_0000 == 0,
-                    "Unsupported: Page table entry larger than 32 bits"
-                );
-                dbg_assert!(
-                    page_table_entry & 0x8000_0000_0000_0000u64 as i64 == 0,
-                    "Unsupported: NX bit"
-                );
+                pte64_check_phys32(page_table_entry);
 
                 (page_table_addr, page_table_entry as i32)
             }
@@ -2521,6 +2603,12 @@ pub unsafe fn read_imm32s() -> OrPageFault<i32> {
     };
 }
 
+pub unsafe fn read_imm64() -> OrPageFault<u64> {
+    let low = read_imm32s()? as u32 as u64;
+    let high = read_imm32s()? as u32 as u64;
+    Ok(low | high << 32)
+}
+
 pub unsafe fn is_osize_32() -> bool {
     dbg_assert!(!in_jit);
     return *is_32 != (*prefixes & prefix::PREFIX_MASK_OPSIZE == prefix::PREFIX_MASK_OPSIZE);
@@ -2824,6 +2912,24 @@ pub unsafe fn get_seg(segment: i32) -> OrPageFault<i32> {
     return Ok(*segment_offsets.offset(segment as isize));
 }
 
+pub unsafe fn efer_lma() -> bool { *efer & EFER_LMA != 0 }
+pub unsafe fn efer_lme() -> bool { *efer & EFER_LME != 0 }
+
+pub unsafe fn update_efer_lma() {
+    let lma = crate::cpu::long_mode::efer_compute_lma(
+        efer_lme(),
+        *cr & CR0_PG != 0,
+        *cr.offset(4) & CR4_PAE != 0,
+    );
+    if lma {
+        *efer |= EFER_LMA;
+    }
+    else {
+        *efer &= !EFER_LMA;
+        *is_64 = false;
+    }
+}
+
 pub unsafe fn set_cr0(cr0: i32) {
     let old_cr0 = *cr;
 
@@ -2833,6 +2939,11 @@ pub unsafe fn set_cr0(cr0: i32) {
     if (cr0 & (CR0_PE | CR0_PG)) == CR0_PG {
         panic!("cannot load PG without PE");
     }
+    if cr0 & CR0_PG != 0 && efer_lme() && *cr.offset(4) & CR4_PAE == 0 {
+        dbg_log!("#GP: enabling paging with LME requires PAE");
+        trigger_gp(0);
+        return;
+    }
 
     *cr = cr0;
     *cr |= CR0_ET;
@@ -2841,7 +2952,10 @@ pub unsafe fn set_cr0(cr0: i32) {
         full_clear_tlb();
     }
 
-    if *cr.offset(4) & CR4_PAE != 0
+    update_efer_lma();
+
+    if !efer_lma()
+        && *cr.offset(4) & CR4_PAE != 0
         && old_cr0 & (CR0_CD | CR0_NW | CR0_PG) != cr0 & (CR0_CD | CR0_NW | CR0_PG)
     {
         load_pdpte(*cr.offset(3))
@@ -2855,9 +2969,18 @@ pub unsafe fn set_cr3(mut cr3: i32) {
     if false {
         dbg_log!("cr3 <- {:x}", cr3);
     }
-    if *cr.offset(4) & CR4_PAE != 0 {
+    if efer_lma() || efer_lme() {
+        // IA-32e: CR3 is a PML4. Do not interpret it as a 4-entry PAE PDPT.
+        cr3 &= !0xFFF;
+    }
+    else if *cr.offset(4) & CR4_PAE != 0 {
         cr3 &= !0b1111;
-        load_pdpte(cr3);
+        // Guests write a PML4 to CR3 before setting LME (kvm-unit-tests
+        // cstart64.S). Those entries look like illegal PAE PDPTEs, so only
+        // fill the PDPTE cache while legacy PAE paging is actually active.
+        if *cr & CR0_PG != 0 {
+            load_pdpte(cr3);
+        }
     }
     else {
         cr3 &= !0b111111100111;
@@ -2890,6 +3013,27 @@ pub unsafe fn load_pdpte(cr3: i32) {
 pub unsafe fn cpl_changed() { *last_virt_eip = -1 }
 
 pub unsafe fn update_cs_size(new_size: bool) {
+    if *is_64 {
+        after_block_boundary();
+    }
+    *is_64 = false;
+    if *is_32 != new_size {
+        *is_32 = new_size;
+    }
+}
+
+pub unsafe fn update_cs_from_descriptor(info: SegmentDescriptor) {
+    let long = efer_lma() && info.is_long();
+    dbg_assert!(
+        !(long && info.is_32()),
+        "Invalid CS descriptor: L and D both set"
+    );
+    if *is_64 != long {
+        after_block_boundary();
+    }
+    *is_64 = long;
+    // 64-bit CS defaults to 32-bit operand size even though D/B is 0.
+    let new_size = long || info.is_32();
     if *is_32 != new_size {
         *is_32 = new_size;
     }
@@ -3027,6 +3171,18 @@ pub unsafe fn cycle_internal() {
     let mut jit_entry = None;
     let initial_eip = *instruction_pointer;
     let initial_state_flags = *state_flags;
+
+    if *is_64 {
+        *previous_ip = initial_eip;
+        let phys_addr = return_on_pagefault!(get_phys_eip());
+        let initial_instruction_counter = *instruction_counter;
+        jit_run_interpreted(phys_addr);
+        profiler::stat_increment_by(
+            stat::RUN_INTERPRETED_STEPS,
+            (*instruction_counter - initial_instruction_counter) as u64,
+        );
+        return;
+    }
 
     match tlb_code[(initial_eip as u32 >> 12) as usize] {
         None => {},
@@ -3205,11 +3361,16 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
 
         i += 1;
         let start_eip = *instruction_pointer;
-        let opcode = *memory::mem8.offset(phys_addr as isize) as i32;
-        *instruction_pointer += 1;
-        dbg_assert!(*prefixes == 0);
-        run_instruction(opcode | (*is_32 as i32) << 8);
-        dbg_assert!(*prefixes == 0);
+        if *is_64 {
+            crate::cpu::long_mode::run_one();
+        }
+        else {
+            let opcode = *memory::mem8.offset(phys_addr as isize) as i32;
+            *instruction_pointer += 1;
+            dbg_assert!(*prefixes == 0);
+            run_instruction(opcode | (*is_32 as i32) << 8);
+            dbg_assert!(*prefixes == 0);
+        }
 
         if jit_block_boundary
             || Page::page_of(start_eip as u32) != Page::page_of(*instruction_pointer as u32)
@@ -4040,13 +4201,46 @@ pub unsafe fn write_reg16(index: i32, value: i32) {
 }
 
 pub unsafe fn read_reg32(index: i32) -> i32 {
-    dbg_assert!(index >= 0 && index < 8);
-    *reg32.offset(index as isize)
+    dbg_assert!(index >= 0 && index < 16);
+    if index < 8 {
+        *reg32.offset(index as isize)
+    }
+    else {
+        *reg_r8.offset((index - 8) as isize) as i32
+    }
 }
 
 pub unsafe fn write_reg32(index: i32, value: i32) {
-    dbg_assert!(index >= 0 && index < 8);
-    *reg32.offset(index as isize) = value;
+    dbg_assert!(index >= 0 && index < 16);
+    if index < 8 {
+        *reg32.offset(index as isize) = value;
+        *reg_high32.offset(index as isize) = 0;
+    }
+    else {
+        *reg_r8.offset((index - 8) as isize) = value as u32 as u64;
+    }
+}
+
+pub unsafe fn read_reg64(index: i32) -> u64 {
+    dbg_assert!(index >= 0 && index < 16);
+    if index < 8 {
+        *reg32.offset(index as isize) as u32 as u64
+            | (*reg_high32.offset(index as isize) as u64) << 32
+    }
+    else {
+        *reg_r8.offset((index - 8) as isize)
+    }
+}
+
+pub unsafe fn write_reg64(index: i32, value: u64) {
+    dbg_assert!(index >= 0 && index < 16);
+    if index < 8 {
+        *reg32.offset(index as isize) = value as i32;
+        *reg_high32.offset(index as isize) = (value >> 32) as u32;
+    }
+    else {
+        *reg_r8.offset((index - 8) as isize) = value;
+    }
 }
 
 pub unsafe fn read_mmx32s(r: i32) -> i32 { (*fpu_st.offset(r as isize)).mantissa as i32 }
@@ -4566,6 +4760,8 @@ pub unsafe fn reset_cpu() {
         *segment_access_bytes.offset(i) = 0x80 | (0 << 5) | 0x10 | 0x02; // P dpl0 S RW
 
         *reg32.offset(i) = 0;
+        *reg_high32.offset(i) = 0;
+        *reg_r8.offset(i) = 0;
 
         *sreg.offset(i) = 0;
         *dreg.offset(i) = 0;
@@ -4612,8 +4808,11 @@ pub unsafe fn reset_cpu() {
     *cpl = 0;
 
     *is_32 = false;
+    *is_64 = false;
     *stack_size_32 = false;
     *prefixes = 0;
+    *rex_prefix = 0;
+    *efer = 0;
 
     *last_virt_eip = -1;
 
