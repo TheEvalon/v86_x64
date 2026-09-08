@@ -198,6 +198,12 @@ pub unsafe fn instr16_0F01_0_reg(_r: i32) { trigger_ud(); }
 pub unsafe fn instr32_0F01_0_reg(_r: i32) { trigger_ud(); }
 
 unsafe fn sgdt(addr: i32, mask: i32) {
+    if *is_64 {
+        return_on_pagefault!(writable_or_pagefault(addr, 10));
+        safe_write16(addr, *gdtr_size).unwrap();
+        safe_write64(addr + 2, *gdtr_offset as u32 as u64).unwrap();
+        return;
+    }
     return_on_pagefault!(writable_or_pagefault(addr, 6));
     safe_write16(addr, *gdtr_size).unwrap();
     safe_write32(addr + 2, *gdtr_offset & mask).unwrap();
@@ -213,6 +219,12 @@ pub unsafe fn instr16_0F01_1_reg(_r: i32) { trigger_ud(); }
 pub unsafe fn instr32_0F01_1_reg(_r: i32) { trigger_ud(); }
 
 unsafe fn sidt(addr: i32, mask: i32) {
+    if *is_64 {
+        return_on_pagefault!(writable_or_pagefault(addr, 10));
+        safe_write16(addr, *idtr_size).unwrap();
+        safe_write64(addr + 2, *idtr_offset as u32 as u64).unwrap();
+        return;
+    }
     return_on_pagefault!(writable_or_pagefault(addr, 6));
     safe_write16(addr, *idtr_size).unwrap();
     safe_write32(addr + 2, *idtr_offset & mask).unwrap();
@@ -230,6 +242,18 @@ pub unsafe fn instr32_0F01_2_reg(_r: i32) { trigger_ud(); }
 unsafe fn lgdt(addr: i32, mask: i32) {
     if 0 != *cpl {
         trigger_gp(0);
+        return;
+    }
+    if *is_64 {
+        let size = return_on_pagefault!(safe_read16(addr));
+        let offset = return_on_pagefault!(safe_read64s(addr + 2));
+        if offset >> 32 != 0 {
+            dbg_log!("#gp lgdt base {:x} exceeds 4G", offset);
+            trigger_gp(0);
+            return;
+        }
+        *gdtr_size = size;
+        *gdtr_offset = offset as i32;
         return;
     }
     let size = return_on_pagefault!(safe_read16(addr));
@@ -250,6 +274,18 @@ pub unsafe fn instr32_0F01_3_reg(_r: i32) { trigger_ud(); }
 unsafe fn lidt(addr: i32, mask: i32) {
     if 0 != *cpl {
         trigger_gp(0);
+        return;
+    }
+    if *is_64 {
+        let size = return_on_pagefault!(safe_read16(addr));
+        let offset = return_on_pagefault!(safe_read64s(addr + 2));
+        if offset >> 32 != 0 {
+            dbg_log!("#gp lidt base {:x} exceeds 4G", offset);
+            trigger_gp(0);
+            return;
+        }
+        *idtr_size = size;
+        *idtr_offset = offset as i32;
         return;
     }
     let size = return_on_pagefault!(safe_read16(addr));

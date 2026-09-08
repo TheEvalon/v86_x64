@@ -1,15 +1,16 @@
 //! Interpreter path for 64-bit CS (IA-32e, CS.L=1).
 //!
 //! JIT is not used here. Default operand size is 32 bits (existing
-//! interpreter table). REX.W selects a small 64-bit subset.
+//! interpreter table). Near stack ops are forced 64-bit. REX.W selects
+//! 64-bit ALU/MOV plus RIP-relative and other memory operands.
 
 use crate::cpu::cpu::*;
 use crate::cpu::global_pointers::*;
+use crate::cpu::misc_instr::{adjust_stack_reg, pop64, push64};
 use crate::paging::OrPageFault;
 use crate::prefix;
 
 pub const REX_B: u8 = 1 << 0;
-#[allow(dead_code)]
 pub const REX_X: u8 = 1 << 1;
 pub const REX_R: u8 = 1 << 2;
 pub const REX_W: u8 = 1 << 3;
@@ -75,30 +76,27 @@ unsafe fn sub64(a: u64, b: u64) -> u64 {
 
 unsafe fn cmp64(a: u64, b: u64) { let _ = sub64(a, b); }
 
-unsafe fn read_modrm_reg64(modrm: i32) -> OrPageFault<u64> {
+unsafe fn rm64_addr_val(modrm: i32) -> OrPageFault<(Option<i32>, u64)> {
     if modrm < 0xC0 {
-        dbg_log!(
-            "64-bit memory operand not implemented (modrm={:02x})",
-            modrm
-        );
-        trigger_ud();
-        return Err(());
+        let addr = modrm_resolve(modrm)?;
+        Ok((Some(addr), safe_read64s(addr)?))
     }
-    Ok(read_reg64(gpr_rm(modrm)))
+    else {
+        Ok((None, read_reg64(gpr_rm(modrm))))
+    }
 }
 
-unsafe fn write_modrm_reg64(modrm: i32, value: u64) -> OrPageFault<()> {
-    if modrm < 0xC0 {
-        dbg_log!(
-            "64-bit memory operand not implemented (modrm={:02x})",
-            modrm
-        );
-        trigger_ud();
-        return Err(());
+unsafe fn rm64_write(modrm: i32, addr: Option<i32>, value: u64) -> OrPageFault<()> {
+    if let Some(a) = addr {
+        safe_write64(a, value)
     }
-    write_reg64(gpr_rm(modrm), value);
-    Ok(())
+    else {
+        write_reg64(gpr_rm(modrm), value);
+        Ok(())
+    }
 }
+
+unsafe fn load_rm64(modrm: i32) -> OrPageFault<u64> { Ok(rm64_addr_val(modrm)?.1) }
 
 unsafe fn finish_instruction() {
     *prefixes = 0;
@@ -129,7 +127,7 @@ unsafe fn dispatch_rex_w(opcode: i32) {
         0x01 | 0x03 | 0x29 | 0x2B | 0x31 | 0x33 | 0x09 | 0x0B | 0x21 | 0x23 | 0x39 | 0x3B => {
             let modrm = return_on_pagefault!(read_imm8());
             let reg = gpr_reg(modrm);
-            let rm = return_on_pagefault!(read_modrm_reg64(modrm));
+            let (addr, rm) = return_on_pagefault!(rm64_addr_val(modrm));
             let r = read_reg64(reg);
             let (to_reg, result) = match opcode {
                 0x01 => (false, add64(rm, r)),
@@ -185,25 +183,25 @@ unsafe fn dispatch_rex_w(opcode: i32) {
                 write_reg64(reg, result);
             }
             else {
-                let _ = write_modrm_reg64(modrm, result);
+                let _ = rm64_write(modrm, addr, result);
             }
         },
         0x81 | 0x83 => {
             let modrm = return_on_pagefault!(read_imm8());
             let extra = modrm >> 3 & 7;
+            let (addr, dst) = return_on_pagefault!(rm64_addr_val(modrm));
             let imm = if opcode == 0x83 {
                 return_on_pagefault!(read_imm8s()) as i64 as u64
             }
             else {
                 return_on_pagefault!(read_imm32s()) as i64 as u64
             };
-            let dst = return_on_pagefault!(read_modrm_reg64(modrm));
             match extra {
                 0 => {
-                    let _ = write_modrm_reg64(modrm, add64(dst, imm));
+                    let _ = rm64_write(modrm, addr, add64(dst, imm));
                 },
                 5 => {
-                    let _ = write_modrm_reg64(modrm, sub64(dst, imm));
+                    let _ = rm64_write(modrm, addr, sub64(dst, imm));
                 },
                 7 => cmp64(dst, imm),
                 _ => {
@@ -215,12 +213,27 @@ unsafe fn dispatch_rex_w(opcode: i32) {
         },
         0x89 => {
             let modrm = return_on_pagefault!(read_imm8());
-            let _ = write_modrm_reg64(modrm, read_reg64(gpr_reg(modrm)));
+            if modrm < 0xC0 {
+                let addr = return_on_pagefault!(modrm_resolve(modrm));
+                let _ = safe_write64(addr, read_reg64(gpr_reg(modrm)));
+            }
+            else {
+                write_reg64(gpr_rm(modrm), read_reg64(gpr_reg(modrm)));
+            }
         },
         0x8B => {
             let modrm = return_on_pagefault!(read_imm8());
-            let value = return_on_pagefault!(read_modrm_reg64(modrm));
+            let value = return_on_pagefault!(load_rm64(modrm));
             write_reg64(gpr_reg(modrm), value);
+        },
+        0x8D => {
+            let modrm = return_on_pagefault!(read_imm8());
+            if modrm >= 0xC0 {
+                trigger_ud();
+                return;
+            }
+            let addr = return_on_pagefault!(modrm_resolve(modrm));
+            write_reg64(gpr_reg(modrm), addr as u32 as u64);
         },
         0xB8..=0xBF => {
             let imm = return_on_pagefault!(read_imm64());
@@ -232,8 +245,15 @@ unsafe fn dispatch_rex_w(opcode: i32) {
                 trigger_ud();
                 return;
             }
-            let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
-            let _ = write_modrm_reg64(modrm, imm);
+            if modrm < 0xC0 {
+                let addr = return_on_pagefault!(modrm_resolve(modrm));
+                let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+                let _ = safe_write64(addr, imm);
+            }
+            else {
+                let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+                write_reg64(gpr_rm(modrm), imm);
+            }
         },
         _ => {
             dbg_log!("unimplemented REX.W opcode {:02x}", opcode);
@@ -244,7 +264,159 @@ unsafe fn dispatch_rex_w(opcode: i32) {
     finish_instruction();
 }
 
+unsafe fn jump_near64(target: u64) {
+    if target >> 32 != 0 {
+        dbg_log!("#gp 64-bit near target {:x} exceeds 4G", target);
+        trigger_gp(0);
+        return;
+    }
+    *instruction_pointer = get_seg_cs() + target as i32;
+}
+
+unsafe fn dispatch_forced64(opcode: i32) {
+    match opcode {
+        0x50..=0x57 => {
+            return_on_pagefault!(push64(read_reg64(gpr_opcode(opcode))));
+        },
+        0x58..=0x5F => {
+            let r = gpr_opcode(opcode);
+            let value = return_on_pagefault!(pop64());
+            write_reg64(r, value);
+        },
+        0x68 => {
+            let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+            return_on_pagefault!(push64(imm));
+        },
+        0x6A => {
+            let imm = return_on_pagefault!(read_imm8s()) as i64 as u64;
+            return_on_pagefault!(push64(imm));
+        },
+        0x8F => {
+            let modrm = return_on_pagefault!(read_imm8());
+            if modrm >> 3 & 7 != 0 {
+                trigger_ud();
+                return;
+            }
+            if modrm < 0xC0 {
+                let addr = return_on_pagefault!(modrm_resolve(modrm));
+                let value = return_on_pagefault!(pop64());
+                return_on_pagefault!(safe_write64(addr, value));
+            }
+            else {
+                let value = return_on_pagefault!(pop64());
+                write_reg64(gpr_rm(modrm), value);
+            }
+        },
+        0x9C => {
+            if *flags & FLAG_VM != 0 && getiopl() < 3 {
+                trigger_gp(0);
+                return;
+            }
+            return_on_pagefault!(push64((get_eflags() & 0xFCFFFF) as u32 as u64));
+        },
+        0x9D => {
+            if *flags & FLAG_VM != 0 && getiopl() < 3 {
+                trigger_gp(0);
+                return;
+            }
+            let old_eflags = *flags;
+            update_eflags(return_on_pagefault!(pop64()) as i32);
+            if old_eflags & FLAG_INTERRUPT == 0 && *flags & FLAG_INTERRUPT != 0 {
+                handle_irqs();
+            }
+        },
+        0xC2 => {
+            let imm16 = return_on_pagefault!(read_imm16());
+            let ip = return_on_pagefault!(pop64());
+            jump_near64(ip);
+            adjust_stack_reg(imm16);
+        },
+        0xC3 => {
+            let ip = return_on_pagefault!(pop64());
+            jump_near64(ip);
+        },
+        0xC9 => {
+            let rbp = read_reg64(EBP);
+            if rbp >> 32 != 0 {
+                dbg_log!("#gp leave rbp {:x} exceeds 4G", rbp);
+                trigger_gp(0);
+                return;
+            }
+            let new_rbp = return_on_pagefault!(safe_read64s(get_seg_ss() + rbp as i32));
+            write_reg64(ESP, rbp.wrapping_add(8));
+            write_reg64(EBP, new_rbp);
+        },
+        0xCA | 0xCB => {
+            dbg_log!("far RET not implemented in 64-bit CS");
+            trigger_ud();
+        },
+        0xCF => iretq(),
+        0xE8 => {
+            let rel = return_on_pagefault!(read_imm32s());
+            return_on_pagefault!(push64(get_real_eip() as u32 as u64));
+            *instruction_pointer = *instruction_pointer + rel;
+        },
+        0xFF => {
+            let saved_ip = *instruction_pointer;
+            let modrm = return_on_pagefault!(read_imm8());
+            let extra = modrm >> 3 & 7;
+            match extra {
+                2 => {
+                    let target = return_on_pagefault!(load_rm64(modrm));
+                    return_on_pagefault!(push64(get_real_eip() as u32 as u64));
+                    jump_near64(target);
+                },
+                4 => {
+                    let target = return_on_pagefault!(load_rm64(modrm));
+                    jump_near64(target);
+                },
+                6 => {
+                    let value = return_on_pagefault!(load_rm64(modrm));
+                    return_on_pagefault!(push64(value));
+                },
+                _ => {
+                    *instruction_pointer = saved_ip;
+                    run_legacy_opcode(opcode);
+                    return;
+                },
+            }
+        },
+        _ => {
+            trigger_ud();
+        },
+    }
+}
+
+fn opcode_is_forced64(opcode: i32) -> bool {
+    matches!(
+        opcode,
+        0x50..=0x5F
+            | 0x68
+            | 0x6A
+            | 0x8F
+            | 0x9C
+            | 0x9D
+            | 0xC2
+            | 0xC3
+            | 0xC9
+            | 0xCA
+            | 0xCB
+            | 0xCF
+            | 0xE8
+            | 0xFF
+    )
+}
+
 unsafe fn dispatch_opcode(opcode: i32) {
+    if !is_osize_32() {
+        run_legacy_opcode(opcode);
+        return;
+    }
+    if opcode_is_forced64(opcode) {
+        dispatch_forced64(opcode);
+        finish_instruction();
+        return;
+    }
     if rex_w() {
         dispatch_rex_w(opcode);
         return;
@@ -307,7 +479,7 @@ pub unsafe fn run_one() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cpu::cpu::SegmentDescriptor;
+    use crate::cpu::cpu::{IdtGate64, SegmentDescriptor};
 
     #[test]
     fn lma_requires_lme_pae_and_paging() {
@@ -327,5 +499,15 @@ mod tests {
         let compat = SegmentDescriptor::of_u64(0x00CF_9B00_0000_FFFF);
         assert!(!compat.is_long());
         assert!(compat.is_32());
+    }
+
+    #[test]
+    fn idt_gate64_offset_concatenates_halves() {
+        let gate = IdtGate64::of_u64s(0x9ABC_8E00_0008_DEF0, 0x0000_0000_1234_5678);
+        assert_eq!(gate.offset(), 0x1234_5678_9ABC_DEF0);
+        assert_eq!(gate.selector(), 0x0008);
+        assert_eq!(gate.ist(), 0);
+        assert!(gate.is_present());
+        assert_eq!(gate.gate_type(), 0b110);
     }
 }

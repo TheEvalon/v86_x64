@@ -1,5 +1,10 @@
 use crate::cpu::cpu::*;
+use crate::cpu::global_pointers::*;
 use crate::paging::OrPageFault;
+use crate::prefix;
+
+const REX_B: u8 = 1 << 0;
+const REX_X: u8 = 1 << 1;
 
 pub unsafe fn resolve_modrm16(modrm_byte: i32) -> OrPageFault<i32> {
     match modrm_byte & !0o070 {
@@ -130,4 +135,118 @@ pub unsafe fn resolve_modrm32(modrm_byte: i32) -> OrPageFault<i32> {
             std::hint::unreachable_unchecked()
         },
     }
+}
+
+fn default_seg_rm64(rm: i32) -> i32 {
+    if rm == ESP || rm == EBP || rm == 12 || rm == 13 {
+        SS
+    }
+    else {
+        DS
+    }
+}
+
+unsafe fn apply_asize64(ea: u64) -> u64 {
+    if *prefixes & prefix::PREFIX_MASK_ADDRSIZE != 0 {
+        ea as u32 as u64
+    }
+    else {
+        ea
+    }
+}
+
+unsafe fn linear_from_ea64(default_seg: i32, ea: u64, rip_rel: bool) -> OrPageFault<i32> {
+    let base = if rip_rel {
+        let p = *prefixes & prefix::PREFIX_MASK_SEGMENT;
+        if p == FS as u8 + 1 || p == GS as u8 + 1 {
+            get_seg(p as i32 - 1)? as u32 as u64
+        }
+        else {
+            0
+        }
+    }
+    else {
+        get_seg_prefix(default_seg)? as u32 as u64
+    };
+    let linear = base.wrapping_add(ea);
+    if linear >> 32 != 0 {
+        dbg_log!("#gp 64-bit effective address {:x} exceeds 4G", linear);
+        trigger_gp(0);
+        return Err(());
+    }
+    Ok(linear as i32)
+}
+
+/// SIB in 64-bit CS. `mod_has_disp` is true for mod=01/10 (disp follows SIB).
+/// When mod=00 and base=5, a disp32 is consumed here (no base, or R13 if REX.B).
+unsafe fn resolve_sib64(mod_has_disp: bool) -> OrPageFault<(u64, i32)> {
+    let sib_byte = read_imm8()?;
+    let rex = *rex_prefix;
+    let base_low = sib_byte & 7;
+    let index_low = sib_byte >> 3 & 7;
+    let scale = sib_byte >> 6 & 3;
+    let base = base_low | if rex & REX_B != 0 { 8 } else { 0 };
+    let index = index_low | if rex & REX_X != 0 { 8 } else { 0 };
+
+    let (mut ea, seg) = if base_low == 5 && !mod_has_disp {
+        let disp = read_imm32s()? as i64 as u64;
+        if rex & REX_B != 0 {
+            (read_reg64(13).wrapping_add(disp), SS)
+        }
+        else {
+            (disp, DS)
+        }
+    }
+    else {
+        (read_reg64(base), default_seg_rm64(base))
+    };
+
+    if index_low != 4 || rex & REX_X != 0 {
+        ea = ea.wrapping_add(read_reg64(index) << scale);
+    }
+    Ok((ea, seg))
+}
+
+/// 64-bit addressing: REX.B/X, SIB, RIP-relative (`mod=00, rm=101` without REX.B).
+/// `67h` truncates the effective address to 32 bits. Linear addresses above 4G #GP.
+pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<i32> {
+    dbg_assert!(modrm_byte < 0xC0);
+    let rex = *rex_prefix;
+    let rm_low = modrm_byte & 7;
+    let modb = modrm_byte >> 6;
+    let rm = rm_low | (rex & REX_B != 0) as i32 * 8;
+
+    let (ea, seg, rip_rel) = if rm_low == 4 {
+        let (mut ea, seg) = resolve_sib64(modb != 0)?;
+        if modb == 1 {
+            ea = ea.wrapping_add(read_imm8s()? as i64 as u64);
+        }
+        else if modb == 2 {
+            ea = ea.wrapping_add(read_imm32s()? as i64 as u64);
+        }
+        (ea, seg, false)
+    }
+    else if rm_low == 5 && modb == 0 {
+        let disp = read_imm32s()? as i64 as u64;
+        if rex & REX_B != 0 {
+            (read_reg64(13).wrapping_add(disp), SS, false)
+        }
+        else {
+            // RIP of the next instruction. Immediates after the displacement are
+            // not included (U6 guests use RIP-rel without a trailing immediate).
+            ((get_real_eip() as u32 as u64).wrapping_add(disp), DS, true)
+        }
+    }
+    else {
+        let mut ea = read_reg64(rm);
+        if modb == 1 {
+            ea = ea.wrapping_add(read_imm8s()? as i64 as u64);
+        }
+        else if modb == 2 {
+            ea = ea.wrapping_add(read_imm32s()? as i64 as u64);
+        }
+        (ea, default_seg_rm64(rm), false)
+    };
+
+    linear_from_ea64(seg, apply_asize64(ea), rip_rel)
 }
