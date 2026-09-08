@@ -13,7 +13,7 @@ use crate::cpu::misc_instr::{
     adjust_stack_reg, getcf, getzf, pop64, push64, test_b, test_be, test_l, test_le, test_o,
     test_p, test_s, test_z,
 };
-use crate::cpu::modrm::resolve_modrm64;
+use crate::cpu::modrm::{resolve_lea64, resolve_modrm64};
 use crate::jit;
 use crate::page::Page;
 use crate::paging::OrPageFault;
@@ -791,7 +791,7 @@ unsafe fn dispatch_rex_w(opcode: i32) {
                 trigger_ud();
                 return;
             }
-            let addr = return_on_pagefault!(resolve_modrm64(modrm));
+            let addr = return_on_pagefault!(resolve_lea64(modrm));
             write_reg64(gpr_reg(modrm), addr);
         },
         0xB8..=0xBF => {

@@ -252,16 +252,15 @@ pub fn trailing_imm_after_modrm(opcode: u32, is_0f: bool, modrm_byte: i32) -> u3
     }
 }
 
-/// 64-bit addressing: REX.B/X, SIB, RIP-relative (`mod=00, rm=101` without REX.B).
-/// `67h` truncates the effective address to 32 bits. Non-canonical linear addresses #GP.
-pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
+/// Offset from ModRM/SIB/disp. Does not add FS/GS or check canonical form.
+unsafe fn modrm_ea64(modrm_byte: i32) -> OrPageFault<(u64, i32, bool)> {
     dbg_assert!(modrm_byte < 0xC0);
     let rex = *rex_prefix;
     let rm_low = modrm_byte & 7;
     let modb = modrm_byte >> 6;
     let rm = rm_low | (rex & REX_B != 0) as i32 * 8;
 
-    let (ea, seg, rip_rel) = if rm_low == 4 {
+    Ok(if rm_low == 4 {
         let (mut ea, seg) = resolve_sib64(modb != 0)?;
         if modb == 1 {
             ea = ea.wrapping_add(read_imm8s()? as i64 as u64);
@@ -294,8 +293,20 @@ pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
             ea = ea.wrapping_add(read_imm32s()? as i64 as u64);
         }
         (ea, default_seg_rm64(rm), false)
-    };
+    })
+}
 
+/// LEA: wrapping offset only. Non-canonical sums are stored, not #GP
+/// (Linux FineIBT mixes hash values with `lea (%rax,%rdx),%rbx`).
+pub unsafe fn resolve_lea64(modrm_byte: i32) -> OrPageFault<u64> {
+    let (ea, _, _) = modrm_ea64(modrm_byte)?;
+    Ok(apply_asize64(ea))
+}
+
+/// 64-bit addressing: REX.B/X, SIB, RIP-relative (`mod=00, rm=101` without REX.B).
+/// `67h` truncates the effective address to 32 bits. Non-canonical linear addresses #GP.
+pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
+    let (ea, seg, rip_rel) = modrm_ea64(modrm_byte)?;
     linear_from_ea64(seg, apply_asize64(ea), rip_rel)
 }
 
