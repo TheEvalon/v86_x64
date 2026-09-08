@@ -927,8 +927,7 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
         3 => set_cr3(data),
         4 => {
             dbg_log!("cr4 <- {:x}", data);
-            if 0 != data as u32 & ((1 << 12 | 1 << 15 | 1 << 19) as u32 | 0xFFC00000)
-            {
+            if 0 != data as u32 & ((1 << 12 | 1 << 15 | 1 << 19) as u32 | 0xFFC00000) {
                 dbg_log!("trigger_gp: Invalid cr4 bit");
                 trigger_gp(0);
                 return;
