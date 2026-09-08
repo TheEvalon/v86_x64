@@ -156,23 +156,36 @@ unsafe fn apply_asize64(ea: u64) -> u64 {
 }
 
 unsafe fn linear_from_ea64(default_seg: i32, ea: u64, rip_rel: bool) -> OrPageFault<u64> {
-    let base = if rip_rel {
-        let p = *prefixes & prefix::PREFIX_MASK_SEGMENT;
-        if p == FS as u8 + 1 || p == GS as u8 + 1 {
-            get_seg(p as i32 - 1)? as u32 as u64
-        }
-        else {
-            0
-        }
+    let p = *prefixes & prefix::PREFIX_MASK_SEGMENT;
+    let base = if p == prefix::SEG_PREFIX_ZERO {
+        0
+    }
+    else if p != 0 {
+        fsgs_base64(p as i32 - 1)
+    }
+    else if rip_rel {
+        0
     }
     else {
-        get_seg_prefix(default_seg)? as u32 as u64
+        fsgs_base64(default_seg)
     };
     let linear = base.wrapping_add(ea);
     if gp_if_noncanonical(linear) {
         return Err(());
     }
     Ok(linear)
+}
+
+unsafe fn fsgs_base64(seg: i32) -> u64 {
+    if seg == FS {
+        *msr_fs_base
+    }
+    else if seg == GS {
+        *msr_gs_base
+    }
+    else {
+        0
+    }
 }
 
 /// SIB in 64-bit CS. `mod_has_disp` is true for mod=01/10 (disp follows SIB).

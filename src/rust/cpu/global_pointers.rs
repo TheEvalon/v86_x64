@@ -90,6 +90,13 @@ pub const msr_kernel_gs_base: *mut u64 = 2224 as *mut u64;
 pub const rip: *mut u64 = 2232 as *mut u64;
 pub const previous_rip: *mut u64 = 2240 as *mut u64;
 pub const last_virt_rip: *mut u64 = 2248 as *mut u64;
+pub const gdtr_offset64: *mut u64 = 2256 as *mut u64;
+pub const idtr_offset64: *mut u64 = 2264 as *mut u64;
+/// Full linear address of the current 64-bit memory operand. `translate_address`
+/// reconstructs higher-half VAs from the truncated i32 passed through legacy
+/// safe_read/write helpers.
+pub const pending_linear64: *mut u64 = 2272 as *mut u64;
+pub const cr2_64: *mut u64 = 2280 as *mut u64;
 
 pub fn get_reg32_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);

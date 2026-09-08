@@ -268,7 +268,7 @@ function gen_instruction_body_after_fixed_g(encoding, size)
 
             return [].concat(
                 instruction_prefix,
-                gen_call(instruction_name, ["modrm_byte & 7", "modrm_byte >> 3 & 7"]),
+                gen_call(instruction_name, ["modrm_rm(modrm_byte)", "modrm_reg(modrm_byte)"]),
                 instruction_postfix
             );
         }
@@ -286,12 +286,12 @@ function gen_instruction_body_after_fixed_g(encoding, size)
                 mem_args = ["match modrm_resolve(modrm_byte) { Ok(a) => a, Err(()) => return }"];
             }
 
-            const reg_args = ["modrm_byte & 7"];
+            const reg_args = ["modrm_rm(modrm_byte)"];
 
             if(encoding.fixed_g === undefined)
             {
-                mem_args.push("modrm_byte >> 3 & 7");
-                reg_args.push("modrm_byte >> 3 & 7");
+                mem_args.push("modrm_reg(modrm_byte)");
+                reg_args.push("modrm_reg(modrm_byte)");
             }
 
             if(imm_read)
@@ -412,7 +412,7 @@ function gen_table()
         const code = [
             "#![cfg_attr(rustfmt, rustfmt_skip)]",
 
-            "use crate::cpu::cpu::{after_block_boundary, modrm_resolve};",
+            "use crate::cpu::cpu::{after_block_boundary, modrm_resolve, modrm_reg, modrm_rm};",
             "use crate::cpu::cpu::{read_imm8, read_imm8s, read_imm16, read_imm32s, read_moffs};",
             "use crate::cpu::cpu::{task_switch_test, trigger_ud};",
             "use crate::cpu::instructions;",
@@ -476,7 +476,7 @@ function gen_table()
         const code = [
             "#![cfg_attr(rustfmt, rustfmt_skip)]",
 
-            "use crate::cpu::cpu::{after_block_boundary, modrm_resolve};",
+            "use crate::cpu::cpu::{after_block_boundary, modrm_resolve, modrm_reg, modrm_rm};",
             "use crate::cpu::cpu::{read_imm8, read_imm16, read_imm32s};",
             "use crate::cpu::cpu::{task_switch_test, task_switch_test_mmx, trigger_ud};",
             "use crate::cpu::instructions_0f;",

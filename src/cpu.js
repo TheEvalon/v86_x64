@@ -188,6 +188,9 @@ export function CPU(bus, wm, stop_idling)
     this.rip64 = view(Uint32Array, memory, 2232, 2);
     this.previous_rip64 = view(Uint32Array, memory, 2240, 2);
     this.last_virt_rip64 = view(Uint32Array, memory, 2248, 2);
+    this.gdtr_offset64 = view(Uint32Array, memory, 2256, 2);
+    this.idtr_offset64 = view(Uint32Array, memory, 2264, 2);
+    this.cr2_64 = view(Uint32Array, memory, 2280, 2);
 
     this.fpu_st = view(Int32Array, memory, 1152, 4 * 8);
 
@@ -599,6 +602,9 @@ CPU.prototype.get_state = function()
     state[103] = this.rip64;
     state[104] = this.previous_rip64;
     state[105] = this.last_virt_rip64;
+    state[106] = this.gdtr_offset64;
+    state[107] = this.idtr_offset64;
+    state[108] = this.cr2_64;
 
     return state;
 };
@@ -784,6 +790,9 @@ CPU.prototype.set_state = function(state)
     if(state[103] !== undefined) this.rip64.set(state[103]);
     if(state[104] !== undefined) this.previous_rip64.set(state[104]);
     if(state[105] !== undefined) this.last_virt_rip64.set(state[105]);
+    if(state[106] !== undefined) this.gdtr_offset64.set(state[106]);
+    if(state[107] !== undefined) this.idtr_offset64.set(state[107]);
+    if(state[108] !== undefined) this.cr2_64.set(state[108]);
 
     this.fw_value = state[62];
 

@@ -121,7 +121,7 @@ pub fn opcode_needs_long_trampoline(
     if long_mode::opcode_is_forced64(opcode as i32) {
         return true;
     }
-    if rex & 0x0F != 0 {
+    if rex != 0 {
         return true;
     }
     if matches!(opcode, 0xA0..=0xA3) {
@@ -243,14 +243,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trampoline_rex_w_but_not_empty_rex() {
+    fn trampoline_any_rex() {
         assert!(opcode_needs_long_trampoline(
             long_mode::REX_W,
             0x01,
             0xC0,
             false
         ));
-        assert!(!opcode_needs_long_trampoline(0x40, 0x33, 0xC0, false));
+        assert!(opcode_needs_long_trampoline(0x40, 0x33, 0xC0, false));
     }
 
     #[test]

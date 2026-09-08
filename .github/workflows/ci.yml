@@ -93,6 +93,18 @@ jobs:
       - name: Run longmode-test
         run: make longmode-test
 
+      - name: Download linux64 kernel
+        run: |
+          mkdir -p images
+          if [ ! -f images/vmlinuz-x86_64 ]; then
+            curl -fL --retry 3 -o images/vmlinuz-x86_64 \
+              https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/netboot/vmlinuz-virt
+          fi
+
+      - name: Run linux64-test
+        run: make linux64-test
+        timeout-minutes: 20
+
       - name: Fetch image cache
         uses: actions/cache@v5
         id: cache-images
