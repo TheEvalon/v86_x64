@@ -155,7 +155,7 @@ unsafe fn apply_asize64(ea: u64) -> u64 {
     }
 }
 
-unsafe fn linear_from_ea64(default_seg: i32, ea: u64, rip_rel: bool) -> OrPageFault<i32> {
+unsafe fn linear_from_ea64(default_seg: i32, ea: u64, rip_rel: bool) -> OrPageFault<u64> {
     let base = if rip_rel {
         let p = *prefixes & prefix::PREFIX_MASK_SEGMENT;
         if p == FS as u8 + 1 || p == GS as u8 + 1 {
@@ -169,12 +169,10 @@ unsafe fn linear_from_ea64(default_seg: i32, ea: u64, rip_rel: bool) -> OrPageFa
         get_seg_prefix(default_seg)? as u32 as u64
     };
     let linear = base.wrapping_add(ea);
-    if linear >> 32 != 0 {
-        dbg_log!("#gp 64-bit effective address {:x} exceeds 4G", linear);
-        trigger_gp(0);
+    if gp_if_noncanonical(linear) {
         return Err(());
     }
-    Ok(linear as i32)
+    Ok(linear)
 }
 
 /// SIB in 64-bit CS. `mod_has_disp` is true for mod=01/10 (disp follows SIB).
@@ -208,8 +206,8 @@ unsafe fn resolve_sib64(mod_has_disp: bool) -> OrPageFault<(u64, i32)> {
 }
 
 /// 64-bit addressing: REX.B/X, SIB, RIP-relative (`mod=00, rm=101` without REX.B).
-/// `67h` truncates the effective address to 32 bits. Linear addresses above 4G #GP.
-pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<i32> {
+/// `67h` truncates the effective address to 32 bits. Non-canonical linear addresses #GP.
+pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
     dbg_assert!(modrm_byte < 0xC0);
     let rex = *rex_prefix;
     let rm_low = modrm_byte & 7;
@@ -234,7 +232,7 @@ pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<i32> {
         else {
             // RIP of the next instruction. Immediates after the displacement are
             // not included (U6 guests use RIP-rel without a trailing immediate).
-            ((get_real_eip() as u32 as u64).wrapping_add(disp), DS, true)
+            ((get_rip()).wrapping_add(disp), DS, true)
         }
     }
     else {

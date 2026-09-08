@@ -4,8 +4,8 @@ following list is roughtly sorted from most interesting/useful to least.
 - [nasm](nasm/): Small unit tests written in assembly, which are run using gdb
   on the host.
 - [longmode](longmode/): Enters IA-32e long mode from a multiboot payload and
-  checks a 64-bit ADD, stack/RIP-relative ops, a 16-byte IDT, and
-  SYSCALL/SYSRET/SWAPGS (`make longmode-test`).
+  checks a 64-bit ADD, stack/RIP-relative ops, a 16-byte IDT,
+  SYSCALL/SYSRET/SWAPGS, and a canonical higher-half RIP (`make longmode-test`).
 - [qemu](qemu/): Based on tests from qemu. Builds a Linux binary, which tests
   many CPU features, which are then compared to a run on qemu.
 - [kvm-unit-test](kvm-unit-test/): Based on tests from the KVM project, tests

@@ -184,6 +184,9 @@ export function CPU(bus, wm, stop_idling)
     this.msr_fs_base = view(Uint32Array, memory, 2208, 2);
     this.msr_gs_base = view(Uint32Array, memory, 2216, 2);
     this.msr_kernel_gs_base = view(Uint32Array, memory, 2224, 2);
+    this.rip64 = view(Uint32Array, memory, 2232, 2);
+    this.previous_rip64 = view(Uint32Array, memory, 2240, 2);
+    this.last_virt_rip64 = view(Uint32Array, memory, 2248, 2);
 
     this.fpu_st = view(Int32Array, memory, 1152, 4 * 8);
 
@@ -592,6 +595,9 @@ CPU.prototype.get_state = function()
     state[100] = this.msr_fs_base;
     state[101] = this.msr_gs_base;
     state[102] = this.msr_kernel_gs_base;
+    state[103] = this.rip64;
+    state[104] = this.previous_rip64;
+    state[105] = this.last_virt_rip64;
 
     return state;
 };
@@ -774,6 +780,9 @@ CPU.prototype.set_state = function(state)
     if(state[100] !== undefined) this.msr_fs_base.set(state[100]);
     if(state[101] !== undefined) this.msr_gs_base.set(state[101]);
     if(state[102] !== undefined) this.msr_kernel_gs_base.set(state[102]);
+    if(state[103] !== undefined) this.rip64.set(state[103]);
+    if(state[104] !== undefined) this.previous_rip64.set(state[104]);
+    if(state[105] !== undefined) this.last_virt_rip64.set(state[105]);
 
     this.fw_value = state[62];
 
