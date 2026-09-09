@@ -1,4 +1,4 @@
-; Multiboot payload: 67h truncates RSI/RDI/RCX for string ops and LOOP.
+; Multiboot payload: 67h truncates RSI/RDI/RCX for string ops and LOOP; JRCXZ uses full RCX.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -132,6 +132,8 @@ start64:
     a32 jecxz jecxz_ok
     jmp fail_jecxz
 jecxz_ok:
+    ; JRCXZ must not take this RCX. 32-bit JECXZ would (ECX=0).
+    jrcxz fail_jrcxz
 
     xor eax, eax
     out 0xF4, al
@@ -165,6 +167,9 @@ fail_loop_rcx:
     jmp fail_out
 fail_jecxz:
     mov al, 10
+    jmp fail_out
+fail_jrcxz:
+    mov al, 11
     jmp fail_out
 
 fail_out:
