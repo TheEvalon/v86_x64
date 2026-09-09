@@ -99,6 +99,7 @@ start64:
 en_ok:
 
     ; MMIO: APIC version register at 0xFEE00030 is 0x50014.
+    ; Identity map: PDPT[3], PD[(0xFEE00000 >> 21) & 0x1FF] = PD[0x1F7].
     mov rsi, 0xFEE00030
     mov eax, [rsi]
     cmp eax, 0x50014
@@ -167,9 +168,9 @@ pd:
 
 align 4096
 pd_apic:
-    times 0x1F0 dq 0
+    times 0x1F7 dq 0
     dq 0x00000000FEE001E7
-    times (512 - 0x1F0 - 1) dq 0
+    times (512 - 0x1F7 - 1) dq 0
 
 align 16
     times 4096 db 0

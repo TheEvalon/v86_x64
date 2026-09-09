@@ -1366,7 +1366,7 @@ pub unsafe fn instr_0F30() {
                 "Changing APIC address not supported"
             );
             dbg_assert!(low & IA32_APIC_BASE_EXTD == 0, "x2apic not supported");
-            *apic_enabled = low & IA32_APIC_BASE_EN == IA32_APIC_BASE_EN
+            *apic_enabled = (low & IA32_APIC_BASE_EN) == IA32_APIC_BASE_EN
         },
         IA32_TIME_STAMP_COUNTER => set_tsc(low as u32, high as u32),
         IA32_BIOS_UPDT_TRIG => {}, // windows xp
