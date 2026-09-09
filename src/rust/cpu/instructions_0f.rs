@@ -1430,6 +1430,7 @@ pub unsafe fn instr_0F30() {
         MSR_AMD64_LS_CFG => {},    // linux 5.19
         MSR_AMD64_DE_CFG => {},    // linux 6.1
         IA32_TSC_AUX => *msr_tsc_aux = (low as u32) as u64,
+        _ if msr_is_noop_allowlisted(index) => {},
         _ => {
             dbg_log!("Unknown msr: {:x}", index);
             trigger_gp(0);
@@ -1542,6 +1543,7 @@ pub unsafe fn instr_0F32() {
             low = *msr_kernel_gs_base as i32;
             high = (*msr_kernel_gs_base >> 32) as i32;
         },
+        _ if msr_is_noop_allowlisted(index) => {},
         _ => {
             dbg_log!("Unknown msr: {:x}", index);
             trigger_gp(0);
