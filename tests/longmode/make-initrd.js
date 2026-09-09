@@ -59,7 +59,7 @@ function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
     // succeeds if a later syscall fails. Extra getpid/gettid/uname/brk/mmap/
-    // arch_prctl/clock_gettime/gettimeofday/writev/getcwd/munmap writes are diagnostic only.
+    // arch_prctl/clock_gettime/gettimeofday/writev/getcwd/nanosleep/munmap writes are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
@@ -72,9 +72,10 @@ function make_static_init_elf(message)
         Buffer.from("linux64-init: gettimeofday\n", "ascii"),
         Buffer.from("linux64-init: writev\n", "ascii"),
         Buffer.from("linux64-init: getcwd\n", "ascii"),
+        Buffer.from("linux64-init: nanosleep\n", "ascii"),
         Buffer.from("linux64-init: munmap\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_GETCWD = 10, MSG_MUNMAP = 11;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_GETCWD = 10, MSG_NANOSLEEP = 11, MSG_MUNMAP = 12;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
@@ -303,7 +304,19 @@ function make_static_init_elf(message)
     write_str(MSG_GETCWD);
     labels.skip_getcwd = size;
 
-    // 11. munmap(map, 4096) (rax=11). rbx still holds the mmap address.
+    // 11. nanosleep({0,0}, NULL) (rax=35). Reuses the clock_gettime timespec
+    //     at map+16. A zero request must return 0; getcwd failure still runs it.
+    emit([0x48, 0xC7, 0x43, 0x10, 0x00, 0x00, 0x00, 0x00]); // mov qword [rbx+16], 0
+    emit([0x48, 0xC7, 0x43, 0x18, 0x00, 0x00, 0x00, 0x00]); // mov qword [rbx+24], 0
+    mov_imm(0, 35);
+    emit([0x48, 0x8D, 0x7B, 0x10]); // lea rdi, [rbx+16]
+    emit([0x31, 0xF6]);             // xor esi, esi (rem NULL)
+    syscall();
+    is_err_jae32("skip_nanosleep");
+    write_str(MSG_NANOSLEEP);
+    labels.skip_nanosleep = size;
+
+    // 12. munmap(map, 4096) (rax=11). rbx still holds the mmap address.
     mov_imm(0, 11);
     emit([0x48, 0x89, 0xDF]); // mov rdi, rbx
     mov_imm(6, 4096);         // mov rsi, 4096
@@ -313,7 +326,7 @@ function make_static_init_elf(message)
     labels.skip_munmap = size;
     labels.skip_mmap = size;
 
-    // 12. exit(0)
+    // 13. exit(0)
     mov_imm(0, 60);
     emit([0x48, 0x31, 0xFF]); // xor rdi, rdi
     syscall();
