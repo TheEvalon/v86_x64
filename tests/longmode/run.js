@@ -47,6 +47,7 @@ const emulator = new V86({
     memory_size: 32 * 1024 * 1024,
     disable_jit: +process.env.DISABLE_JIT,
     sync_jit: name === "jit64",
+    apic: name === "lapic64",
     log_level: 0,
 });
 

@@ -154,6 +154,8 @@ export function CPU(bus, wm, stop_idling)
     this.apic_enabled = view(Uint8Array, memory, 548, 1);
     // configured when the emulator starts (changes bios initialisation)
     this.acpi_enabled = view(Uint8Array, memory, 552, 1);
+    // CPUID.1 EDX.APIC; defaults to settings.acpi unless settings.apic is set
+    this.lapic_present = view(Uint8Array, memory, 553, 1);
 
     // managed in io.js
     /** @const */ this.memory_map_read8 = [];
@@ -1073,6 +1075,7 @@ CPU.prototype.init = function(settings, device_bus)
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
     this.acpi_enabled[0] = +settings.acpi;
+    this.lapic_present[0] = +(settings.apic !== undefined ? settings.apic : settings.acpi);
 
     this.reset_cpu();
 

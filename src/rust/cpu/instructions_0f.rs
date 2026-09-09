@@ -3520,8 +3520,12 @@ pub unsafe fn instr_0FA2() {
             }; // hypervisor
             edx = (if true /* have fpu */ { 1 } else {  0 }) |      // fpu
                     vme | 1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 |  // vme, pse, tsc, msr, pae
-                    1 << 8 | 1 << 9 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, apic, sep, pge, cmov
+                    1 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, sep, pge, cmov
                     1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // mmx, fxsr, sse1, sse2
+
+            if *acpi_enabled || *lapic_present {
+                edx |= 1 << 9; // apic
+            }
         },
 
         2 => {

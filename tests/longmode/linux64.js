@@ -58,6 +58,7 @@ const emulator = new V86({
     autostart: true,
     memory_size: 128 * 1024 * 1024,
     acpi: false,
+    apic: true,
     disable_jit: +process.env.DISABLE_JIT,
     log_level: +process.env.LOG_LEVEL || 0,
 });
