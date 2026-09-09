@@ -189,6 +189,38 @@ unsafe fn ror64(a: u64, count: i32) -> u64 {
     res
 }
 
+unsafe fn rcl64(a: u64, count: i32) -> u64 {
+    let n = shift_count64(count);
+    if n == 0 {
+        return a;
+    }
+    let cf_in = getcf() as u128;
+    let val = a as u128 | cf_in << 64;
+    let rotated = (val << n | val >> (65 - n)) & ((1u128 << 65) - 1);
+    let res = rotated as u64;
+    let cf = (rotated >> 64) & 1 != 0;
+    let of = n == 1 && (res >> 63 != 0) != cf;
+    *flags_changed = 0;
+    *flags = *flags & !(FLAG_CARRY | FLAG_OVERFLOW) | cf as i32 | (of as i32) << 11;
+    res
+}
+
+unsafe fn rcr64(a: u64, count: i32) -> u64 {
+    let n = shift_count64(count);
+    if n == 0 {
+        return a;
+    }
+    let cf_in = getcf() as u128;
+    let val = a as u128 | cf_in << 64;
+    let rotated = (val >> n | val << (65 - n)) & ((1u128 << 65) - 1);
+    let res = rotated as u64;
+    let cf = (rotated >> 64) & 1 != 0;
+    let of = n == 1 && (res >> 63 != 0) != ((res >> 62) & 1 != 0);
+    *flags_changed = 0;
+    *flags = *flags & !(FLAG_CARRY | FLAG_OVERFLOW) | cf as i32 | (of as i32) << 11;
+    res
+}
+
 unsafe fn test64(a: u64, b: u64) { let _ = logic64(a & b); }
 
 unsafe fn bsf64(old: u64, src: u64) -> u64 {
@@ -922,6 +954,8 @@ unsafe fn dispatch_rex_w(opcode: i32) {
             let res = match extra {
                 0 => rol64(dst, count),
                 1 => ror64(dst, count),
+                2 => rcl64(dst, count),
+                3 => rcr64(dst, count),
                 4 | 6 => shl64(dst, count),
                 5 => shr64(dst, count),
                 7 => sar64(dst, count),
