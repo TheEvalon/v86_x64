@@ -1,5 +1,5 @@
 ; Multiboot payload: REX.W is ignored on 8-bit / size-independent ops;
-; MOVSX/MOVZX r64 still widen to 64 bits.
+; MOVSX/MOVZX r64 still widen to 64 bits. CDQE/CQO sign-extend through RAX/RDX.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -155,6 +155,32 @@ jz_ok:
     cmp rax, 0x80
     jne fail_movzx8
 
+    ; CDQE sign-extends EAX to RAX. 32-bit CWDE sign-extends AX and
+    ; would leave 0 here (AX of 0x80000000 is 0).
+    mov rax, 0x0123456780000000
+    cdqe
+    mov rbx, 0xFFFFFFFF80000000
+    cmp rax, rbx
+    jne fail_cdqe
+
+    mov rax, 0xFFFFFFFF7FFFFFFF
+    cdqe
+    mov rbx, 0x7FFFFFFF
+    cmp rax, rbx
+    jne fail_cdqe_pos
+
+    ; CQO sign-extends RAX into RDX. 32-bit CDQ writes EDX=-1, which
+    ; zero-extends to 0xFFFFFFFF instead of all ones.
+    mov rax, -1
+    xor edx, edx
+    cqo
+    cmp rdx, -1
+    jne fail_cqo
+    mov rax, 1
+    cqo
+    test rdx, rdx
+    jnz fail_cqo_pos
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -206,6 +232,26 @@ fail_movsx16:
 
 fail_movzx8:
     mov al, 11
+    out 0xF4, al
+    jmp hang64
+
+fail_cdqe:
+    mov al, 12
+    out 0xF4, al
+    jmp hang64
+
+fail_cdqe_pos:
+    mov al, 13
+    out 0xF4, al
+    jmp hang64
+
+fail_cqo:
+    mov al, 14
+    out 0xF4, al
+    jmp hang64
+
+fail_cqo_pos:
+    mov al, 15
     out 0xF4, al
     jmp hang64
 
