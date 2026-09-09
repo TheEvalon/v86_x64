@@ -1479,11 +1479,9 @@ pub unsafe fn instr_0F32() {
         MSR_TEST_CTRL => {}, // linux 5.x
         IA32_PLATFORM_ID => {},
         IA32_APIC_BASE => {
-            if *acpi_enabled {
-                low = APIC_MEM_ADDRESS as i32;
-                if *apic_enabled {
-                    low |= IA32_APIC_BASE_EN
-                }
+            low = APIC_MEM_ADDRESS as i32 | IA32_APIC_BASE_BSP;
+            if *apic_enabled {
+                low |= IA32_APIC_BASE_EN
             }
         },
         IA32_BIOS_SIGN_ID => {},
@@ -3522,14 +3520,8 @@ pub unsafe fn instr_0FA2() {
             }; // hypervisor
             edx = (if true /* have fpu */ { 1 } else {  0 }) |      // fpu
                     vme | 1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 |  // vme, pse, tsc, msr, pae
-                    1 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, sep, pge, cmov
+                    1 << 8 | 1 << 9 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, apic, sep, pge, cmov
                     1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // mmx, fxsr, sse1, sse2
-
-            if *acpi_enabled
-            //&& this.apic_enabled[0])
-            {
-                edx |= 1 << 9; // apic
-            }
         },
 
         2 => {

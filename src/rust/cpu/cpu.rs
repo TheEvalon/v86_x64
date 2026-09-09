@@ -5793,7 +5793,7 @@ pub unsafe fn handle_irqs() {
         if let Some(irq) = pic::pic_acknowledge_irq() {
             pic_call_irq(irq)
         }
-        else if *acpi_enabled {
+        else if *apic_enabled || *acpi_enabled {
             if let Some(irq) = apic::acknowledge_irq() {
                 pic_call_irq(irq)
             }

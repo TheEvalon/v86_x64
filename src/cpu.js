@@ -1989,11 +1989,10 @@ CPU.prototype.run_hardware_timers = function(acpi_enabled, now)
     const rtc_time = this.devices.rtc.timer(now, false);
 
     let acpi_time = 100;
-    let apic_time = 100;
+    const apic_time = this.apic_timer(now);
     if(acpi_enabled)
     {
         acpi_time = this.devices.acpi.timer(now);
-        apic_time = this.apic_timer(now);
     }
 
     return Math.min(pit_time, rtc_time, acpi_time, apic_time);
