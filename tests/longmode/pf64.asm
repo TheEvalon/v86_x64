@@ -1,5 +1,5 @@
 ; Multiboot payload: higher-half RIP at Linux's 0xffffffff81000000 window,
-; RIP-relative LGDT/LIDT, higher-half IDT/#PF delivery, and IRETQ.
+; RIP-relative LGDT/LIDT, higher-half IDT/#PF delivery, IRETQ, and INVLPG.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -142,6 +142,38 @@ high_entry:
     cmp rax, rcx
     jne fail_cr2
 
+    ; INVLPG of the mapped higher-half page: no #PF/#GP, first byte still `cld`.
+    mov qword [rel saved_cr2], 0xA5A5A5A5A5A5A5A5
+    mov rax, HIGHER_KERNEL
+    invlpg [rax]
+    db 0x48
+    invlpg [rax]
+    mov rcx, 0xA5A5A5A5A5A5A5A5
+    cmp [rel saved_cr2], rcx
+    jne fail_invlpg
+    cmp byte [rax], 0xFC
+    jne fail_invlpg
+
+    ; INVLPG of an unmapped canonical hole must not itself #PF; the load still
+    ; does, with CR2 equal to the hole. Encoding of `mov rbx, [rax]` is 3 bytes
+    ; so the existing #PF handler's RIP skip stays correct.
+    mov qword [rel saved_cr2], 0
+    mov rax, 0xFFFFFFFF90000000
+    invlpg [rax]
+    cmp qword [rel saved_cr2], 0
+    jne fail_invlpg
+    xor ebx, ebx
+    mov rbx, [rax]
+    mov ecx, 0xAABBCCDD
+    cmp rax, rcx
+    jne fail_invlpg_pf
+    cmp ebx, 0
+    jne fail_invlpg_pf
+    mov rax, [rel saved_cr2]
+    mov rcx, 0xFFFFFFFF90000000
+    cmp rax, rcx
+    jne fail_invlpg_cr2
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -177,6 +209,21 @@ fail_pf:
 
 fail_cr2:
     mov al, 5
+    out 0xF4, al
+    jmp hang64
+
+fail_invlpg:
+    mov al, 6
+    out 0xF4, al
+    jmp hang64
+
+fail_invlpg_pf:
+    mov al, 7
+    out 0xF4, al
+    jmp hang64
+
+fail_invlpg_cr2:
+    mov al, 8
     out 0xF4, al
     jmp hang64
 hang64:
