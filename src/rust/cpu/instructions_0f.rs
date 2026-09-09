@@ -24,8 +24,8 @@ use crate::cpu::fpu::fpu_set_tag_word;
 use crate::cpu::global_pointers::*;
 use crate::cpu::misc_instr::{
     adjust_stack_reg, bswap, cmovcc16, cmovcc32, fxrstor, fxsave, get_stack_pointer, jmpcc16,
-    jmpcc32, push16, push32_sreg, setcc_mem, setcc_reg, test_b, test_be, test_l, test_le, test_o,
-    test_p, test_s, test_z,
+    jmpcc32, push16, push32_sreg, push64, setcc_mem, setcc_reg, test_b, test_be, test_l, test_le,
+    test_o, test_p, test_s, test_z,
 };
 use crate::cpu::misc_instr::{lar, lsl, verr, verw};
 use crate::cpu::misc_instr::{lss16, lss32};
@@ -3424,12 +3424,45 @@ pub unsafe fn instr_0F9D_mem(addr: i32, _: i32) { setcc_mem(!test_l(), addr); }
 pub unsafe fn instr_0F9E_mem(addr: i32, _: i32) { setcc_mem(test_le(), addr); }
 pub unsafe fn instr_0F9F_mem(addr: i32, _: i32) { setcc_mem(!test_le(), addr); }
 
+unsafe fn push64_sreg(i: i32) {
+    return_on_pagefault!(push64(*sreg.offset(i as isize) as u64));
+}
+
+unsafe fn pop64_sreg(i: i32) {
+    let rsp = read_reg64(ESP);
+    if gp_if_noncanonical(rsp) {
+        return;
+    }
+    *pending_linear64 = rsp;
+    if !switch_seg(
+        i,
+        (return_on_pagefault!(safe_read64s(rsp as i32)) & 0xFFFF) as i32,
+    ) {
+        return;
+    }
+    write_reg64(ESP, rsp.wrapping_add(8));
+}
+
 pub unsafe fn instr16_0FA0() {
+    if *is_64 {
+        push64_sreg(FS);
+        return;
+    }
     return_on_pagefault!(push16(*sreg.offset(FS as isize) as i32));
 }
-pub unsafe fn instr32_0FA0() { return_on_pagefault!(push32_sreg(FS)) }
+pub unsafe fn instr32_0FA0() {
+    if *is_64 {
+        push64_sreg(FS);
+        return;
+    }
+    return_on_pagefault!(push32_sreg(FS))
+}
 #[no_mangle]
 pub unsafe fn instr16_0FA1() {
+    if *is_64 {
+        pop64_sreg(FS);
+        return;
+    }
     if !switch_seg(FS, return_on_pagefault!(safe_read16(get_stack_pointer(0)))) {
         return;
     }
@@ -3440,6 +3473,10 @@ pub unsafe fn instr16_0FA1() {
 }
 #[no_mangle]
 pub unsafe fn instr32_0FA1() {
+    if *is_64 {
+        pop64_sreg(FS);
+        return;
+    }
     if !switch_seg(
         FS,
         return_on_pagefault!(safe_read32s(get_stack_pointer(0))) & 0xFFFF,
@@ -3658,11 +3695,25 @@ pub unsafe fn instr_0FA6() {
 #[no_mangle]
 pub unsafe fn instr_0FA7() { undefined_instruction(); }
 pub unsafe fn instr16_0FA8() {
+    if *is_64 {
+        push64_sreg(GS);
+        return;
+    }
     return_on_pagefault!(push16(*sreg.offset(GS as isize) as i32));
 }
-pub unsafe fn instr32_0FA8() { return_on_pagefault!(push32_sreg(GS)) }
+pub unsafe fn instr32_0FA8() {
+    if *is_64 {
+        push64_sreg(GS);
+        return;
+    }
+    return_on_pagefault!(push32_sreg(GS))
+}
 #[no_mangle]
 pub unsafe fn instr16_0FA9() {
+    if *is_64 {
+        pop64_sreg(GS);
+        return;
+    }
     if !switch_seg(GS, return_on_pagefault!(safe_read16(get_stack_pointer(0)))) {
         return;
     }
@@ -3673,6 +3724,10 @@ pub unsafe fn instr16_0FA9() {
 }
 #[no_mangle]
 pub unsafe fn instr32_0FA9() {
+    if *is_64 {
+        pop64_sreg(GS);
+        return;
+    }
     if !switch_seg(
         GS,
         return_on_pagefault!(safe_read32s(get_stack_pointer(0))) & 0xFFFF,
