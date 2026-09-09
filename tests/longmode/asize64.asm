@@ -1,4 +1,4 @@
-; Multiboot payload: 67h selects 32-bit addressing in 64-bit CS.
+; Multiboot payload: 67h selects 32-bit addressing in 64-bit CS, plus SHL/SHR/SAR r64.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -103,6 +103,25 @@ start64:
     cmp rax, rbx
     jne fail_lea
 
+    ; SHL r64 by 32. 32-bit SHL masks the count to 5 bits, so this is a no-op.
+    mov rax, 1
+    shl rax, 32
+    mov rcx, 0x100000000
+    cmp rax, rcx
+    jne fail_shl
+
+    ; SHR r64 by 32 of 2^32 is 1. 32-bit SHR of EAX=0 stays 0.
+    mov rax, 0x100000000
+    shr rax, 32
+    cmp rax, 1
+    jne fail_shr
+
+    ; SAR r64 of 0xFFFFFFFF00000000 by 32 is all ones.
+    mov rax, 0xFFFFFFFF00000000
+    sar rax, 32
+    cmp rax, -1
+    jne fail_sar
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -120,6 +139,15 @@ fail_mov:
     jmp fail_out
 fail_lea:
     mov al, 5
+    jmp fail_out
+fail_shl:
+    mov al, 6
+    jmp fail_out
+fail_shr:
+    mov al, 7
+    jmp fail_out
+fail_sar:
+    mov al, 8
     jmp fail_out
 
 fail_out:
