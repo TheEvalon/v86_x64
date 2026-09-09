@@ -9,7 +9,7 @@ const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
 process.on("unhandledRejection", exn => { throw exn; });
 
-const ALL_TESTS = ["enter64", "stack64", "idt64", "syscall64", "higher64", "jit64", "rex64", "pf64", "cpl64", "nx64"];
+const ALL_TESTS = ["enter64", "stack64", "idt64", "syscall64", "higher64", "jit64", "rex64", "pf64", "cpl64", "nx64", "cx16"];
 const requested = process.argv.slice(2);
 
 if(requested.length === 0)
@@ -68,6 +68,11 @@ emulator.add_listener("emulator-loaded", function() {
     let compiled = 0;
 
     emulator.cpu_exception_hook = function(n) {
+        // DEBUG trigger_gp skips IDT delivery when this returns true. cx16 installs
+        // a #GP handler for misaligned CMPXCHG16B, so let vector 13 through.
+        if(name === "cx16" && n === 13) {
+            return false;
+        }
         const names = { 0: "DE", 6: "UD", 13: "GP", 14: "PF" };
         finish(1, "long mode " + name + ": unexpected exception #" + n + " (" + (names[n] || "?") + ")");
         return true;
