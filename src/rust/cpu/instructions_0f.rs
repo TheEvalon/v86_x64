@@ -3589,7 +3589,7 @@ pub unsafe fn instr_0FA2() {
             // AMD64 feature flags: SYSCALL, NX, long mode.
             eax = 0;
             ebx = 0;
-            ecx = 1 << 0; // lahf_lm (LAHF/SAHF already execute in 64-bit CS)
+            ecx = 1 << 0 | 1 << 8; // lahf_lm, prefetchw
             edx = 1 << 11 | 1 << 20 | 1 << 27 | 1 << 29; // SCE, NX, RDTSCP, LM
         },
 
