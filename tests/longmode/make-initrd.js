@@ -59,7 +59,7 @@ function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
     // succeeds if a later syscall fails. Extra getpid/gettid/uname/brk/mmap/
-    // arch_prctl/clock_gettime writes are diagnostic only.
+    // arch_prctl/clock_gettime/munmap writes are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
@@ -69,8 +69,9 @@ function make_static_init_elf(message)
         Buffer.from("linux64-init: archprctl\n", "ascii"),
         Buffer.from("linux64-init: gettid\n", "ascii"),
         Buffer.from("linux64-init: clock\n", "ascii"),
+        Buffer.from("linux64-init: munmap\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_MUNMAP = 8;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
@@ -255,9 +256,18 @@ function make_static_init_elf(message)
     jcc8(0x7C, "skip_clock"); // jl
     write_str(MSG_CLOCK);
     labels.skip_clock = size;
+
+    // 8. munmap(map, 4096) (rax=11). rbx still holds the mmap address.
+    mov_imm(0, 11);
+    emit([0x48, 0x89, 0xDF]); // mov rdi, rbx
+    mov_imm(6, 4096);         // mov rsi, 4096
+    syscall();
+    is_err_jae32("skip_munmap");
+    write_str(MSG_MUNMAP);
+    labels.skip_munmap = size;
     labels.skip_mmap = size;
 
-    // 8. exit(0)
+    // 9. exit(0)
     mov_imm(0, 60);
     emit([0x48, 0x31, 0xFF]); // xor rdi, rdi
     syscall();
