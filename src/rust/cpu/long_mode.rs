@@ -1218,6 +1218,38 @@ unsafe fn jmp_far64(addr: i32) {
     jump_near64(target);
 }
 
+/// ENTER in 64-bit CS: always a 64-bit stack op (Intel operand size 64).
+unsafe fn enter64(size: i32, mut nesting: i32) {
+    nesting &= 31;
+    let frame_temp = read_reg64(ESP).wrapping_sub(8);
+    if gp_if_noncanonical(frame_temp) {
+        return;
+    }
+
+    if nesting > 0 {
+        let mut tmp_rbp = read_reg64(EBP);
+        for _ in 1..nesting {
+            tmp_rbp = tmp_rbp.wrapping_sub(8);
+            if gp_if_noncanonical(tmp_rbp) {
+                return;
+            }
+            *pending_linear64 = tmp_rbp;
+            let fp = return_on_pagefault!(safe_read64s(tmp_rbp as i32));
+            return_on_pagefault!(push64(fp));
+        }
+        return_on_pagefault!(push64(frame_temp));
+    }
+
+    *pending_linear64 = frame_temp;
+    return_on_pagefault!(safe_write64(frame_temp as i32, read_reg64(EBP)));
+    write_reg64(EBP, frame_temp);
+    let new_rsp = frame_temp.wrapping_sub(size as u64);
+    if gp_if_noncanonical(new_rsp) {
+        return;
+    }
+    write_reg64(ESP, new_rsp);
+}
+
 unsafe fn dispatch_forced64(opcode: i32) {
     current_interp_opcode = opcode as u32 | 0x100;
     current_interp_0f = false;
@@ -1281,6 +1313,11 @@ unsafe fn dispatch_forced64(opcode: i32) {
         0xC3 => {
             let ip = return_on_pagefault!(pop64());
             jump_near64(ip);
+        },
+        0xC8 => {
+            let size = return_on_pagefault!(read_imm16());
+            let nesting = return_on_pagefault!(read_imm8());
+            enter64(size, nesting);
         },
         0xC9 => {
             let rbp = read_reg64(EBP);
@@ -1382,6 +1419,7 @@ pub fn opcode_is_forced64(opcode: i32) -> bool {
             | 0x9D
             | 0xC2
             | 0xC3
+            | 0xC8
             | 0xC9
             | 0xCA
             | 0xCB
@@ -1959,6 +1997,7 @@ mod tests {
         assert!(opcode_is_forced64(0xE8));
         assert!(opcode_is_forced64(0x50));
         assert!(opcode_is_forced64(0xC3));
+        assert!(opcode_is_forced64(0xC8));
         assert!(opcode_is_forced64(0xCA));
         assert!(opcode_is_forced64(0xCB));
         assert!(opcode_is_forced64(0xFF));
