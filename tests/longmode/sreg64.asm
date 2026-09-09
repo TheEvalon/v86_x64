@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit PUSH/POP FS and GS, plus LAR/LSL/VERR/VERW.
+; Multiboot payload: 64-bit PUSH/POP FS and GS, LAR/LSL/VERR/VERW, and SMSW.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -201,6 +201,26 @@ start64:
     verw ax
     jz fail_verw_cs
 
+    ; SMSW r32/r64 stores CR0 (Intel 64-bit: r32 gets CR0[31:0] zero-extended;
+    ; r64 gets CR0[63:0]). Memory form is always CR0[15:0]. PE must be set.
+    mov rcx, cr0
+    test ecx, 1
+    jz fail_smsw_pe
+    smsw eax
+    cmp eax, ecx
+    jne fail_smsw_reg
+    mov r8, -1
+    o64 smsw r8
+    cmp r8, rcx
+    jne fail_smsw_reg
+
+    mov word [smsw_buf], 0xFFFF
+    smsw [smsw_buf]
+    mov edx, ecx
+    and edx, 0xFFFF
+    cmp word [smsw_buf], dx
+    jne fail_smsw_mem
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -300,6 +320,21 @@ fail_verw_cs:
     out 0xF4, al
     jmp hang64
 
+fail_smsw_pe:
+    mov al, 21
+    out 0xF4, al
+    jmp hang64
+
+fail_smsw_reg:
+    mov al, 22
+    out 0xF4, al
+    jmp hang64
+
+fail_smsw_mem:
+    mov al, 23
+    out 0xF4, al
+    jmp hang64
+
 hang64:
     hlt
     jmp hang64
@@ -314,6 +349,9 @@ gdt_end:
 gdt_desc:
     dw gdt_end - gdt - 1
     dd gdt
+
+smsw_buf:
+    dw 0
 
 align 4096
 pml4:
