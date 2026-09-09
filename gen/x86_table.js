@@ -370,7 +370,7 @@ const encodings = [
     // the most common use case of ud2
     { opcode: 0x0F0B, skip: 1, block_boundary: 1, custom: 1, no_next_instruction: 1 },
     { opcode: 0x0F0C, skip: 1, block_boundary: 1 },
-    { opcode: 0x0F0D, skip: 1, block_boundary: 1 },
+    { opcode: 0x0F0D, e: 1, custom: 1, skip: 1 }, // prefetch / prefetchw (hint nop)
     { opcode: 0x0F0E, skip: 1, block_boundary: 1 },
     { opcode: 0x0F0F, skip: 1, block_boundary: 1 },
 

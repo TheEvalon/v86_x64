@@ -572,10 +572,13 @@ pub unsafe fn instr_0F0B() {
 }
 #[no_mangle]
 pub unsafe fn instr_0F0C() { undefined_instruction(); }
-#[no_mangle]
-pub unsafe fn instr_0F0D() {
-    // nop
-    undefined_instruction();
+pub unsafe fn instr_0F0D_reg(_r1: i32, _r2: i32) {
+    // prefetchw (mod=11): hint nop
+}
+pub unsafe fn instr_0F0D_mem(_addr: i32, _r: i32) {
+    // prefetch / prefetchw: hint nop. Address is translated by ModRM decode
+    // but not accessed (SeaBIOS emits this once CPUID.80000001:ECX.PrefetchW
+    // is set).
 }
 #[no_mangle]
 pub unsafe fn instr_0F0E() { undefined_instruction(); }
@@ -3589,7 +3592,7 @@ pub unsafe fn instr_0FA2() {
             // AMD64 feature flags: SYSCALL, NX, long mode.
             eax = 0;
             ebx = 0;
-            ecx = 1 << 0; // lahf_lm (LAHF/SAHF already execute in 64-bit CS)
+            ecx = 1 << 0 | 1 << 8; // lahf_lm, prefetchw
             edx = 1 << 11 | 1 << 20 | 1 << 27 | 1 << 29; // SCE, NX, RDTSCP, LM
         },
 
