@@ -59,7 +59,7 @@ function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
     // succeeds if a later syscall fails. Extra getpid/gettid/uname/brk/mmap/
-    // arch_prctl writes are diagnostic only.
+    // arch_prctl/clock_gettime writes are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
@@ -68,8 +68,9 @@ function make_static_init_elf(message)
         Buffer.from("linux64-init: mmap\n", "ascii"),
         Buffer.from("linux64-init: archprctl\n", "ascii"),
         Buffer.from("linux64-init: gettid\n", "ascii"),
+        Buffer.from("linux64-init: clock\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
@@ -239,9 +240,24 @@ function make_static_init_elf(message)
     labels.getfs_ok = size;
     write_str(MSG_ARCHPRCTL);
     labels.skip_archprctl = size;
+
+    // 7. clock_gettime(CLOCK_MONOTONIC, map+16) (rax=228). tv_sec >= 0 and
+    //    tv_nsec in [0, 999999999]. Uses the mmap page; skipped if mmap failed.
+    mov_imm(0, 228);
+    mov_imm(7, 1); // CLOCK_MONOTONIC
+    emit([0x48, 0x8D, 0x73, 0x10]); // lea rsi, [rbx+16]
+    syscall();
+    is_err_jae32("skip_clock");
+    emit([0x48, 0x8B, 0x43, 0x18]); // mov rax, [rbx+24] (tv_nsec)
+    emit([0x48, 0x3D, 0xFF, 0xC9, 0x9A, 0x3B]); // cmp rax, 999999999
+    jcc8(0x77, "skip_clock"); // ja
+    emit([0x48, 0x83, 0x7B, 0x10, 0x00]); // cmp qword [rbx+16], 0 (tv_sec)
+    jcc8(0x7C, "skip_clock"); // jl
+    write_str(MSG_CLOCK);
+    labels.skip_clock = size;
     labels.skip_mmap = size;
 
-    // 7. exit(0)
+    // 8. exit(0)
     mov_imm(0, 60);
     emit([0x48, 0x31, 0xFF]); // xor rdi, rdi
     syscall();
