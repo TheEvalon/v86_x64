@@ -4167,6 +4167,17 @@ pub unsafe fn run_instruction0f_32(opcode: i32) {
     gen::interpreter0f::run(opcode as u32 | 0x100)
 }
 
+/// STI interrupt shadow: run the following instruction, then `handle_irqs`.
+/// In 64-bit CS the follower must go through the 64-bit decoder (REX, RIP-relative).
+pub unsafe fn run_sti_shadow_instruction() {
+    if *is_64 {
+        crate::cpu::long_mode::run_one();
+    }
+    else {
+        run_instruction(return_on_pagefault!(read_imm8()) | (is_osize_32() as i32) << 8);
+    }
+}
+
 pub unsafe fn cycle_internal() {
     profiler::stat_increment(stat::CYCLE_INTERNAL);
     let mut jit_entry = None;

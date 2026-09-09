@@ -411,6 +411,13 @@ emulator.add_listener("serial0-output-byte", function(byte)
         console.log("linux64: pass (" + pass + ")");
         finish(0);
     }
+    if(serial.includes("Kernel panic - not syncing") &&
+        !serial.includes("Kernel panic - not syncing: VFS"))
+    {
+        const line = serial.split("\n").find(s => s.includes("Kernel panic - not syncing")) ||
+            "Kernel panic";
+        finish(1, "linux64: kernel panic before VFS: " + line.trim());
+    }
 });
 
 setTimeout(() => {

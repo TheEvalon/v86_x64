@@ -2365,8 +2365,11 @@ pub unsafe fn instr_FB() {
     else {
         *prefixes = 0;
         *previous_ip = *instruction_pointer;
+        if *is_64 {
+            *previous_rip = get_rip();
+        }
         *instruction_counter += 1;
-        run_instruction(return_on_pagefault!(read_imm8()) | (is_osize_32() as i32) << 8);
+        run_sti_shadow_instruction();
 
         handle_irqs();
     }
