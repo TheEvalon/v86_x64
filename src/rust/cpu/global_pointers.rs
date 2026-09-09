@@ -97,6 +97,7 @@ pub const idtr_offset64: *mut u64 = 2264 as *mut u64;
 /// safe_read/write helpers.
 pub const pending_linear64: *mut u64 = 2272 as *mut u64;
 pub const cr2_64: *mut u64 = 2280 as *mut u64;
+pub const tr_base64: *mut u64 = 2288 as *mut u64;
 
 pub fn get_reg32_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);

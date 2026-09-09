@@ -565,7 +565,7 @@ unsafe fn get_tss_ss_esp(dpl: u8) -> OrPageFault<(i32, i32)> {
 pub unsafe fn iret16() { iret(true); }
 pub unsafe fn iret32() { iret(false); }
 
-/// IRETQ: same-privilege only. Pops RIP, CS, RFLAGS, RSP, SS.
+/// IRETQ: pops RIP, CS, RFLAGS, RSP, SS. Same-privilege and outer-privilege.
 pub unsafe fn iretq() {
     if vm86_mode() {
         dbg_log!("#gp iretq in vm86");
@@ -636,10 +636,49 @@ pub unsafe fn iretq() {
         trigger_gp(new_cs & !3);
         return;
     }
-    if cs_selector.rpl() != *cpl {
-        dbg_log!("iretq privilege change not implemented");
-        trigger_gp(new_cs & !3);
-        return;
+
+    let new_cpl = cs_selector.rpl();
+    let privilege_change = new_cpl != *cpl;
+
+    if privilege_change {
+        let ss_selector = SegmentSelector::of_u16(new_ss as u16);
+        if ss_selector.is_null() {
+            // Null SS is valid only when returning to CPL0.
+            if new_cpl != 0 {
+                dbg_log!("#gp iretq null ss at cpl={}", new_cpl);
+                trigger_gp(0);
+                return;
+            }
+        }
+        else {
+            let ss_descriptor = match return_on_pagefault!(lookup_segment_selector(ss_selector)) {
+                Ok((desc, _)) => desc,
+                Err(SelectorNullOrInvalid::IsNull) => {
+                    dbg_log!("#gp iretq null ss");
+                    trigger_gp(0);
+                    return;
+                },
+                Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
+                    dbg_log!("#gp iretq invalid ss {:x}", new_ss);
+                    trigger_gp(new_ss & !3);
+                    return;
+                },
+            };
+            if ss_descriptor.is_system()
+                || ss_selector.rpl() != new_cpl
+                || !ss_descriptor.is_writable()
+                || ss_descriptor.dpl() != new_cpl
+            {
+                dbg_log!("#gp iretq invalid ss {:x}", new_ss);
+                trigger_gp(new_ss & !3);
+                return;
+            }
+            if !ss_descriptor.is_present() {
+                dbg_log!("#ss iretq non-present ss {:x}", new_ss);
+                trigger_ss(new_ss & !3);
+                return;
+            }
+        }
     }
 
     if !cs_descriptor.is_long() && new_rip as u32 > cs_descriptor.effective_limit() {
@@ -651,6 +690,11 @@ pub unsafe fn iretq() {
     update_eflags(new_flags as i32);
     if *cpl == 0 {
         *flags = *flags & !FLAG_VIF & !FLAG_VIP | (new_flags as i32 & (FLAG_VIF | FLAG_VIP));
+    }
+
+    if privilege_change {
+        *cpl = new_cpl;
+        cpl_changed();
     }
 
     *sreg.offset(CS as isize) = new_cs as u16;
@@ -667,6 +711,19 @@ pub unsafe fn iretq() {
         return;
     }
     write_reg64(ESP, new_rsp);
+
+    if privilege_change {
+        for reg in [ES, DS, FS, GS] {
+            let access = *segment_access_bytes.offset(reg as isize);
+            let dpl = access >> 5 & 3;
+            let executable = access & 8 == 8;
+            let conforming = access & 4 == 4;
+            if dpl < *cpl && !(executable && conforming) {
+                *segment_is_null.offset(reg as isize) = true;
+                *sreg.offset(reg as isize) = 0;
+            }
+        }
+    }
 
     update_state_flags();
     handle_irqs();
@@ -1049,12 +1106,6 @@ unsafe fn deliver_interrupt_vector_lma(
         return;
     }
 
-    if gate.ist() != 0 {
-        dbg_log!("IST interrupt not implemented ist={}", gate.ist());
-        trigger_gp(0);
-        return;
-    }
-
     if !is_canonical_va(offset) {
         dbg_log!("#gp long-mode handler offset {:x} non-canonical", offset);
         trigger_gp(0);
@@ -1087,38 +1138,37 @@ unsafe fn deliver_interrupt_vector_lma(
         return;
     }
 
-    if !cs_segment_descriptor.is_dc() && cs_segment_descriptor.dpl() < *cpl {
-        dbg_log!("inter-privilege long-mode interrupt not implemented");
-        trigger_gp(selector & !3);
-        return;
-    }
-
     if *flags & FLAG_VM != 0 {
         dbg_log!("#gp long-mode interrupt from vm86");
         trigger_gp(selector & !3);
         return;
     }
 
+    let old_cpl = *cpl;
     let old_flags = get_eflags();
     let old_rip = if *is_64 { get_rip() } else { get_real_eip() as u32 as u64 };
     let old_cs = *sreg.offset(CS as isize) as u64;
     let old_ss = *sreg.offset(SS as isize) as u64;
     let old_rsp = read_reg64(ESP);
 
-    let error_code_space = if error_code.is_some() { 8 } else { 0 };
-    let stack_space = 40 + error_code_space;
-    return_on_pagefault!(writable_or_pagefault(
-        get_stack_pointer(-stack_space),
-        stack_space
-    ));
+    let privilege_change = !cs_segment_descriptor.is_dc() && cs_segment_descriptor.dpl() < old_cpl;
+    let new_cpl = if privilege_change { cs_segment_descriptor.dpl() } else { old_cpl };
 
-    return_on_pagefault!(push64(old_ss));
-    return_on_pagefault!(push64(old_rsp));
-    return_on_pagefault!(push64(old_flags as u32 as u64));
-    return_on_pagefault!(push64(old_cs));
-    return_on_pagefault!(push64(old_rip));
-    if let Some(ec) = error_code {
-        return_on_pagefault!(push64(ec as u32 as u64));
+    let ist = gate.ist();
+    let mut new_rsp = old_rsp;
+    if ist != 0 {
+        new_rsp = return_on_pagefault!(read_tss64_qword(tss64_ist_offset(ist)));
+    }
+    else if privilege_change {
+        new_rsp = return_on_pagefault!(read_tss64_qword(tss64_rsp_offset(new_cpl)));
+    }
+    if gp_if_noncanonical(new_rsp) {
+        return;
+    }
+
+    if privilege_change {
+        *cpl = new_cpl;
+        cpl_changed();
     }
 
     *sreg.offset(CS as isize) = (selector as u16) & !3 | *cpl as u16;
@@ -1128,6 +1178,32 @@ unsafe fn deliver_interrupt_vector_lma(
     *segment_limits.offset(CS as isize) = cs_segment_descriptor.effective_limit();
     *segment_offsets.offset(CS as isize) = cs_segment_descriptor.base();
     *segment_access_bytes.offset(CS as isize) = cs_segment_descriptor.access_byte();
+
+    if privilege_change {
+        if !switch_seg(SS, new_cpl as i32) {
+            return;
+        }
+    }
+
+    write_reg64(ESP, new_rsp);
+
+    let error_code_space = if error_code.is_some() { 8 } else { 0 };
+    let stack_space = 40 + error_code_space;
+    let frame_bottom = new_rsp.wrapping_sub(stack_space as u64);
+    if gp_if_noncanonical(frame_bottom) {
+        return;
+    }
+    *pending_linear64 = frame_bottom;
+    return_on_pagefault!(writable_or_pagefault(frame_bottom as i32, stack_space));
+
+    return_on_pagefault!(push64(old_ss));
+    return_on_pagefault!(push64(old_rsp));
+    return_on_pagefault!(push64(old_flags as u32 as u64));
+    return_on_pagefault!(push64(old_cs));
+    return_on_pagefault!(push64(old_rip));
+    if let Some(ec) = error_code {
+        return_on_pagefault!(push64(ec as u32 as u64));
+    }
 
     *instruction_pointer = get_seg_cs() + offset as i32;
     if *is_64 {
@@ -3382,6 +3458,44 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
     true
 }
 
+pub(crate) fn tss64_rsp_offset(cpl: u8) -> u32 {
+    dbg_assert!(cpl <= 2);
+    0x04 + cpl as u32 * 8
+}
+
+pub(crate) fn tss64_ist_offset(ist: u8) -> u32 {
+    dbg_assert!(ist >= 1 && ist <= 7);
+    0x24 + (ist as u32 - 1) * 8
+}
+
+unsafe fn read_system_u64(virt: u64) -> OrPageFault<u64> {
+    if gp_if_noncanonical(virt) {
+        return Err(());
+    }
+    *pending_linear64 = virt;
+    if virt as u32 & 0xFFF > 0x1000 - 8 {
+        let lo = memory::read32s(translate_address_system_read(virt as i32)?) as u32 as u64;
+        *pending_linear64 = virt.wrapping_add(4);
+        let hi = memory::read32s(translate_address_system_read(virt.wrapping_add(4) as i32)?) as u32
+            as u64;
+        Ok(lo | hi << 32)
+    }
+    else {
+        Ok(memory::read64s(translate_address_system_read(virt as i32)?) as u64)
+    }
+}
+
+unsafe fn read_tss64_qword(offset: u32) -> OrPageFault<u64> {
+    let limit = *segment_limits.offset(TR as isize);
+    if offset > limit || limit - offset < 7 {
+        panic!(
+            "#TS | 64-bit TSS offset 0x{:x} exceeds limit 0x{:x}",
+            offset, limit
+        );
+    }
+    read_system_u64((*tr_base64).wrapping_add(offset as u64))
+}
+
 pub unsafe fn load_tr(selector: i32) {
     let selector = SegmentSelector::of_u16(selector as u16);
     dbg_assert!(selector.is_gdt(), "TODO: TR can only be loaded from GDT");
@@ -3409,7 +3523,23 @@ pub unsafe fn load_tr(selector: i32) {
         panic!("#GP | ltr: not a system entry (happens when running kvm-unit-test without ACPI)");
     }
 
-    if descriptor.system_type() != 9 && descriptor.system_type() != 1 {
+    if efer_lma() {
+        if descriptor.system_type() != 9 {
+            // 0xB: busy 64-bit TSS
+            panic!(
+                "#GP | ltr: invalid type in long mode (type = 0x{:x})",
+                descriptor.system_type()
+            );
+        }
+        let table_limit = *gdtr_size as u32;
+        if selector.descriptor_offset() as u32 + 15 > table_limit {
+            panic!("#GP | ltr: 16-byte TSS descriptor exceeds GDT limit");
+        }
+        if descriptor.effective_limit() < 0x67 {
+            panic!("#GP | ltr: 64-bit TSS limit < 0x67");
+        }
+    }
+    else if descriptor.system_type() != 9 && descriptor.system_type() != 1 {
         // 0xB: busy 386 TSS (GP)
         // 0x9: 386 TSS
         // 0x3: busy 286 TSS (GP)
@@ -3428,6 +3558,18 @@ pub unsafe fn load_tr(selector: i32) {
     *segment_limits.offset(TR as isize) = descriptor.effective_limit();
     *segment_offsets.offset(TR as isize) = descriptor.base();
     *sreg.offset(TR as isize) = selector.raw;
+
+    if efer_lma() {
+        let desc_addr = gdtr_base() + selector.descriptor_offset() as u64;
+        let high = return_on_pagefault!(read_system_u64(desc_addr.wrapping_add(8)));
+        if high >> 32 != 0 {
+            panic!("#GP | ltr: reserved bits in 64-bit TSS descriptor");
+        }
+        *tr_base64 = descriptor.base() as u32 as u64 | (high & 0xFFFF_FFFF) << 32;
+    }
+    else {
+        *tr_base64 = descriptor.base() as u32 as u64;
+    }
 
     // Mark task as busy
     memory::write8(
@@ -5668,6 +5810,7 @@ pub unsafe fn reset_cpu() {
     *idtr_offset64 = 0;
     *pending_linear64 = 0;
     *cr2_64 = 0;
+    *tr_base64 = 0;
 
     *cr = 1 << 30 | 1 << 29 | 1 << 4;
     *cr.offset(2) = 0;
