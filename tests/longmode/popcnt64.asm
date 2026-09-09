@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit POPCNT, BSF, BSR, MUL, INC, and DEC in long mode.
+; Multiboot payload: 64-bit POPCNT, BSF, BSR, MUL, INC, DEC, and IMUL in long mode.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -158,6 +158,25 @@ start64:
     cmp rax, rbx
     jne fail_dec
 
+    ; One-operand IMUL r64: 2^32 * 3. 32-bit IMUL would use EAX=0.
+    mov rax, 0x100000000
+    mov rbx, 3
+    imul rbx
+    mov rcx, 0x300000000
+    cmp rax, rcx
+    jne fail_imul
+    test rdx, rdx
+    jnz fail_imul
+
+    ; Signed: (-1) * 2. 32-bit IMUL writes EAX=0xFFFFFFFE (zero-extended).
+    mov rax, -1
+    mov rbx, 2
+    imul rbx
+    cmp rax, -2
+    jne fail_imul_neg
+    cmp rdx, -1
+    jne fail_imul_neg
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -205,6 +224,12 @@ fail_inc:
     jmp fail_out
 fail_dec:
     mov al, 15
+    jmp fail_out
+fail_imul:
+    mov al, 16
+    jmp fail_out
+fail_imul_neg:
+    mov al, 17
     jmp fail_out
 
 fail_out:
