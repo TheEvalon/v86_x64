@@ -5953,6 +5953,7 @@ pub unsafe fn reset_cpu() {
     *msr_fs_base = 0;
     *msr_gs_base = 0;
     *msr_kernel_gs_base = 0;
+    *msr_tsc_aux = 0;
     *rip = 0;
     *previous_rip = 0;
     *last_virt_rip = !0;

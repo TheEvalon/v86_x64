@@ -315,7 +315,7 @@ nasmtests-force-jit: build/v86-debug.wasm
 	$(NASM_TEST_DIR)/gen_fixtures.js
 	$(NASM_TEST_DIR)/run.js --force-jit
 
-longmode-test: build/v86-debug.wasm tests/longmode/enter64.bin tests/longmode/stack64.bin tests/longmode/idt64.bin tests/longmode/syscall64.bin tests/longmode/higher64.bin tests/longmode/jit64.bin tests/longmode/rex64.bin tests/longmode/pf64.bin tests/longmode/cpl64.bin tests/longmode/nx64.bin tests/longmode/cx16.bin tests/longmode/retf64.bin
+longmode-test: build/v86-debug.wasm tests/longmode/enter64.bin tests/longmode/stack64.bin tests/longmode/idt64.bin tests/longmode/syscall64.bin tests/longmode/higher64.bin tests/longmode/jit64.bin tests/longmode/rex64.bin tests/longmode/pf64.bin tests/longmode/cpl64.bin tests/longmode/nx64.bin tests/longmode/cx16.bin tests/longmode/retf64.bin tests/longmode/rdtscp.bin
 	./tests/longmode/run.js
 
 linux64-test: build/v86-debug.wasm
