@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit PUSH/POP FS and GS in long mode.
+; Multiboot payload: 64-bit PUSH/POP FS and GS, plus LAR/LSL/VERR/VERW.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -156,6 +156,51 @@ start64:
     cmp ax, 0x10
     jne fail_o16_pop
 
+    ; LAR/LSL of 64-bit CS (0x08): access rights 0x00AF9B00, G-limit 4GiB-1.
+    mov ecx, 0x08
+    mov rax, -1
+    lar eax, ecx
+    jnz fail_lar_zf
+    cmp eax, 0x00AF9B00
+    jne fail_lar
+    shr rax, 32
+    test rax, rax
+    jnz fail_lar_high
+
+    mov rax, -1
+    lsl eax, ecx
+    jnz fail_lsl_zf
+    cmp eax, 0xFFFFFFFF
+    jne fail_lsl
+
+    ; REX.W LAR still writes 32-bit access rights (high half zero), not #UD.
+    mov rax, -1
+    lar rax, rcx
+    jnz fail_rexw_lar
+    mov rdx, 0x0000000000AF9B00
+    cmp rax, rdx
+    jne fail_rexw_lar
+
+    ; Null selector: ZF clear, destination unchanged.
+    mov eax, 0x12345678
+    xor ecx, ecx
+    lar eax, ecx
+    jz fail_lar_null
+    cmp eax, 0x12345678
+    jne fail_lar_null
+
+    ; VERR/VERW on writable data (0x10) vs execute-only-readable CS (0x08).
+    mov ax, 0x10
+    verr ax
+    jnz fail_verr
+    verw ax
+    jnz fail_verw
+    mov ax, 0x08
+    verr ax
+    jnz fail_verr_cs
+    verw ax
+    jz fail_verw_cs
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -197,6 +242,61 @@ fail_o16_push:
 
 fail_o16_pop:
     mov al, 9
+    out 0xF4, al
+    jmp hang64
+
+fail_lar_zf:
+    mov al, 10
+    out 0xF4, al
+    jmp hang64
+
+fail_lar:
+    mov al, 11
+    out 0xF4, al
+    jmp hang64
+
+fail_lar_high:
+    mov al, 12
+    out 0xF4, al
+    jmp hang64
+
+fail_lsl_zf:
+    mov al, 13
+    out 0xF4, al
+    jmp hang64
+
+fail_lsl:
+    mov al, 14
+    out 0xF4, al
+    jmp hang64
+
+fail_rexw_lar:
+    mov al, 15
+    out 0xF4, al
+    jmp hang64
+
+fail_lar_null:
+    mov al, 16
+    out 0xF4, al
+    jmp hang64
+
+fail_verr:
+    mov al, 17
+    out 0xF4, al
+    jmp hang64
+
+fail_verw:
+    mov al, 18
+    out 0xF4, al
+    jmp hang64
+
+fail_verr_cs:
+    mov al, 19
+    out 0xF4, al
+    jmp hang64
+
+fail_verw_cs:
+    mov al, 20
     out 0xF4, al
     jmp hang64
 
