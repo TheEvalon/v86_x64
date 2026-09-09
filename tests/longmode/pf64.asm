@@ -143,13 +143,13 @@ high_entry:
     jne fail_cr2
 
     ; INVLPG of the mapped higher-half page: no #PF/#GP, first byte still `cld`.
-    mov qword [rel saved_cr2], 0xA5A5A5A5A5A5A5A5
+    ; `mov m64, imm64` does not exist; keep the sentinel as a 32-bit 0.
+    mov qword [rel saved_cr2], 0
     mov rax, HIGHER_KERNEL
     invlpg [rax]
     db 0x48
     invlpg [rax]
-    mov rcx, 0xA5A5A5A5A5A5A5A5
-    cmp [rel saved_cr2], rcx
+    cmp qword [rel saved_cr2], 0
     jne fail_invlpg
     cmp byte [rax], 0xFC
     jne fail_invlpg
