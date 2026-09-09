@@ -87,8 +87,10 @@ start64:
     db 0x27 ; DAA
     db 0x60 ; PUSHAD
     db 0xCE ; INTO
+    db 0xC4 ; LES (also VEX; AVX not advertised)
+    db 0xC5 ; LDS (also VEX; AVX not advertised)
 
-    cmp dword [ud_count], 3
+    cmp dword [ud_count], 5
     jb fail_count
 
     xor eax, eax
