@@ -1,5 +1,5 @@
 ; Multiboot payload: run 64-bit code at a canonical higher-half RIP
-; (Linux -2GB window), CMOV r64, and SETCC. Exit code is written to port 0xF4 (0 = pass).
+; (Linux -2GB window), CMOV r64, SETCC, and ADD/SUB r64. Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
 ORG 0x100000
@@ -118,6 +118,20 @@ higher:
     cmp rax, rbx
     jne fail_setz_clear
 
+    ; ADD r64 of 0xFFFFFFFF + 1 is 2^32. 32-bit ADD wraps EAX to 0.
+    ; `mov rax, 0xFFFFFFFF` would sign-extend to -1; use EAX to zero-extend.
+    mov eax, 0xFFFFFFFF
+    add rax, 1
+    mov rbx, 0x100000000
+    cmp rax, rbx
+    jne fail_add
+
+    ; SUB r64 of 0 - 1 is all ones. 32-bit SUB writes EAX=0xFFFFFFFF.
+    xor eax, eax
+    sub rax, 1
+    cmp rax, -1
+    jne fail_sub
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -158,6 +172,20 @@ fail_setz_clear:
 .hang_setz_clear:
     hlt
     jmp .hang_setz_clear
+
+fail_add:
+    mov al, 6
+    out 0xF4, al
+.hang_add:
+    hlt
+    jmp .hang_add
+
+fail_sub:
+    mov al, 7
+    out 0xF4, al
+.hang_sub:
+    hlt
+    jmp .hang_sub
 
 align 8
 gdt:
