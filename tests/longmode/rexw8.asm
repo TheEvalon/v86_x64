@@ -1,5 +1,5 @@
 ; Multiboot payload: REX.W is ignored on 8-bit / size-independent ops;
-; MOVSX/MOVZX r64 still widen to 64 bits. CDQE/CQO sign-extend through RAX/RDX.
+; MOVSX/MOVZX r64 still widen to 64 bits (8- and 16-bit sources). CDQE/CQO sign-extend through RAX/RDX.
 ; TEST r64,imm32 sign-extends the immediate. Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -155,6 +155,14 @@ jz_ok:
     cmp rax, 0x80
     jne fail_movzx8
 
+    ; MOVZX r64, r/m16 clears bits 63:16. 0x8000 must not sign-extend
+    ; (MOVSX r16 of the same source is already checked above).
+    mov rax, 0x0123456789ABCDEF
+    mov dx, 0x8000
+    movzx rax, dx
+    cmp rax, 0x8000
+    jne fail_movzx16
+
     ; CDQE sign-extends EAX to RAX. 32-bit CWDE sign-extends AX and
     ; would leave 0 here (AX of 0x80000000 is 0).
     mov rax, 0x0123456780000000
@@ -263,6 +271,11 @@ fail_cqo_pos:
 
 fail_testimm:
     mov al, 16
+    out 0xF4, al
+    jmp hang64
+
+fail_movzx16:
+    mov al, 17
     out 0xF4, al
     jmp hang64
 
