@@ -1816,6 +1816,16 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
             write_reg64(r, rm);
             let _ = rm64_write(modrm, addr, add64(rm, tmp));
         },
+        0xC3 => {
+            // MOVNTI m64, r64. Register form is #UD. 66 does not change size (W wins).
+            let modrm = return_on_pagefault!(read_imm8());
+            if modrm >= 0xC0 {
+                trigger_ud();
+                return;
+            }
+            let addr = return_on_pagefault!(modrm_resolve(modrm));
+            return_on_pagefault!(safe_write64(addr, read_reg64(gpr_reg(modrm))));
+        },
         0xC7 => {
             let modrm = return_on_pagefault!(read_imm8());
             match modrm >> 3 & 7 {
