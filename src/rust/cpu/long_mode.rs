@@ -1593,7 +1593,7 @@ mod tests {
         assert_eq!(crate::cpu::cpu::tss64_rsp_offset(2), 0x14);
         assert_eq!(crate::cpu::cpu::tss64_ist_offset(1), 0x24);
         assert_eq!(crate::cpu::cpu::tss64_ist_offset(2), 0x2C);
-        assert_eq!(crate::cpu::cpu::tss64_ist_offset(7), 0x5C);
+        assert_eq!(crate::cpu::cpu::tss64_ist_offset(7), 0x54);
     }
 
     #[test]
