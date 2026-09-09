@@ -58,8 +58,8 @@ function newc_entry(name, data, mode, extras)
 function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
-    // succeeds if a later syscall fails. Extra getpid/uname/brk/mmap/arch_prctl
-    // writes are diagnostic only.
+    // succeeds if a later syscall fails. Extra getpid/gettid/uname/brk/mmap/
+    // arch_prctl writes are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
@@ -67,8 +67,9 @@ function make_static_init_elf(message)
         Buffer.from("linux64-init: brk\n", "ascii"),
         Buffer.from("linux64-init: mmap\n", "ascii"),
         Buffer.from("linux64-init: archprctl\n", "ascii"),
+        Buffer.from("linux64-init: gettid\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
@@ -153,12 +154,19 @@ function make_static_init_elf(message)
     // 1. write(1, LINUX64_INIT_LINE + "\n") — existing pass bar, must be first.
     write_str(MSG);
 
-    // 2. getpid (rax=39); success if pid > 0 (usually 1).
+    // 2. getpid (rax=39) then gettid (rax=186). Single-threaded /init must
+    //    have tid == pid and pid > 0. Save pid in r12 across gettid.
     mov_imm(0, 39);
     syscall();
     emit([0x48, 0x85, 0xC0]); // test rax, rax
     jcc8(0x7E, "skip_getpid"); // jle
+    emit([0x49, 0x89, 0xC4]); // mov r12, rax
     write_str(MSG_GETPID);
+    mov_imm(0, 186);
+    syscall();
+    emit([0x4C, 0x39, 0xE0]); // cmp rax, r12
+    jcc8(0x75, "skip_getpid"); // jne
+    write_str(MSG_GETTID);
     labels.skip_getpid = size;
 
     // 3. uname (rax=63) into a stack buffer; sysname must start with "Linux".
