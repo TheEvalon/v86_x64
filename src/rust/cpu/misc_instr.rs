@@ -405,17 +405,32 @@ pub unsafe fn setcc_mem(condition: bool, addr: i32) {
 }
 
 pub unsafe fn fxsave(addr: i32) {
-    dbg_assert!(addr & 0xF == 0, "TODO: #gp");
-    return_on_pagefault!(writable_or_pagefault(addr, 288));
+    if addr & 0xF != 0 {
+        if *is_64 {
+            trigger_gp(0);
+            return;
+        }
+        dbg_assert!(false, "TODO: #gp");
+    }
+
+    let nbytes = if *is_64 { 512 } else { 288 };
+    return_on_pagefault!(writable_or_pagefault(addr, nbytes));
 
     safe_write16(addr + 0, (*fpu_control_word).into()).unwrap();
     safe_write16(addr + 2, fpu_load_status_word().into()).unwrap();
     safe_write8(addr + 4, !*fpu_stack_empty as i32 & 0xFF).unwrap();
     safe_write16(addr + 6, *fpu_opcode).unwrap();
-    safe_write32(addr + 8, *fpu_ip).unwrap();
-    safe_write16(addr + 12, *fpu_ip_selector).unwrap();
-    safe_write32(addr + 16, *fpu_dp).unwrap();
-    safe_write16(addr + 20, *fpu_dp_selector).unwrap();
+    if *is_64 {
+        // FXSAVE64: 64-bit FIP/FDP, no FCS/FDS. Stored FIP/FDP are still 32-bit.
+        safe_write64(addr + 8, *fpu_ip as u32 as u64).unwrap();
+        safe_write64(addr + 16, *fpu_dp as u32 as u64).unwrap();
+    }
+    else {
+        safe_write32(addr + 8, *fpu_ip).unwrap();
+        safe_write16(addr + 12, *fpu_ip_selector).unwrap();
+        safe_write32(addr + 16, *fpu_dp).unwrap();
+        safe_write16(addr + 20, *fpu_dp_selector).unwrap();
+    }
 
     safe_write32(addr + 24, *mxcsr).unwrap();
     safe_write32(addr + 28, MXCSR_MASK).unwrap();
@@ -431,10 +446,26 @@ pub unsafe fn fxsave(addr: i32) {
     for i in 0..8 {
         safe_write128(addr + 160 + (i << 4), *reg_xmm.offset(i as isize)).unwrap();
     }
+
+    if *is_64 {
+        // XMM8–15 and the reserved tail: write zeros. This emulator has no XMM8–15 state.
+        let zero = reg128 { u64: [0, 0] };
+        for i in 0..14 {
+            safe_write128(addr + 288 + (i << 4), zero).unwrap();
+        }
+    }
 }
 pub unsafe fn fxrstor(addr: i32) {
-    dbg_assert!(addr & 0xF == 0, "TODO: #gp");
-    return_on_pagefault!(readable_or_pagefault(addr, 288));
+    if addr & 0xF != 0 {
+        if *is_64 {
+            trigger_gp(0);
+            return;
+        }
+        dbg_assert!(false, "TODO: #gp");
+    }
+
+    let nbytes = if *is_64 { 512 } else { 288 };
+    return_on_pagefault!(readable_or_pagefault(addr, nbytes));
 
     let new_mxcsr = safe_read32s(addr + 24).unwrap();
 
@@ -448,10 +479,16 @@ pub unsafe fn fxrstor(addr: i32) {
     fpu_set_status_word(safe_read16(addr + 2).unwrap() as u16);
     *fpu_stack_empty = !safe_read8(addr + 4).unwrap() as u8;
     *fpu_opcode = safe_read16(addr + 6).unwrap();
-    *fpu_ip = safe_read32s(addr + 8).unwrap();
-    *fpu_ip_selector = safe_read16(addr + 12).unwrap();
-    *fpu_dp = safe_read32s(addr + 16).unwrap();
-    *fpu_dp_selector = safe_read16(addr + 20).unwrap();
+    if *is_64 {
+        *fpu_ip = safe_read64s(addr + 8).unwrap() as i32;
+        *fpu_dp = safe_read64s(addr + 16).unwrap() as i32;
+    }
+    else {
+        *fpu_ip = safe_read32s(addr + 8).unwrap();
+        *fpu_ip_selector = safe_read16(addr + 12).unwrap();
+        *fpu_dp = safe_read32s(addr + 16).unwrap();
+        *fpu_dp_selector = safe_read16(addr + 20).unwrap();
+    }
 
     set_mxcsr(new_mxcsr);
 
