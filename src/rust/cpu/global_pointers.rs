@@ -19,6 +19,8 @@ pub const segment_access_bytes: *mut u8 = 512 as *mut u8; // TODO: reorder below
 
 pub const apic_enabled: *mut bool = 548 as *mut bool;
 pub const acpi_enabled: *mut bool = 552 as *mut bool;
+// Config: local APIC in CPUID. Defaults to ACPI. Not the guest MSR EN bit.
+pub const lapic_present: *mut bool = 553 as *mut bool;
 
 pub const instruction_pointer: *mut i32 = 556 as *mut i32;
 pub const previous_ip: *mut i32 = 560 as *mut i32;

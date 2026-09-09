@@ -1366,7 +1366,7 @@ pub unsafe fn instr_0F30() {
                 "Changing APIC address not supported"
             );
             dbg_assert!(low & IA32_APIC_BASE_EXTD == 0, "x2apic not supported");
-            *apic_enabled = low & IA32_APIC_BASE_EN == IA32_APIC_BASE_EN
+            *apic_enabled = (low & IA32_APIC_BASE_EN) == IA32_APIC_BASE_EN
         },
         IA32_TIME_STAMP_COUNTER => set_tsc(low as u32, high as u32),
         IA32_BIOS_UPDT_TRIG => {}, // windows xp
@@ -1479,11 +1479,9 @@ pub unsafe fn instr_0F32() {
         MSR_TEST_CTRL => {}, // linux 5.x
         IA32_PLATFORM_ID => {},
         IA32_APIC_BASE => {
-            if *acpi_enabled {
-                low = APIC_MEM_ADDRESS as i32;
-                if *apic_enabled {
-                    low |= IA32_APIC_BASE_EN
-                }
+            low = APIC_MEM_ADDRESS as i32 | IA32_APIC_BASE_BSP;
+            if *apic_enabled {
+                low |= IA32_APIC_BASE_EN
             }
         },
         IA32_BIOS_SIGN_ID => {},
@@ -3525,9 +3523,7 @@ pub unsafe fn instr_0FA2() {
                     1 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, sep, pge, cmov
                     1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // mmx, fxsr, sse1, sse2
 
-            if *acpi_enabled
-            //&& this.apic_enabled[0])
-            {
+            if *acpi_enabled || *lapic_present {
                 edx |= 1 << 9; // apic
             }
         },

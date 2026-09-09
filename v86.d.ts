@@ -540,10 +540,17 @@ export interface V86Options {
     screen?: ScreenConfig;
 
     /**
-     * Enable ACPI (also enables APIC). Experimental and only partially implemented.
+     * Enable ACPI tables and the ACPI device. Also enables the local APIC in
+     * CPUID unless `apic` is set explicitly.
      * @default false
      */
     acpi?: boolean;
+
+    /**
+     * Advertise a local APIC in CPUID.1 EDX bit 9. Defaults to `acpi`.
+     * Set `apic: true` with `acpi: false` to expose the LAPIC without ACPI tables.
+     */
+    apic?: boolean;
 
     /**
      * Log level (for debug builds)
