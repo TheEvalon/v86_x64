@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit POPCNT, BSF, BSR, and MUL in long mode.
+; Multiboot payload: 64-bit POPCNT, BSF, BSR, MUL, INC, and DEC in long mode.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -144,6 +144,20 @@ start64:
     cmp rdx, 1
     jne fail_mul_hi
 
+    ; INC r64 of 0xFFFFFFFF is 2^32. 32-bit INC wraps EAX to 0.
+    ; `mov rax, 0xFFFFFFFF` would sign-extend to -1; use EAX to zero-extend.
+    mov eax, 0xFFFFFFFF
+    inc rax
+    mov rbx, 0x100000000
+    cmp rax, rbx
+    jne fail_inc
+
+    ; DEC r64 of 2^32+1 is 2^32. 32-bit DEC of EAX=1 is 0.
+    mov rax, 0x100000001
+    dec rax
+    cmp rax, rbx
+    jne fail_dec
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -185,6 +199,12 @@ fail_mul:
     jmp fail_out
 fail_mul_hi:
     mov al, 13
+    jmp fail_out
+fail_inc:
+    mov al, 14
+    jmp fail_out
+fail_dec:
+    mov al, 15
     jmp fail_out
 
 fail_out:
