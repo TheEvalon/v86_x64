@@ -59,7 +59,7 @@ function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
     // succeeds if a later syscall fails. Extra getpid/gettid/uname/brk/mmap/
-    // arch_prctl/clock_gettime/gettimeofday/writev/getcwd/nanosleep/openat/close/munmap/getppid/getuid/geteuid/getgid/getegid writes are diagnostic only.
+    // arch_prctl/clock_gettime/gettimeofday/writev/getcwd/nanosleep/openat/fstat/close/munmap/getppid/getuid/geteuid/getgid/getegid writes are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
@@ -82,8 +82,9 @@ function make_static_init_elf(message)
         Buffer.from("linux64-init: geteuid\n", "ascii"),
         Buffer.from("linux64-init: getgid\n", "ascii"),
         Buffer.from("linux64-init: getegid\n", "ascii"),
+        Buffer.from("linux64-init: fstat\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_GETCWD = 10, MSG_NANOSLEEP = 11, MSG_OPENAT = 12, MSG_CLOSE = 13, MSG_MUNMAP = 14, MSG_PATH = 15, MSG_GETPPID = 16, MSG_GETUID = 17, MSG_GETEUID = 18, MSG_GETGID = 19, MSG_GETEGID = 20;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_GETCWD = 10, MSG_NANOSLEEP = 11, MSG_OPENAT = 12, MSG_CLOSE = 13, MSG_MUNMAP = 14, MSG_PATH = 15, MSG_GETPPID = 16, MSG_GETUID = 17, MSG_GETEUID = 18, MSG_GETGID = 19, MSG_GETEGID = 20, MSG_FSTAT = 21;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
@@ -370,7 +371,7 @@ function make_static_init_elf(message)
     labels.skip_nanosleep = size;
 
     // 12. openat(AT_FDCWD, "/init", O_RDONLY) (rax=257), then read 4 bytes
-    //     of ELF magic into map+320 and close. nanosleep failure still runs it.
+    //     of ELF magic into map+320, fstat, and close. nanosleep failure still runs it.
     mov_imm(0, 257);
     mov_imm(7, -100); // AT_FDCWD
     lea_rsi(MSG_PATH);
@@ -387,6 +388,22 @@ function make_static_init_elf(message)
     emit([0x81, 0xBB, 0x40, 0x01, 0x00, 0x00, 0x7F, 0x45, 0x4C, 0x46]); // cmp dword [rbx+320], 0x464C457F
     jcc8(0x75, "do_close"); // jne
     write_str(MSG_OPENAT);
+
+    // fstat(fd, map+384) (rax=5). /init must be a regular file with size > 0.
+    // Uses the mmap page; skipped on openat/read failure (still closed).
+    mov_imm(0, 5);
+    emit([0x4C, 0x89, 0xE7]); // mov rdi, r12
+    emit([0x48, 0x8D, 0xB3, 0x80, 0x01, 0x00, 0x00]); // lea rsi, [rbx+384]
+    syscall();
+    is_err_jae32("do_close");
+    emit([0x8B, 0x83, 0x98, 0x01, 0x00, 0x00]); // mov eax, [rbx+408] st_mode
+    emit([0x25, 0x00, 0xF0, 0x00, 0x00]); // and eax, S_IFMT
+    emit([0x3D, 0x00, 0x80, 0x00, 0x00]); // cmp eax, S_IFREG
+    jcc8(0x75, "do_close"); // jne
+    emit([0x48, 0x83, 0xBB, 0xB0, 0x01, 0x00, 0x00, 0x00]); // cmp qword [rbx+432], 0 st_size
+    jcc8(0x7E, "do_close"); // jle
+    write_str(MSG_FSTAT);
+
     labels.do_close = size;
     mov_imm(0, 3);            // close
     emit([0x4C, 0x89, 0xE7]); // mov rdi, r12
