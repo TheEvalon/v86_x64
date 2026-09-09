@@ -1,4 +1,4 @@
-; Multiboot payload: PREFETCH/PREFETCHW (0F 0D /r) as a 64-bit hint nop.
+; Multiboot payload: PREFETCH/PREFETCHW (0F 0D /r), 0F 18 hints, and 0F 1F NOP.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -89,10 +89,27 @@ start64:
     cmp qword [buf], rax
     jne fail_prefetch
 
+    ; 0F 18 PREFETCHNTA/T0/T1/T2 are hint nops; memory unchanged.
+    prefetcht0 [buf]
+    prefetcht1 [buf]
+    prefetcht2 [buf]
+    prefetchnta [buf]
+    cmp qword [buf], rax
+    jne fail_18
+
     ; Register form 0F 0D /r (mod=11) must not #UD.
     db 0x0F, 0x0D, 0xC0
     cmp qword [buf], rax
     jne fail_reg
+
+    ; 0F 1F multi-byte NOP (Linux FineIBT: nopl 0x0(%rax,%rax,1)).
+    ; Must consume ModRM/SIB and not #GP a non-canonical EA.
+    xor ecx, ecx
+    db 0x0F, 0x1F, 0x44, 0x08, 0x00 ; nopl 0x0(%rax,%rcx,1) with rcx=0
+    mov rdx, 0x0000800000000000
+    db 0x0F, 0x1F, 0x02             ; nopl [rdx] non-canonical
+    cmp qword [buf], rax
+    jne fail_1f
 
     xor eax, eax
     out 0xF4, al
@@ -111,6 +128,12 @@ fail_prefetch:
     jmp fail_out
 fail_reg:
     mov al, 5
+    jmp fail_out
+fail_18:
+    mov al, 6
+    jmp fail_out
+fail_1f:
+    mov al, 7
     jmp fail_out
 
 fail_out:
