@@ -417,6 +417,7 @@ emulator.add_listener("serial0-output-byte", function(byte)
         saw_run_init = true;
         console.error("linux64: kernel execing /init, continuing");
     }
+    // Pass on the first /init write. Later getpid/uname/brk lines are extra.
     if(serial.includes(LINUX64_INIT_LINE))
     {
         console.log("linux64: pass (" + LINUX64_INIT_LINE + ")");
