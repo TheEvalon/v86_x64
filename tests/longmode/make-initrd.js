@@ -58,15 +58,16 @@ function newc_entry(name, data, mode, extras)
 function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
-    // succeeds if a later syscall fails. Extra getpid/uname/brk writes are
-    // diagnostic only.
+    // succeeds if a later syscall fails. Extra getpid/uname/brk/mmap writes
+    // are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
         Buffer.from("linux64-init: uname\n", "ascii"),
         Buffer.from("linux64-init: brk\n", "ascii"),
+        Buffer.from("linux64-init: mmap\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
@@ -87,6 +88,18 @@ function make_static_init_elf(message)
         // REX.W mov r64, imm32 (sign-extended): 48 C7 C0+reg
         const b = Buffer.alloc(7);
         b[0] = 0x48;
+        b[1] = 0xC7;
+        b[2] = 0xC0 | (reg & 7);
+        b.writeUInt32LE(imm >>> 0, 3);
+        emit(b);
+    }
+
+    function mov_imm_hi(reg, imm)
+    {
+        // REX.WB mov r8-r15, imm32 (sign-extended): 49 C7 C0+reg
+        // 4th syscall arg is r10, not rcx.
+        const b = Buffer.alloc(7);
+        b[0] = 0x49;
         b[1] = 0xC7;
         b[2] = 0xC0 | (reg & 7);
         b.writeUInt32LE(imm >>> 0, 3);
@@ -156,7 +169,25 @@ function make_static_init_elf(message)
     write_str(MSG_BRK);
     labels.skip_brk = size;
 
-    // 5. exit(0)
+    // 5. mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    //    (rax=9). Success if the mapping is not -4095..-1 and a store round-trips.
+    mov_imm(0, 9);          // mov rax, 9 (mmap)
+    mov_imm(7, 0);          // mov rdi, 0 (addr)
+    mov_imm(6, 4096);       // mov rsi, 4096 (length)
+    mov_imm(2, 3);          // mov rdx, PROT_READ|PROT_WRITE
+    mov_imm_hi(2, 0x22);    // mov r10, MAP_PRIVATE|MAP_ANONYMOUS
+    mov_imm_hi(0, -1);      // mov r8, -1 (fd)
+    mov_imm_hi(1, 0);       // mov r9, 0 (offset)
+    syscall();
+    emit([0x48, 0x3D, 0x01, 0xF0, 0xFF, 0xFF]); // cmp rax, -4095
+    jcc8(0x73, "skip_mmap"); // jae (unsigned IS_ERR)
+    emit([0xC6, 0x00, 0xA5]); // mov byte [rax], 0xA5
+    emit([0x80, 0x38, 0xA5]); // cmp byte [rax], 0xA5
+    jcc8(0x75, "skip_mmap"); // jne
+    write_str(MSG_MMAP);
+    labels.skip_mmap = size;
+
+    // 6. exit(0)
     mov_imm(0, 60);
     emit([0x48, 0x31, 0xFF]); // xor rdi, rdi
     syscall();
