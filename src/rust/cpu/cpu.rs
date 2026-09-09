@@ -5363,33 +5363,31 @@ pub unsafe fn write_mmx_reg64(r: i32, data: u64) {
     };
 }
 
-pub unsafe fn read_xmm_f32(r: i32) -> f32 { return (*reg_xmm.offset(r as isize)).f32[0]; }
+pub unsafe fn read_xmm_f32(r: i32) -> f32 { return (*xmm_ptr(r)).f32[0]; }
 
-pub unsafe fn read_xmm32(r: i32) -> i32 { return (*reg_xmm.offset(r as isize)).u32[0] as i32; }
+pub unsafe fn read_xmm32(r: i32) -> i32 { return (*xmm_ptr(r)).u32[0] as i32; }
 
-pub unsafe fn read_xmm64s(r: i32) -> u64 { (*reg_xmm.offset(r as isize)).u64[0] }
+pub unsafe fn read_xmm64s(r: i32) -> u64 { (*xmm_ptr(r)).u64[0] }
 
-pub unsafe fn read_xmm128s(r: i32) -> reg128 { return *reg_xmm.offset(r as isize); }
+pub unsafe fn read_xmm128s(r: i32) -> reg128 { return *xmm_ptr(r); }
 
-pub unsafe fn write_xmm_f32(r: i32, data: f32) { (*reg_xmm.offset(r as isize)).f32[0] = data; }
+pub unsafe fn write_xmm_f32(r: i32, data: f32) { (*xmm_ptr(r)).f32[0] = data; }
 
-pub unsafe fn write_xmm32(r: i32, data: i32) { (*reg_xmm.offset(r as isize)).i32[0] = data; }
+pub unsafe fn write_xmm32(r: i32, data: i32) { (*xmm_ptr(r)).i32[0] = data; }
 
-pub unsafe fn write_xmm64(r: i32, data: u64) { (*reg_xmm.offset(r as isize)).u64[0] = data }
-pub unsafe fn write_xmm_f64(r: i32, data: f64) { (*reg_xmm.offset(r as isize)).f64[0] = data }
+pub unsafe fn write_xmm64(r: i32, data: u64) { (*xmm_ptr(r)).u64[0] = data }
+pub unsafe fn write_xmm_f64(r: i32, data: f64) { (*xmm_ptr(r)).f64[0] = data }
 
 pub unsafe fn write_xmm128(r: i32, i0: i32, i1: i32, i2: i32, i3: i32) {
     let x = reg128 {
         u32: [i0 as u32, i1 as u32, i2 as u32, i3 as u32],
     };
-    *reg_xmm.offset(r as isize) = x;
+    *xmm_ptr(r) = x;
 }
 
-pub unsafe fn write_xmm128_2(r: i32, i0: u64, i1: u64) {
-    *reg_xmm.offset(r as isize) = reg128 { u64: [i0, i1] };
-}
+pub unsafe fn write_xmm128_2(r: i32, i0: u64, i1: u64) { *xmm_ptr(r) = reg128 { u64: [i0, i1] }; }
 
-pub unsafe fn write_xmm_reg128(r: i32, data: reg128) { *reg_xmm.offset(r as isize) = data; }
+pub unsafe fn write_xmm_reg128(r: i32, data: reg128) { *xmm_ptr(r) = data; }
 
 /// Set the fpu tag word to valid and the top-of-stack to 0 on mmx instructions
 #[no_mangle]
@@ -5893,6 +5891,7 @@ pub unsafe fn reset_cpu() {
         *dreg.offset(i) = 0;
 
         write_xmm128_2(i as i32, 0, 0);
+        write_xmm128_2((i + 8) as i32, 0, 0);
 
         *fpu_st.offset(i) = softfloat::F80::ZERO;
     }
