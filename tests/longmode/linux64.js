@@ -60,6 +60,7 @@ const emulator = new V86({
 
 let serial = "";
 let finished = false;
+let saw_linux_version = false;
 
 function u64_from_pair(view)
 {
@@ -379,6 +380,7 @@ emulator.add_listener("emulator-loaded", function()
             " " + dump_qword(cpu, 0xffffffff829803e8n) +
             " " + dump_qword(cpu, 0xffffffff8283d0c0n) +
             " " + dump_qword(cpu, 0xffffffff8283d030n) +
+            " " + dump_qword(cpu, 0xffffffff82843980n) +
             " " + dump_stack(cpu));
         return true;
     };
@@ -392,10 +394,40 @@ emulator.add_listener("serial0-output-byte", function(byte)
     {
         process.stdout.write(chr);
     }
-    if(serial.includes("Linux version"))
+    if(!saw_linux_version && serial.includes("Linux version"))
     {
-        console.log("linux64: pass (Linux version)");
+        saw_linux_version = true;
+        console.error("linux64: reached Linux version, continuing");
+    }
+    const pass = [
+        "VFS: Cannot open root device",
+        "Unable to mount root",
+        "No filesystem could mount root",
+        "Kernel panic - not syncing: VFS",
+        "Freeing unused kernel image",
+        "Freeing unused kernel memory",
+    ].find(s => serial.includes(s));
+    if(pass)
+    {
+        console.log("linux64: pass (" + pass + ")");
         finish(0);
+    }
+    // Wait for the panic line to finish. The VFS panic is
+    // "Kernel panic - not syncing: VFS: Unable to mount root fs ...";
+    // matching the prefix alone races the rest of the line.
+    const panic_at = serial.lastIndexOf("Kernel panic - not syncing");
+    if(panic_at >= 0)
+    {
+        const rest = serial.slice(panic_at);
+        const nl = rest.indexOf("\n");
+        if(nl >= 0)
+        {
+            const line = rest.slice(0, nl);
+            if(!line.includes("VFS") && !line.includes("Unable to mount root"))
+            {
+                finish(1, "linux64: kernel panic before VFS: " + line.trim());
+            }
+        }
     }
 });
 

@@ -333,6 +333,8 @@ enum String64 {
     Lods,
     Scas,
     Cmps,
+    Ins,
+    Outs,
 }
 
 unsafe fn string_read(addr: u64, width: i64) -> OrPageFault<u64> {
@@ -486,6 +488,13 @@ unsafe fn string64(kind: String64, width: i64) {
         }
     }
 
+    if matches!(kind, String64::Ins | String64::Outs) {
+        let port = read_reg16(DX);
+        if !test_privileges_for_io(port, width as i32) {
+            return;
+        }
+    }
+
     let start_rdi_page = page_of(rdi);
     let start_rsi_page = page_of(rsi);
     let mut slow = 0u32;
@@ -493,13 +502,15 @@ unsafe fn string64(kind: String64, width: i64) {
     while rcx > 0 && slow < MAX_SLOW {
         if matches!(
             kind,
-            String64::Movs | String64::Stos | String64::Scas | String64::Cmps
+            String64::Movs | String64::Stos | String64::Scas | String64::Cmps | String64::Ins
         ) && page_of(rdi) != start_rdi_page
         {
             break;
         }
-        if matches!(kind, String64::Movs | String64::Lods | String64::Cmps)
-            && page_of(rsi) != start_rsi_page
+        if matches!(
+            kind,
+            String64::Movs | String64::Lods | String64::Cmps | String64::Outs
+        ) && page_of(rsi) != start_rsi_page
         {
             break;
         }
@@ -529,6 +540,28 @@ unsafe fn string64(kind: String64, width: i64) {
                 rsi = rsi.wrapping_add(dir as u64);
                 rdi = rdi.wrapping_add(dir as u64);
             },
+            String64::Ins => {
+                *pending_linear64 = rdi;
+                return_on_pagefault!(writable_or_pagefault(rdi as i32, width as i32));
+                let port = read_reg16(DX);
+                let v = match width {
+                    1 => io_port_read8(port) as u32 as u64,
+                    2 => io_port_read16(port) as u32 as u64,
+                    _ => io_port_read32(port) as u32 as u64,
+                };
+                return_on_pagefault!(string_write(rdi, width, v));
+                rdi = rdi.wrapping_add(dir as u64);
+            },
+            String64::Outs => {
+                let port = read_reg16(DX);
+                let v = return_on_pagefault!(string_read(rsi, width));
+                match width {
+                    1 => io_port_write8(port, v as i32),
+                    2 => io_port_write16(port, v as i32),
+                    _ => io_port_write32(port, v as i32),
+                }
+                rsi = rsi.wrapping_add(dir as u64);
+            },
         }
         rcx -= 1;
         slow += 1;
@@ -541,12 +574,15 @@ unsafe fn string64(kind: String64, width: i64) {
         }
     }
     if asize32 {
-        if matches!(kind, String64::Movs | String64::Lods | String64::Cmps) {
+        if matches!(
+            kind,
+            String64::Movs | String64::Lods | String64::Cmps | String64::Outs
+        ) {
             write_reg32(ESI, rsi as i32);
         }
         if matches!(
             kind,
-            String64::Movs | String64::Stos | String64::Scas | String64::Cmps
+            String64::Movs | String64::Stos | String64::Scas | String64::Cmps | String64::Ins
         ) {
             write_reg32(EDI, rdi as i32);
         }
@@ -555,12 +591,15 @@ unsafe fn string64(kind: String64, width: i64) {
         }
     }
     else {
-        if matches!(kind, String64::Movs | String64::Lods | String64::Cmps) {
+        if matches!(
+            kind,
+            String64::Movs | String64::Lods | String64::Cmps | String64::Outs
+        ) {
             write_reg64(ESI, rsi);
         }
         if matches!(
             kind,
-            String64::Movs | String64::Stos | String64::Scas | String64::Cmps
+            String64::Movs | String64::Stos | String64::Scas | String64::Cmps | String64::Ins
         ) {
             write_reg64(EDI, rdi);
         }
@@ -575,8 +614,17 @@ unsafe fn string64(kind: String64, width: i64) {
 }
 
 unsafe fn dispatch_string64(opcode: i32) {
-    let width = if matches!(opcode, 0xA4 | 0xA6 | 0xAA | 0xAC | 0xAE) {
+    let width = if matches!(opcode, 0x6C | 0x6E | 0xA4 | 0xA6 | 0xAA | 0xAC | 0xAE) {
         1
+    }
+    else if matches!(opcode, 0x6D | 0x6F) {
+        // INS/OUTS ignore REX.W; 66h selects word vs dword.
+        if is_osize_32() {
+            4
+        }
+        else {
+            2
+        }
     }
     else if rex_w() {
         8
@@ -588,6 +636,8 @@ unsafe fn dispatch_string64(opcode: i32) {
         2
     };
     let kind = match opcode {
+        0x6C | 0x6D => String64::Ins,
+        0x6E | 0x6F => String64::Outs,
         0xA4 | 0xA5 => String64::Movs,
         0xA6 | 0xA7 => String64::Cmps,
         0xAA | 0xAB => String64::Stos,
@@ -1105,8 +1155,13 @@ unsafe fn dispatch_forced64(opcode: i32) {
                 },
                 2 => {
                     let target = return_on_pagefault!(load_rm64(modrm));
+                    // #GP before pushing the return address: a non-canonical
+                    // target after push underflows a just-emptied kernel stack.
+                    if gp_if_noncanonical(target) {
+                        return;
+                    }
                     return_on_pagefault!(push64(get_rip()));
-                    jump_near64(target);
+                    set_rip(target);
                 },
                 4 => {
                     let target = return_on_pagefault!(load_rm64(modrm));
@@ -1435,7 +1490,7 @@ unsafe fn dispatch_opcode(opcode: i32) {
         dispatch_movsxd();
         return;
     }
-    if matches!(opcode, 0xA4..=0xA7 | 0xAA..=0xAF) {
+    if matches!(opcode, 0x6C..=0x6F | 0xA4..=0xA7 | 0xAA..=0xAF) {
         dispatch_string64(opcode);
         finish_instruction();
         return;
