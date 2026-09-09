@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit PUSH/POP FS and GS, LAR/LSL/VERR/VERW, SMSW, CLTS, LMSW, SLDT, and STR.
+; Multiboot payload: 64-bit PUSH/POP FS and GS, LAR/LSL/VERR/VERW, SMSW, CLTS, LMSW, SLDT, STR, SGDT, and SIDT.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -291,6 +291,36 @@ start64:
     cmp word [smsw_buf], ax
     jne fail_str_mem
 
+    ; SGDT in 64-bit CS stores 10 bytes (2-byte limit + 8-byte base).
+    mov rax, 0xA5A5A5A5A5A5A5A5
+    mov [desc_buf], rax
+    mov [desc_buf + 8], rax
+    sgdt [desc_buf]
+    mov cx, gdt_end - gdt - 1
+    cmp word [desc_buf], cx
+    jne fail_sgdt
+    lea rax, [gdt]
+    cmp qword [desc_buf + 2], rax
+    jne fail_sgdt
+    cmp word [desc_buf + 10], 0xA5A5
+    jne fail_sgdt_width
+    cmp dword [desc_buf + 12], 0xA5A5A5A5
+    jne fail_sgdt_width
+
+    ; LIDT 10-byte desc, then SIDT must round-trip and still write 10 bytes.
+    lidt [idt_desc]
+    mov rax, 0xA5A5A5A5A5A5A5A5
+    mov [desc_buf], rax
+    mov [desc_buf + 8], rax
+    sidt [desc_buf]
+    cmp word [desc_buf], 15
+    jne fail_sidt
+    lea rax, [idt_dummy]
+    cmp qword [desc_buf + 2], rax
+    jne fail_sidt
+    cmp word [desc_buf + 10], 0xA5A5
+    jne fail_sidt_width
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -450,6 +480,26 @@ fail_str_mem:
     out 0xF4, al
     jmp hang64
 
+fail_sgdt:
+    mov al, 33
+    out 0xF4, al
+    jmp hang64
+
+fail_sgdt_width:
+    mov al, 34
+    out 0xF4, al
+    jmp hang64
+
+fail_sidt:
+    mov al, 35
+    out 0xF4, al
+    jmp hang64
+
+fail_sidt_width:
+    mov al, 36
+    out 0xF4, al
+    jmp hang64
+
 hang64:
     hlt
     jmp hang64
@@ -467,6 +517,17 @@ gdt_desc:
 
 smsw_buf:
     dw 0
+
+align 16
+desc_buf:
+    times 16 db 0
+
+align 16
+idt_dummy:
+    times 16 db 0
+idt_desc:
+    dw 15
+    dq idt_dummy
 
 align 4096
 pml4:
