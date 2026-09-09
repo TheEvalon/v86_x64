@@ -1579,6 +1579,24 @@ mod tests {
     }
 
     #[test]
+    fn idt_gate64_ist_field() {
+        let gate = IdtGate64::of_u64s(0x9ABC_EE01_0008_DEF0, 0);
+        assert_eq!(gate.ist(), 1);
+        assert_eq!(gate.dpl(), 3);
+        assert_eq!(gate.gate_type(), 0b110);
+    }
+
+    #[test]
+    fn tss64_stack_offsets() {
+        assert_eq!(crate::cpu::cpu::tss64_rsp_offset(0), 0x04);
+        assert_eq!(crate::cpu::cpu::tss64_rsp_offset(1), 0x0C);
+        assert_eq!(crate::cpu::cpu::tss64_rsp_offset(2), 0x14);
+        assert_eq!(crate::cpu::cpu::tss64_ist_offset(1), 0x24);
+        assert_eq!(crate::cpu::cpu::tss64_ist_offset(2), 0x2C);
+        assert_eq!(crate::cpu::cpu::tss64_ist_offset(7), 0x54);
+    }
+
+    #[test]
     fn syscall_star_selectors_match_amd64() {
         let star = 0x0010_0008_0000_0000;
         let (kcs, kss, ucs, uss) = crate::cpu::cpu::syscall_star_selectors(star);

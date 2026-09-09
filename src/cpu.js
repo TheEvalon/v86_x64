@@ -191,6 +191,7 @@ export function CPU(bus, wm, stop_idling)
     this.gdtr_offset64 = view(Uint32Array, memory, 2256, 2);
     this.idtr_offset64 = view(Uint32Array, memory, 2264, 2);
     this.cr2_64 = view(Uint32Array, memory, 2280, 2);
+    this.tr_base64 = view(Uint32Array, memory, 2288, 2);
 
     this.fpu_st = view(Int32Array, memory, 1152, 4 * 8);
 
@@ -605,6 +606,7 @@ CPU.prototype.get_state = function()
     state[106] = this.gdtr_offset64;
     state[107] = this.idtr_offset64;
     state[108] = this.cr2_64;
+    state[109] = this.tr_base64;
 
     return state;
 };
@@ -793,6 +795,7 @@ CPU.prototype.set_state = function(state)
     if(state[106] !== undefined) this.gdtr_offset64.set(state[106]);
     if(state[107] !== undefined) this.idtr_offset64.set(state[107]);
     if(state[108] !== undefined) this.cr2_64.set(state[108]);
+    if(state[109] !== undefined) this.tr_base64.set(state[109]);
 
     this.fw_value = state[62];
 
