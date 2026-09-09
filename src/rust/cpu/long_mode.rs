@@ -10,8 +10,8 @@ use crate::cpu::cpu::*;
 use crate::cpu::global_pointers::*;
 use crate::cpu::memory;
 use crate::cpu::misc_instr::{
-    adjust_stack_reg, getcf, getzf, pop64, push64, test_b, test_be, test_l, test_le, test_o,
-    test_p, test_s, test_z,
+    adjust_stack_reg, get_stack_pointer, getcf, getzf, pop64, push64, test_b, test_be, test_l,
+    test_le, test_o, test_p, test_s, test_z,
 };
 use crate::cpu::modrm::{resolve_lea64, resolve_modrm64};
 use crate::jit;
@@ -976,63 +976,190 @@ unsafe fn jump_near64(target: u64) {
     set_rip(target);
 }
 
-unsafe fn load_cs_64(selector: i32) -> bool {
+/// Shared CS checks for 64-bit far JMP and far RET. Does not #GP when
+/// RPL > CPL: JMP applies that restriction, RETF treats it as outer return.
+unsafe fn lookup_cs_64(selector: i32) -> Option<(SegmentSelector, SegmentDescriptor)> {
     let cs_selector = SegmentSelector::of_u16(selector as u16);
-    let info = match return_on_pagefault!(lookup_segment_selector(cs_selector), false) {
+    let info = match return_on_pagefault!(lookup_segment_selector(cs_selector), None) {
         Ok((desc, _)) => desc,
         Err(SelectorNullOrInvalid::IsNull) => {
             trigger_gp(0);
-            return false;
+            return None;
         },
         Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
             trigger_gp(selector & !3);
-            return false;
+            return None;
         },
     };
     if info.is_system() || !info.is_executable() {
         trigger_gp(selector & !3);
-        return false;
+        return None;
     }
     if cs_selector.rpl() < *cpl {
         trigger_gp(selector & !3);
-        return false;
+        return None;
     }
     if info.is_dc() && info.dpl() > cs_selector.rpl() {
         trigger_gp(selector & !3);
-        return false;
+        return None;
     }
     if !info.is_dc() && info.dpl() != cs_selector.rpl() {
         trigger_gp(selector & !3);
-        return false;
+        return None;
     }
     if !info.is_present() {
         trigger_np(selector & !3);
-        return false;
+        return None;
     }
-    if cs_selector.rpl() > *cpl {
-        dbg_log!("far jump/return privilege change not implemented in 64-bit");
-        trigger_gp(selector & !3);
-        return false;
-    }
+    Some((cs_selector, info))
+}
+
+unsafe fn apply_cs_64(selector: i32, info: SegmentDescriptor) {
     update_cs_from_descriptor(info);
     *segment_is_null.offset(CS as isize) = false;
     *segment_limits.offset(CS as isize) = info.effective_limit();
     *segment_access_bytes.offset(CS as isize) = info.access_byte();
     *segment_offsets.offset(CS as isize) = info.base();
     *sreg.offset(CS as isize) = selector as u16;
+}
+
+/// Far JMP: same-privilege CS load. Jumping to a less-privileged
+/// (higher RPL) non-conforming CS is #GP, not an inter-privilege transfer.
+unsafe fn load_cs_64(selector: i32) -> bool {
+    let (cs_selector, info) = match lookup_cs_64(selector) {
+        Some(v) => v,
+        None => return false,
+    };
+    if cs_selector.rpl() > *cpl {
+        dbg_log!("far jump to outer privilege is #gp in 64-bit");
+        trigger_gp(selector & !3);
+        return false;
+    }
+    apply_cs_64(selector, info);
     true
 }
 
+/// SS checks for an inter-privilege far return, matching `iretq`.
+/// Null SS is valid only when returning to CPL0.
+unsafe fn validate_ss_64(new_ss: i32, new_cpl: u8) -> bool {
+    let ss_selector = SegmentSelector::of_u16(new_ss as u16);
+    if ss_selector.is_null() {
+        if new_cpl != 0 {
+            dbg_log!("#gp retf64 null ss at cpl={}", new_cpl);
+            trigger_gp(0);
+            return false;
+        }
+        return true;
+    }
+    let ss_descriptor = match return_on_pagefault!(lookup_segment_selector(ss_selector), false) {
+        Ok((desc, _)) => desc,
+        Err(SelectorNullOrInvalid::IsNull) => {
+            dbg_log!("#gp retf64 null ss");
+            trigger_gp(0);
+            return false;
+        },
+        Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
+            dbg_log!("#gp retf64 invalid ss {:x}", new_ss);
+            trigger_gp(new_ss & !3);
+            return false;
+        },
+    };
+    if ss_descriptor.is_system()
+        || ss_selector.rpl() != new_cpl
+        || !ss_descriptor.is_writable()
+        || ss_descriptor.dpl() != new_cpl
+    {
+        dbg_log!("#gp retf64 invalid ss {:x}", new_ss);
+        trigger_gp(new_ss & !3);
+        return false;
+    }
+    if !ss_descriptor.is_present() {
+        dbg_log!("#ss retf64 non-present ss {:x}", new_ss);
+        trigger_ss(new_ss & !3);
+        return false;
+    }
+    true
+}
+
+unsafe fn null_data_segs_below_cpl() {
+    for reg in [ES, DS, FS, GS] {
+        let access = *segment_access_bytes.offset(reg as isize);
+        let dpl = access >> 5 & 3;
+        let executable = access & 8 == 8;
+        let conforming = access & 4 == 4;
+        if dpl < *cpl && !(executable && conforming) {
+            *segment_is_null.offset(reg as isize) = true;
+            *sreg.offset(reg as isize) = 0;
+        }
+    }
+}
+
 unsafe fn retf64(stack_adjust: i32) {
-    let new_rip = return_on_pagefault!(pop64());
-    let new_cs = return_on_pagefault!(pop64()) as u16 as i32;
-    if !load_cs_64(new_cs) {
+    let rsp0 = read_reg64(ESP);
+    if gp_if_noncanonical(rsp0) {
         return;
     }
-    if stack_adjust != 0 {
-        adjust_stack_reg(stack_adjust);
+    return_on_pagefault!(readable_or_pagefault(get_stack_pointer(0), 16));
+    *pending_linear64 = rsp0;
+    let new_rip = return_on_pagefault!(safe_read64s(rsp0 as i32));
+    let new_cs = return_on_pagefault!(safe_read64s(rsp0.wrapping_add(8) as i32)) as u16 as i32;
+
+    let (cs_selector, cs_descriptor) = match lookup_cs_64(new_cs) {
+        Some(v) => v,
+        None => return,
+    };
+
+    if !cs_descriptor.is_long() && new_rip as u32 > cs_descriptor.effective_limit() {
+        dbg_log!("#gp retf64 rip above cs limit");
+        trigger_gp(new_cs & !3);
+        return;
     }
-    jump_near64(new_rip);
+
+    let new_cpl = cs_selector.rpl();
+    let privilege_change = new_cpl != *cpl;
+
+    let (new_rsp, new_ss) = if privilege_change {
+        return_on_pagefault!(readable_or_pagefault(get_stack_pointer(0), 32));
+        *pending_linear64 = rsp0;
+        let new_rsp = return_on_pagefault!(safe_read64s(rsp0.wrapping_add(16) as i32));
+        let new_ss = return_on_pagefault!(safe_read64s(rsp0.wrapping_add(24) as i32)) as u16 as i32;
+        if gp_if_noncanonical(new_rsp) {
+            return;
+        }
+        if !validate_ss_64(new_ss, new_cpl) {
+            return;
+        }
+        (new_rsp, new_ss)
+    }
+    else {
+        (rsp0.wrapping_add(16), 0)
+    };
+
+    if !is_canonical_va(new_rip) {
+        dbg_log!("#gp retf64 rip {:x} non-canonical", new_rip);
+        trigger_gp(0);
+        return;
+    }
+
+    if privilege_change {
+        *cpl = new_cpl;
+        cpl_changed();
+    }
+
+    apply_cs_64(new_cs, cs_descriptor);
+    *instruction_pointer = new_rip as i32 + get_seg_cs();
+    if *is_64 {
+        set_rip(new_rip.wrapping_add(get_seg_cs() as u32 as u64));
+    }
+
+    if privilege_change {
+        if !switch_seg(SS, new_ss) {
+            return;
+        }
+        null_data_segs_below_cpl();
+    }
+    write_reg64(ESP, new_rsp.wrapping_add(stack_adjust as i64 as u64));
+    update_state_flags();
 }
 
 unsafe fn jmp_far64(addr: i32) {
@@ -1745,6 +1872,8 @@ mod tests {
         assert!(opcode_is_forced64(0xE8));
         assert!(opcode_is_forced64(0x50));
         assert!(opcode_is_forced64(0xC3));
+        assert!(opcode_is_forced64(0xCA));
+        assert!(opcode_is_forced64(0xCB));
         assert!(opcode_is_forced64(0xFF));
         assert!(!opcode_is_forced64(0x01));
         assert!(!opcode_is_forced64(0x75));

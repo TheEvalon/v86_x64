@@ -9,7 +9,7 @@ const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
 process.on("unhandledRejection", exn => { throw exn; });
 
-const ALL_TESTS = ["enter64", "stack64", "idt64", "syscall64", "higher64", "jit64", "rex64", "pf64", "cpl64", "nx64", "cx16"];
+const ALL_TESTS = ["enter64", "stack64", "idt64", "syscall64", "higher64", "jit64", "rex64", "pf64", "cpl64", "nx64", "cx16", "retf64"];
 const requested = process.argv.slice(2);
 
 if(requested.length === 0)
