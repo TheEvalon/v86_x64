@@ -714,15 +714,6 @@ pub unsafe fn iretq() {
     *previous_rip = get_rip();
     if privilege_change {
         after_block_boundary();
-        if new_cpl == 3 {
-            dbg_log!(
-                "iretq to cpl3 rip={:x} cs={:x} rsp={:x} ss={:x}",
-                get_rip(),
-                new_cs as u32,
-                new_rsp,
-                new_ss as u32
-            );
-        }
     }
 
     if !switch_seg(SS, new_ss) {

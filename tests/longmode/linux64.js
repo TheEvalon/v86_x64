@@ -67,7 +67,6 @@ let finished = false;
 let saw_linux_version = false;
 let saw_initramfs = false;
 let saw_run_init = false;
-let saw_cpl3 = false;
 
 function u64_from_pair(view)
 {
@@ -348,14 +347,6 @@ emulator.add_listener("emulator-loaded", function()
     {
         ticks++;
         const now = Date.now();
-        if(!saw_cpl3 && (cpu0.sreg[1] & 3) === 3)
-        {
-            saw_cpl3 = true;
-            const rip = u64_from_pair(cpu0.rip64);
-            console.error("linux64: entered CPL3 rip=" + hex64(rip) +
-                " bytes=[" + dump_at(cpu0, rip) + "] " + dump_regs(cpu0) +
-                " walk=" + dump_page_walk(cpu0, rip));
-        }
         if(now - last_log >= 2000)
         {
             last_log = now;
@@ -370,17 +361,6 @@ emulator.add_listener("emulator-loaded", function()
     {
         // Linux takes page faults, #NM (FPU), and probed #GPs. Deliver those.
         // #UD is a missing opcode. #DF is a nested-fault shutdown.
-        if(n === 14 && (emulator.v86.cpu.sreg[1] & 3) === 3)
-        {
-            const cpu = emulator.v86.cpu;
-            const rip = u64_from_pair(cpu.previous_rip64);
-            console.error("linux64: user #PF previous_rip=" + hex64(rip) +
-                " cr2=" + hex64(u64_from_pair(cpu.cr2_64)) +
-                " bytes=[" + dump_at(cpu, rip) + "] " + dump_regs(cpu) +
-                " walk=" + dump_page_walk(cpu, rip) +
-                " cr2walk=" + dump_page_walk(cpu, u64_from_pair(cpu.cr2_64)));
-            return false;
-        }
         if(n !== 6 && n !== 8)
         {
             return false;
