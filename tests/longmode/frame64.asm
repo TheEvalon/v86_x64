@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit ENTER (0xC8) / LEAVE in long mode.
+; Multiboot payload: 64-bit ENTER (0xC8) / LEAVE, plus IMUL r64.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -102,6 +102,20 @@ start64:
     cmp rbp, r13
     jne fail_leave_rbp
 
+    ; IMUL r64, r/m64: 2^32 * 3. 32-bit IMUL would use EAX=0.
+    mov rax, 0x100000000
+    mov rbx, 3
+    imul rax, rbx
+    mov rcx, 0x300000000
+    cmp rax, rcx
+    jne fail_imul
+
+    ; IMUL r64, r/m64, imm8.
+    mov rax, 0x100000000
+    imul rdx, rax, 3
+    cmp rdx, rcx
+    jne fail_imul_imm
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -122,6 +136,12 @@ fail_leave_rsp:
     jmp fail_out
 fail_leave_rbp:
     mov al, 6
+    jmp fail_out
+fail_imul:
+    mov al, 7
+    jmp fail_out
+fail_imul_imm:
+    mov al, 8
     jmp fail_out
 
 fail_out:
