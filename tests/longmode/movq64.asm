@@ -1,4 +1,4 @@
-; Multiboot payload: REX.W MOVQ between GPR and XMM/MMX in long mode.
+; Multiboot payload: REX.W MOVQ between GPR and XMM/MMX, plus ADC/SBB r64.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -140,6 +140,21 @@ start64:
     jne fail_mmx
     emms
 
+    ; ADC r64 of 0xFFFFFFFF + CF. 32-bit ADC wraps EAX to 0.
+    stc
+    mov rax, 0xFFFFFFFF
+    adc rax, 0
+    mov rbx, 0x100000000
+    cmp rax, rbx
+    jne fail_adc
+
+    ; SBB r64 of 0 - CF is all ones. 32-bit SBB writes 0xFFFFFFFF.
+    stc
+    mov rax, 0
+    sbb rax, 0
+    cmp rax, -1
+    jne fail_sbb
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -168,6 +183,16 @@ fail_f3:
 
 fail_mmx:
     mov al, 6
+    out 0xF4, al
+    jmp hang64
+
+fail_adc:
+    mov al, 7
+    out 0xF4, al
+    jmp hang64
+
+fail_sbb:
+    mov al, 8
     out 0xF4, al
     jmp hang64
 
