@@ -574,8 +574,10 @@ unsafe fn string64(kind: String64, width: i64) {
         }
     }
     if asize32 {
-        if matches!(kind, String64::Movs | String64::Lods | String64::Cmps | String64::Outs)
-        {
+        if matches!(
+            kind,
+            String64::Movs | String64::Lods | String64::Cmps | String64::Outs
+        ) {
             write_reg32(ESI, rsi as i32);
         }
         if matches!(
@@ -589,8 +591,10 @@ unsafe fn string64(kind: String64, width: i64) {
         }
     }
     else {
-        if matches!(kind, String64::Movs | String64::Lods | String64::Cmps | String64::Outs)
-        {
+        if matches!(
+            kind,
+            String64::Movs | String64::Lods | String64::Cmps | String64::Outs
+        ) {
             write_reg64(ESI, rsi);
         }
         if matches!(
