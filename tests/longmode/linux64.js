@@ -4,10 +4,12 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import url from "node:url";
+import { LINUX64_INIT_LINE, write_linux64_initrd } from "./make-initrd.js";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 const ROOT = path.join(__dirname, "../..");
 const KERNEL = path.join(ROOT, "images/vmlinuz-x86_64");
+const INITRD = path.join(ROOT, "images/linux64-initrd.cpio.gz");
 const KERNEL_URLS = [
     "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/netboot/vmlinuz-virt",
     "https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux",
@@ -38,18 +40,20 @@ function ensure_kernel()
 }
 
 ensure_kernel();
+write_linux64_initrd(INITRD);
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 
 const TIMEOUT_MS = +process.env.LINUX64_TIMEOUT_MS || 600000;
 const CMDLINE = "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 " +
-    "acpi=off noapic nolapic nosmp nokaslr debug";
+    "acpi=off noapic nolapic nosmp nokaslr debug rdinit=/init init=/init";
 
 const emulator = new V86({
     bios: { url: path.join(ROOT, "bios/seabios.bin") },
     vga_bios: { url: path.join(ROOT, "bios/vgabios.bin") },
     bzimage: { url: KERNEL },
+    initrd: { url: INITRD },
     cmdline: CMDLINE,
     autostart: true,
     memory_size: 128 * 1024 * 1024,
@@ -61,6 +65,8 @@ const emulator = new V86({
 let serial = "";
 let finished = false;
 let saw_linux_version = false;
+let saw_initramfs = false;
+let saw_run_init = false;
 
 function u64_from_pair(view)
 {
@@ -399,22 +405,36 @@ emulator.add_listener("serial0-output-byte", function(byte)
         saw_linux_version = true;
         console.error("linux64: reached Linux version, continuing");
     }
-    const pass = [
+    if(!saw_initramfs && (serial.includes("Unpacking initramfs") ||
+        serial.includes("Trying to unpack rootfs") ||
+        serial.includes("Freeing initrd")))
+    {
+        saw_initramfs = true;
+        console.error("linux64: initramfs unpacked, continuing");
+    }
+    if(!saw_run_init && serial.includes("Run /init as init process"))
+    {
+        saw_run_init = true;
+        console.error("linux64: kernel execing /init, continuing");
+    }
+    if(serial.includes(LINUX64_INIT_LINE))
+    {
+        console.log("linux64: pass (" + LINUX64_INIT_LINE + ")");
+        finish(0);
+        return;
+    }
+    const missing_rootfs = [
         "VFS: Cannot open root device",
         "Unable to mount root",
         "No filesystem could mount root",
         "Kernel panic - not syncing: VFS",
-        "Freeing unused kernel image",
-        "Freeing unused kernel memory",
     ].find(s => serial.includes(s));
-    if(pass)
+    if(missing_rootfs)
     {
-        console.log("linux64: pass (" + pass + ")");
-        finish(0);
+        finish(1, "linux64: initrd present but kernel never ran /init (" +
+            missing_rootfs + ")");
+        return;
     }
-    // Wait for the panic line to finish. The VFS panic is
-    // "Kernel panic - not syncing: VFS: Unable to mount root fs ...";
-    // matching the prefix alone races the rest of the line.
     const panic_at = serial.lastIndexOf("Kernel panic - not syncing");
     if(panic_at >= 0)
     {
@@ -422,11 +442,7 @@ emulator.add_listener("serial0-output-byte", function(byte)
         const nl = rest.indexOf("\n");
         if(nl >= 0)
         {
-            const line = rest.slice(0, nl);
-            if(!line.includes("VFS") && !line.includes("Unable to mount root"))
-            {
-                finish(1, "linux64: kernel panic before VFS: " + line.trim());
-            }
+            finish(1, "linux64: kernel panic: " + rest.slice(0, nl).trim());
         }
     }
 });

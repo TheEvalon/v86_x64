@@ -8,8 +8,8 @@ following list is roughtly sorted from most interesting/useful to least.
   SYSCALL/SYSRET/SWAPGS, a canonical higher-half RIP, JIT of 32-bit-opsize
   ops in 64-bit CS, REX/higher-half data, and a higher-half IDT/#PF at
   `0xffffffff81000000` (`make longmode-test`).
-  `make linux64-test` boots a tiny x86_64 Linux bzImage until a VFS
-  missing-rootfs panic.
+  `make linux64-test` boots a tiny x86_64 Linux bzImage with a generated
+  static initrd until userspace `/init` prints `linux64-init: userspace`.
 - [qemu](qemu/): Based on tests from qemu. Builds a Linux binary, which tests
   many CPU features, which are then compared to a run on qemu.
 - [kvm-unit-test](kvm-unit-test/): Based on tests from the KVM project, tests
