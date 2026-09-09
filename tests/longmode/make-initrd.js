@@ -59,7 +59,7 @@ function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
     // succeeds if a later syscall fails. Extra getpid/gettid/uname/brk/mmap/
-    // arch_prctl/clock_gettime/gettimeofday/writev/getcwd/nanosleep/openat/close/munmap/getppid writes are diagnostic only.
+    // arch_prctl/clock_gettime/gettimeofday/writev/getcwd/nanosleep/openat/close/munmap/getppid/getuid writes are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
@@ -78,8 +78,9 @@ function make_static_init_elf(message)
         Buffer.from("linux64-init: munmap\n", "ascii"),
         Buffer.from("/init\0", "ascii"),
         Buffer.from("linux64-init: getppid\n", "ascii"),
+        Buffer.from("linux64-init: getuid\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_GETCWD = 10, MSG_NANOSLEEP = 11, MSG_OPENAT = 12, MSG_CLOSE = 13, MSG_MUNMAP = 14, MSG_PATH = 15, MSG_GETPPID = 16;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_GETCWD = 10, MSG_NANOSLEEP = 11, MSG_OPENAT = 12, MSG_CLOSE = 13, MSG_MUNMAP = 14, MSG_PATH = 15, MSG_GETPPID = 16, MSG_GETUID = 17;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
@@ -188,6 +189,15 @@ function make_static_init_elf(message)
     jcc8(0x75, "skip_getppid"); // jne
     write_str(MSG_GETPPID);
     labels.skip_getppid = size;
+
+    // getuid (rax=102). /init runs as root so uid must be 0.
+    mov_imm(0, 102);
+    syscall();
+    is_err_jae32("skip_getuid");
+    emit([0x48, 0x85, 0xC0]); // test rax, rax
+    jcc8(0x75, "skip_getuid"); // jne
+    write_str(MSG_GETUID);
+    labels.skip_getuid = size;
 
     // 3. uname (rax=63) into a stack buffer; sysname must start with "Linux".
     emit([0x48, 0x81, 0xEC,
