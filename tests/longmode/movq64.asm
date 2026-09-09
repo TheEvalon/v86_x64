@@ -1,4 +1,4 @@
-; Multiboot payload: REX.W MOVQ between GPR and XMM/MMX, plus ADC/SBB/TEST r64.
+; Multiboot payload: REX.W MOVQ between GPR and XMM/MMX, plus ADC/SBB/TEST/AND/OR/XOR r64.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -166,6 +166,26 @@ start64:
     test rax, rbx
     jnz fail_test
 
+    ; AND r64 of 2^33-1 with 2^32. 32-bit AND of EAX=-1 with 0 is 0.
+    mov rax, 0x1FFFFFFFF
+    mov rbx, 0x100000000
+    and rax, rbx
+    cmp rax, rbx
+    jne fail_and
+
+    ; OR r64 of 1 with 2^32. 32-bit OR of EAX=1 with 0 stays 1.
+    mov rax, 1
+    or rax, rbx
+    mov rcx, 0x100000001
+    cmp rax, rcx
+    jne fail_or
+
+    ; XOR r64 of 2^32 with 1. 32-bit XOR of EAX=0 with 1 is 1.
+    mov rax, 0x100000000
+    xor rax, 1
+    cmp rax, rcx
+    jne fail_xor
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -209,6 +229,21 @@ fail_sbb:
 
 fail_test:
     mov al, 9
+    out 0xF4, al
+    jmp hang64
+
+fail_and:
+    mov al, 10
+    out 0xF4, al
+    jmp hang64
+
+fail_or:
+    mov al, 11
+    out 0xF4, al
+    jmp hang64
+
+fail_xor:
+    mov al, 12
     out 0xF4, al
     jmp hang64
 
