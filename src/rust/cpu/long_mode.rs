@@ -1693,12 +1693,17 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
                     cmpxchg16b_mem(addr);
                 },
                 6 => {
-                    // rdrand: memory form is #UD; REX.W still uses the 32-bit writer.
+                    // rdrand r64: memory form is #UD. Pack two 32-bit draws.
                     if modrm < 0xC0 {
                         trigger_ud();
                         return;
                     }
-                    crate::cpu::instructions_0f::instr32_0FC7_6_reg(gpr_rm(modrm));
+                    let lo = js::get_rand_int() as u32 as u64;
+                    let hi = js::get_rand_int() as u32 as u64;
+                    write_reg64(gpr_rm(modrm), lo | hi << 32);
+                    *flags &= !FLAGS_ALL;
+                    *flags |= FLAG_CARRY;
+                    *flags_changed = 0;
                 },
                 _ => {
                     trigger_ud();
