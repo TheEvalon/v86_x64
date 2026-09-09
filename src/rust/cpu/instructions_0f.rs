@@ -533,6 +533,15 @@ pub unsafe fn instr_0F07() {
     *flags &= !FLAG_RF & !FLAG_VM;
     load_ia32e_cs_ss(user_cs as i32, user_ss as i32, 3, long_return);
     set_rip(new_rip);
+    *previous_ip = *instruction_pointer;
+    *previous_rip = get_rip();
+    after_block_boundary();
+    dbg_log!(
+        "sysret to cpl3 rip={:x} cs={:x} long={}",
+        new_rip,
+        user_cs as u32,
+        long_return as i32
+    );
 }
 #[no_mangle]
 pub unsafe fn instr_0F08() {

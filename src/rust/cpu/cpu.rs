@@ -710,6 +710,20 @@ pub unsafe fn iretq() {
     if *is_64 {
         set_rip(new_rip.wrapping_add(get_seg_cs() as u32 as u64));
     }
+    *previous_ip = *instruction_pointer;
+    *previous_rip = get_rip();
+    if privilege_change {
+        after_block_boundary();
+        if new_cpl == 3 {
+            dbg_log!(
+                "iretq to cpl3 rip={:x} cs={:x} rsp={:x} ss={:x}",
+                get_rip(),
+                new_cs as u32,
+                new_rsp,
+                new_ss as u32
+            );
+        }
+    }
 
     if !switch_seg(SS, new_ss) {
         return;
@@ -4198,6 +4212,11 @@ pub unsafe fn cycle_internal() {
             return;
         }
         *rip = *instruction_pointer as u32 as u64;
+        // After IRETQ/SYSRET from a higher-half kernel RIP, *previous_rip can
+        // still hold that kernel address. Instruction-fetch #PFs on the low
+        // 4GB path must restore the current RIP, not the stale one.
+        *previous_rip = *rip;
+        *previous_ip = initial_eip;
     }
 
     match tlb_code[(initial_eip as u32 >> 12) as usize] {
@@ -4305,6 +4324,9 @@ pub unsafe fn cycle_internal() {
     }
     else {
         *previous_ip = initial_eip;
+        if *is_64 {
+            *previous_rip = get_rip();
+        }
         let phys_addr = return_on_pagefault!(get_phys_eip());
 
         match tlb_code[(initial_eip as u32 >> 12) as usize] {
@@ -4407,6 +4429,8 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
         let start_eip = *instruction_pointer;
         let start_rip = if *is_64 { get_rip() } else { start_eip as u32 as u64 };
         if *is_64 {
+            *previous_ip = start_eip;
+            *previous_rip = start_rip;
             crate::cpu::long_mode::run_one();
         }
         else {
