@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit ENTER (0xC8) / LEAVE, plus IMUL r64.
+; Multiboot payload: 64-bit ENTER (0xC8) / LEAVE, plus IMUL/DIV/IDIV r64.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -116,6 +116,39 @@ start64:
     cmp rdx, rcx
     jne fail_imul_imm
 
+    ; DIV r64: 2^64 / 2. 32-bit DIV uses EDX:EAX = 2^32 / 2 = 2^31.
+    mov rdx, 1
+    xor eax, eax
+    mov rbx, 2
+    div rbx
+    mov rcx, 0x8000000000000000
+    cmp rax, rcx
+    jne fail_div
+    test rdx, rdx
+    jnz fail_div
+
+    ; Remainder occupies RDX: 0x300000001 / 3 = 2^32 rem 1.
+    xor edx, edx
+    mov rax, 0x300000001
+    mov rbx, 3
+    div rbx
+    mov rcx, 0x100000000
+    cmp rax, rcx
+    jne fail_div_rem
+    cmp rdx, 1
+    jne fail_div_rem
+
+    ; IDIV r64 truncates toward zero: -7 / 3 = -2 rem -1.
+    ; 32-bit IDIV writes EAX=-2, which zero-extends instead of staying -2.
+    mov rdx, -1
+    mov rax, -7
+    mov rbx, 3
+    idiv rbx
+    cmp rax, -2
+    jne fail_idiv
+    cmp rdx, -1
+    jne fail_idiv
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -142,6 +175,15 @@ fail_imul:
     jmp fail_out
 fail_imul_imm:
     mov al, 8
+    jmp fail_out
+fail_div:
+    mov al, 9
+    jmp fail_out
+fail_div_rem:
+    mov al, 10
+    jmp fail_out
+fail_idiv:
+    mov al, 11
     jmp fail_out
 
 fail_out:
