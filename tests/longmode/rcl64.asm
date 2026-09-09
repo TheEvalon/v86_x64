@@ -137,7 +137,9 @@ start64:
     jne fail_nop_clc_rax
 
     ; 6. Memory form: RCL qword [mem], 1.
-    mov qword [mem64], 0x8000000000000000
+    ; MOV r/m64, imm32 sign-extends; load the MSB via a 64-bit register.
+    mov rax, 0x8000000000000000
+    mov [mem64], rax
     clc
     rcl qword [mem64], 1
     jnc fail_mem_cf
