@@ -1725,6 +1725,33 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
 unsafe fn dispatch_opcode(opcode: i32) {
     current_interp_opcode = opcode as u32 | 0x100;
     current_interp_0f = false;
+    // Intel SDM: these one-byte opcodes are invalid in 64-bit mode.
+    if matches!(
+        opcode,
+        0x06 | 0x07
+            | 0x0E
+            | 0x16
+            | 0x17
+            | 0x1E
+            | 0x1F
+            | 0x27
+            | 0x2F
+            | 0x37
+            | 0x3F
+            | 0x60
+            | 0x61
+            | 0x62
+            | 0x82
+            | 0x9A
+            | 0xCE
+            | 0xD4
+            | 0xD5
+            | 0xD6
+            | 0xEA
+    ) {
+        trigger_ud();
+        return;
+    }
     if opcode == 0x63 {
         dispatch_movsxd();
         return;
