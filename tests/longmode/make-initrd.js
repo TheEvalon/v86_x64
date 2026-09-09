@@ -59,7 +59,7 @@ function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
     // succeeds if a later syscall fails. Extra getpid/gettid/uname/brk/mmap/
-    // arch_prctl/clock_gettime/gettimeofday/munmap writes are diagnostic only.
+    // arch_prctl/clock_gettime/gettimeofday/writev/munmap writes are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
@@ -70,9 +70,10 @@ function make_static_init_elf(message)
         Buffer.from("linux64-init: gettid\n", "ascii"),
         Buffer.from("linux64-init: clock\n", "ascii"),
         Buffer.from("linux64-init: gettimeofday\n", "ascii"),
+        Buffer.from("linux64-init: writev\n", "ascii"),
         Buffer.from("linux64-init: munmap\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_MUNMAP = 9;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_MUNMAP = 10;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
@@ -273,7 +274,24 @@ function make_static_init_elf(message)
     write_str(MSG_GETTIMEOFDAY);
     labels.skip_gettimeofday = size;
 
-    // 9. munmap(map, 4096) (rax=11). rbx still holds the mmap address.
+    // 9. writev(1, iov, 1) (rax=20). iovec lives at map+48; the payload is the
+    //    diagnostic line itself (no second write). gettimeofday failure still
+    //    runs this; mmap failure skips it.
+    lea_rsi(MSG_WRITEV);
+    emit([0x48, 0x89, 0x73, 0x30]); // mov [rbx+48], rsi  iov_base
+    emit([0x48, 0xC7, 0x43, 0x38,
+        strings[MSG_WRITEV].length & 0xFF, strings[MSG_WRITEV].length >> 8 & 0xFF, 0x00, 0x00]); // mov qword [rbx+56], len
+    mov_imm(0, 20);
+    mov_imm(7, 1);
+    emit([0x48, 0x8D, 0x73, 0x30]); // lea rsi, [rbx+48]
+    mov_imm(2, 1);
+    syscall();
+    emit([0x48, 0x3D,
+        strings[MSG_WRITEV].length & 0xFF, strings[MSG_WRITEV].length >> 8 & 0xFF, 0x00, 0x00]); // cmp rax, len
+    jcc8(0x75, "skip_writev"); // jne
+    labels.skip_writev = size;
+
+    // 10. munmap(map, 4096) (rax=11). rbx still holds the mmap address.
     mov_imm(0, 11);
     emit([0x48, 0x89, 0xDF]); // mov rdi, rbx
     mov_imm(6, 4096);         // mov rsi, 4096
@@ -283,7 +301,7 @@ function make_static_init_elf(message)
     labels.skip_munmap = size;
     labels.skip_mmap = size;
 
-    // 10. exit(0)
+    // 11. exit(0)
     mov_imm(0, 60);
     emit([0x48, 0x31, 0xFF]); // xor rdi, rdi
     syscall();
