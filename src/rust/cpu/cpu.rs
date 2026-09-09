@@ -3545,6 +3545,16 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
     *segment_access_bytes.offset(reg as isize) = descriptor.access_byte();
     *sreg.offset(reg as isize) = selector_raw as u16;
 
+    // IA-32e FS/GS addressing uses the base MSRs, not segment_offsets.
+    if efer_lma() {
+        if reg == FS {
+            *msr_fs_base = descriptor.base() as u32 as u64;
+        }
+        else if reg == GS {
+            *msr_gs_base = descriptor.base() as u32 as u64;
+        }
+    }
+
     update_state_flags();
 
     true
