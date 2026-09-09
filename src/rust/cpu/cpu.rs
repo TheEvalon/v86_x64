@@ -1165,6 +1165,8 @@ unsafe fn deliver_interrupt_vector_lma(
     if gp_if_noncanonical(new_rsp) {
         return;
     }
+    // IA-32e: align the stack to 16 bytes before the first push.
+    new_rsp &= !0xF;
 
     if privilege_change {
         *cpl = new_cpl;
