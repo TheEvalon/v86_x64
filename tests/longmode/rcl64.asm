@@ -175,7 +175,8 @@ start64:
     mov rax, 0x0123456789ABCDEF
     mov [mem64], rax
     shld qword [mem64], rdx, 8
-    cmp qword [mem64], 0x23456789ABCDEFFE
+    mov rbx, 0x23456789ABCDEFFE
+    cmp qword [mem64], rbx
     jne fail_shld_mem
 
     xor eax, eax
