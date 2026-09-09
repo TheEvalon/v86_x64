@@ -365,6 +365,18 @@ pub unsafe fn instr32_0F01_7_reg(r: i32) {
         *msr_gs_base = tmp;
         *segment_offsets.offset(GS as isize) = tmp as i32;
     }
+    else if r == 1 {
+        // rdtscp
+        if 0 == *cpl || 0 == *cr.offset(4) & CR4_TSD {
+            let tsc = read_tsc();
+            write_reg32(EAX, tsc as i32);
+            write_reg32(EDX, (tsc >> 32) as i32);
+            write_reg32(ECX, *msr_tsc_aux as i32);
+        }
+        else {
+            trigger_gp(0);
+        }
+    }
     else {
         trigger_ud();
     }
@@ -1417,7 +1429,7 @@ pub unsafe fn instr_0F30() {
         IA32_MCU_OPT_CTRL => {},   // linux 5.19
         MSR_AMD64_LS_CFG => {},    // linux 5.19
         MSR_AMD64_DE_CFG => {},    // linux 6.1
-        IA32_TSC_AUX => {},
+        IA32_TSC_AUX => *msr_tsc_aux = (low as u32) as u64,
         _ => {
             dbg_log!("Unknown msr: {:x}", index);
             trigger_gp(0);
@@ -1496,7 +1508,10 @@ pub unsafe fn instr_0F32() {
         IA32_MCU_OPT_CTRL => {},   // linux 5.19
         MSR_AMD64_LS_CFG => {},    // linux 5.19
         MSR_AMD64_DE_CFG => {},    // linux 6.1
-        IA32_TSC_AUX => {},
+        IA32_TSC_AUX => {
+            low = *msr_tsc_aux as i32;
+            high = 0;
+        },
         IA32_EFER => {
             low = *efer as i32;
             high = (*efer >> 32) as i32;
@@ -3540,7 +3555,7 @@ pub unsafe fn instr_0FA2() {
             eax = 0;
             ebx = 0;
             ecx = 1 << 0; // lahf_lm (LAHF/SAHF already execute in 64-bit CS)
-            edx = 1 << 11 | 1 << 20 | 1 << 29; // SCE, NX, LM
+            edx = 1 << 11 | 1 << 20 | 1 << 27 | 1 << 29; // SCE, NX, RDTSCP, LM
         },
 
         0x80000008 => {
