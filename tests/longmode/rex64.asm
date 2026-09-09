@@ -1,4 +1,4 @@
-; Multiboot payload: REX.B/R, REX.W group1, MOVSXD, and higher-half data.
+; Multiboot payload: REX.B/R, REX.W group1, MOVSXD, BSWAP, XADD, and higher-half data.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -221,6 +221,38 @@ after_call_target:
     cmp eax, 1
     jne fail64
 
+    ; o64 BSWAP reverses all 8 bytes. 32-bit BSWAP zero-extends.
+    mov rax, 0x0123456789ABCDEF
+    bswap rax
+    mov rbx, 0xEFCDAB8967452301
+    cmp rax, rbx
+    jne fail_bswap64
+    mov r8, 0x0123456789ABCDEF
+    bswap r8
+    cmp r8, rbx
+    jne fail_bswap64
+    mov rax, 0x0123456789ABCDEF
+    bswap eax
+    mov rbx, 0xEFCDAB89
+    cmp rax, rbx
+    jne fail_bswap32
+
+    ; XADD r64, r64: src <- dest, dest <- dest+src.
+    mov rax, 0x1000
+    mov rbx, 0x0234
+    xadd rax, rbx
+    cmp rax, 0x1234
+    jne fail_xadd
+    cmp rbx, 0x1000
+    jne fail_xadd
+    mov qword [rel scratch], 0x10
+    mov rax, 0x20
+    xadd qword [rel scratch], rax
+    cmp qword [rel scratch], 0x30
+    jne fail_xadd
+    cmp rax, 0x10
+    jne fail_xadd
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -233,6 +265,27 @@ fail64:
 .bad:
     hlt
     jmp .bad
+
+fail_bswap64:
+    mov al, 2
+    out 0xF4, al
+.hang_bswap64:
+    hlt
+    jmp .hang_bswap64
+
+fail_bswap32:
+    mov al, 3
+    out 0xF4, al
+.hang_bswap32:
+    hlt
+    jmp .hang_bswap32
+
+fail_xadd:
+    mov al, 4
+    out 0xF4, al
+.hang_xadd:
+    hlt
+    jmp .hang_xadd
 
 align 8
 scratch:
