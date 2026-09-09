@@ -235,6 +235,7 @@ pub const IA32_PRED_CMD: i32 = 0x49;
 pub const IA32_ARCH_CAPABILITIES: i32 = 0x10A;
 pub const IA32_BIOS_UPDT_TRIG: i32 = 0x79;
 pub const IA32_BIOS_SIGN_ID: i32 = 0x8B;
+pub const IA32_MTRRCAP: i32 = 0xFE;
 pub const IA32_PMC0: i32 = 0xC1;
 pub const IA32_PMC1: i32 = 0xC2;
 pub const MSR_PLATFORM_INFO: i32 = 0xCE;
@@ -246,10 +247,20 @@ pub const IA32_SYSENTER_CS: i32 = 0x174;
 pub const IA32_SYSENTER_ESP: i32 = 0x175;
 pub const IA32_SYSENTER_EIP: i32 = 0x176;
 pub const IA32_MCG_CAP: i32 = 0x179;
+pub const IA32_MCG_STATUS: i32 = 0x17A;
 pub const IA32_PERFEVTSEL0: i32 = 0x186;
 pub const IA32_PERFEVTSEL1: i32 = 0x187;
 pub const IA32_MISC_ENABLE: i32 = 0x1A0;
+pub const IA32_ENERGY_PERF_BIAS: i32 = 0x1B0;
+pub const IA32_MTRR_PHYSBASE0: i32 = 0x200;
+pub const IA32_MTRR_PHYSMASK7: i32 = 0x20F;
+pub const IA32_MTRR_FIX64K_00000: i32 = 0x250;
+pub const IA32_MTRR_FIX16K_80000: i32 = 0x258;
+pub const IA32_MTRR_FIX16K_A0000: i32 = 0x259;
+pub const IA32_MTRR_FIX4K_C0000: i32 = 0x268;
+pub const IA32_MTRR_FIX4K_F8000: i32 = 0x26F;
 pub const IA32_PAT: i32 = 0x277;
+pub const IA32_MTRR_DEF_TYPE: i32 = 0x2FF;
 pub const IA32_RTIT_CTL: i32 = 0x570;
 pub const MSR_PKG_C2_RESIDENCY: i32 = 0x60D;
 pub const IA32_EFER: i32 = 0xC0000080u32 as i32;
@@ -261,8 +272,37 @@ pub const IA32_FS_BASE: i32 = 0xC0000100u32 as i32;
 pub const IA32_GS_BASE: i32 = 0xC0000101u32 as i32;
 pub const IA32_KERNEL_GS_BASE: i32 = 0xC0000102u32 as i32;
 pub const IA32_TSC_AUX: i32 = 0xC0000103u32 as i32;
+pub const MSR_AMD64_SYSCFG: i32 = 0xC0010010u32 as i32;
 pub const MSR_AMD64_LS_CFG: i32 = 0xC0011020u32 as i32;
 pub const MSR_AMD64_DE_CFG: i32 = 0xC0011029u32 as i32;
+
+/// Architectural MSRs that 64-bit kernels commonly RDMSR/WRMSR, which we do
+/// not emulate. WRMSR ignores the write; RDMSR returns 0. Used only from the
+/// WRMSR/RDMSR default arms so existing handlers (EFER, PAT, MCG_CAP, ...)
+/// are unchanged. Unknown indices still #GP(0).
+///
+/// Not listed:
+/// - IA32_XSS (0xDA0): CPUID does not advertise XSAVE, so #GP is correct.
+/// - Package/core thermal MSRs: CPUID.1 TM and leaf 6 are not advertised.
+/// - The whole 0x200-0x2FF block: that would swallow IA32_PAT (0x277).
+pub fn msr_is_noop_allowlisted(index: i32) -> bool {
+    match index {
+        // 0 variable ranges, no WC, no fixed MTRRs (we do not emulate MTRRs).
+        IA32_MTRRCAP => true,
+        // IA32_MTRR_PHYSBASE0/PHYSMASK0 ... PHYSBASE7/PHYSMASK7 (8 pairs).
+        IA32_MTRR_PHYSBASE0..=IA32_MTRR_PHYSMASK7 => true,
+        // Fixed-range MTRRs (guests that ignore MTRRCAP=0).
+        IA32_MTRR_FIX64K_00000 | IA32_MTRR_FIX16K_80000 | IA32_MTRR_FIX16K_A0000 => true,
+        IA32_MTRR_FIX4K_C0000..=IA32_MTRR_FIX4K_F8000 => true,
+        IA32_MTRR_DEF_TYPE => true,
+        // MCG_CAP already no-ops; kernels clear status at boot.
+        IA32_MCG_STATUS => true,
+        IA32_ENERGY_PERF_BIAS => true,
+        // AMD64; LS_CFG/DE_CFG already no-op.
+        MSR_AMD64_SYSCFG => true,
+        _ => false,
+    }
+}
 
 pub const EFER_SCE: u64 = 1 << 0;
 pub const EFER_LME: u64 = 1 << 8;
@@ -5999,3 +6039,34 @@ pub unsafe fn reset_cpu() {
 
 #[no_mangle]
 pub unsafe fn set_cpuid_level(level: u32) { cpuid_level = level }
+
+#[cfg(test)]
+mod msr_allowlist_tests {
+    use super::*;
+
+    #[test]
+    fn allowlisted_msrs_are_noops() {
+        assert!(msr_is_noop_allowlisted(IA32_MTRRCAP));
+        assert!(msr_is_noop_allowlisted(IA32_MTRR_PHYSBASE0));
+        assert!(msr_is_noop_allowlisted(IA32_MTRR_PHYSMASK7));
+        assert!(msr_is_noop_allowlisted(IA32_MTRR_FIX64K_00000));
+        assert!(msr_is_noop_allowlisted(IA32_MTRR_FIX16K_80000));
+        assert!(msr_is_noop_allowlisted(IA32_MTRR_FIX16K_A0000));
+        assert!(msr_is_noop_allowlisted(IA32_MTRR_FIX4K_C0000));
+        assert!(msr_is_noop_allowlisted(IA32_MTRR_FIX4K_F8000));
+        assert!(msr_is_noop_allowlisted(IA32_MTRR_DEF_TYPE));
+        assert!(msr_is_noop_allowlisted(IA32_MCG_STATUS));
+        assert!(msr_is_noop_allowlisted(IA32_ENERGY_PERF_BIAS));
+        assert!(msr_is_noop_allowlisted(MSR_AMD64_SYSCFG));
+    }
+
+    #[test]
+    fn implemented_and_unknown_msrs_are_not_allowlisted() {
+        assert!(!msr_is_noop_allowlisted(IA32_PAT));
+        assert!(!msr_is_noop_allowlisted(IA32_EFER));
+        assert!(!msr_is_noop_allowlisted(IA32_MCG_CAP));
+        assert!(!msr_is_noop_allowlisted(IA32_MTRR_PHYSMASK7 + 1));
+        assert!(!msr_is_noop_allowlisted(0xDA0)); // IA32_XSS: no XSAVE in CPUID
+        assert!(!msr_is_noop_allowlisted(0x12345678));
+    }
+}
