@@ -448,10 +448,13 @@ pub unsafe fn fxsave(addr: i32) {
     }
 
     if *is_64 {
-        // XMM8–15 and the reserved tail: write zeros. This emulator has no XMM8–15 state.
+        for i in 0..8 {
+            safe_write128(addr + 288 + (i << 4), *xmm_ptr(8 + i)).unwrap();
+        }
+        // Reserved +416..511 stay zeros (6 more 16-byte slots).
         let zero = reg128 { u64: [0, 0] };
-        for i in 0..14 {
-            safe_write128(addr + 288 + (i << 4), zero).unwrap();
+        for i in 0..6 {
+            safe_write128(addr + 416 + (i << 4), zero).unwrap();
         }
     }
 }
@@ -499,6 +502,12 @@ pub unsafe fn fxrstor(addr: i32) {
 
     for i in 0..8 {
         *reg_xmm.offset(i as isize) = safe_read128s(addr + 160 + (i << 4)).unwrap();
+    }
+
+    if *is_64 {
+        for i in 0..8 {
+            *xmm_ptr(8 + i) = safe_read128s(addr + 288 + (i << 4)).unwrap();
+        }
     }
 }
 

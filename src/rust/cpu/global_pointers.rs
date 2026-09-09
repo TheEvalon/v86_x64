@@ -99,6 +99,17 @@ pub const pending_linear64: *mut u64 = 2272 as *mut u64;
 pub const cr2_64: *mut u64 = 2280 as *mut u64;
 pub const tr_base64: *mut u64 = 2288 as *mut u64;
 pub const msr_tsc_aux: *mut u64 = 2296 as *mut u64;
+pub const reg_xmm8: *mut reg128 = 2304 as *mut reg128; // 8 × 16 = 128 bytes, ends 2432
+
+pub unsafe fn xmm_ptr(r: i32) -> *mut reg128 {
+    dbg_assert!(r >= 0 && r < 16);
+    if r < 8 {
+        reg_xmm.offset(r as isize)
+    }
+    else {
+        reg_xmm8.offset((r - 8) as isize)
+    }
+}
 
 pub fn get_reg32_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);
@@ -116,8 +127,8 @@ pub fn get_reg_mmx_offset(r: u32) -> u32 {
 }
 
 pub fn get_reg_xmm_offset(r: u32) -> u32 {
-    dbg_assert!(r < 8);
-    (unsafe { reg_xmm.offset(r as isize) }) as u32
+    dbg_assert!(r < 16);
+    (unsafe { xmm_ptr(r as i32) }) as u32
 }
 
 pub fn get_sreg_offset(s: u32) -> u32 {
