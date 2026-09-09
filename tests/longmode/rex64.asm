@@ -1,4 +1,4 @@
-; Multiboot payload: REX.B/R, REX.W group1, MOVSXD, BSWAP, XADD, and higher-half data.
+; Multiboot payload: REX.B/R, REX.W group1, MOVSXD, BSWAP, XADD, NOT, NEG, and higher-half data.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -253,6 +253,19 @@ after_call_target:
     cmp rax, 0x10
     jne fail_xadd
 
+    ; NOT r64 of 0 is all ones. 32-bit NOT writes 0xFFFFFFFF.
+    xor eax, eax
+    not rax
+    cmp rax, -1
+    jne fail_not
+
+    ; NEG r64 of 2^32. 32-bit NEG of EAX=0 is still 0.
+    mov rax, 0x100000000
+    neg rax
+    mov rbx, 0xFFFFFFFF00000000
+    cmp rax, rbx
+    jne fail_neg
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -286,6 +299,20 @@ fail_xadd:
 .hang_xadd:
     hlt
     jmp .hang_xadd
+
+fail_not:
+    mov al, 5
+    out 0xF4, al
+.hang_not:
+    hlt
+    jmp .hang_not
+
+fail_neg:
+    mov al, 6
+    out 0xF4, al
+.hang_neg:
+    hlt
+    jmp .hang_neg
 
 align 8
 scratch:
