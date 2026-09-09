@@ -59,7 +59,7 @@ function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
     // succeeds if a later syscall fails. Extra getpid/gettid/uname/brk/mmap/
-    // arch_prctl/clock_gettime/gettimeofday/writev/getcwd/nanosleep/openat/fstat/close/munmap/getppid/getuid/geteuid/getgid/getegid writes are diagnostic only.
+    // arch_prctl/clock_gettime/gettimeofday/writev/getcwd/nanosleep/openat/fstat/close/pipe/munmap/getppid/getuid/geteuid/getgid/getegid writes are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
@@ -83,8 +83,9 @@ function make_static_init_elf(message)
         Buffer.from("linux64-init: getgid\n", "ascii"),
         Buffer.from("linux64-init: getegid\n", "ascii"),
         Buffer.from("linux64-init: fstat\n", "ascii"),
+        Buffer.from("linux64-init: pipe\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_GETCWD = 10, MSG_NANOSLEEP = 11, MSG_OPENAT = 12, MSG_CLOSE = 13, MSG_MUNMAP = 14, MSG_PATH = 15, MSG_GETPPID = 16, MSG_GETUID = 17, MSG_GETEUID = 18, MSG_GETGID = 19, MSG_GETEGID = 20, MSG_FSTAT = 21;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_GETCWD = 10, MSG_NANOSLEEP = 11, MSG_OPENAT = 12, MSG_CLOSE = 13, MSG_MUNMAP = 14, MSG_PATH = 15, MSG_GETPPID = 16, MSG_GETUID = 17, MSG_GETEUID = 18, MSG_GETGID = 19, MSG_GETEGID = 20, MSG_FSTAT = 21, MSG_PIPE = 22;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
@@ -411,6 +412,35 @@ function make_static_init_elf(message)
     is_err_jae32("skip_openat");
     write_str(MSG_CLOSE);
     labels.skip_openat = size;
+
+    // pipe(map+528) (rax=22). write the mmap 0xA5 byte, read it back.
+    // openat failure still runs this; mmap failure skips it.
+    mov_imm(0, 22);
+    emit([0x48, 0x8D, 0xBB, 0x10, 0x02, 0x00, 0x00]); // lea rdi, [rbx+528]
+    syscall();
+    is_err_jae32("skip_pipe");
+    emit([0x44, 0x8B, 0xA3, 0x10, 0x02, 0x00, 0x00]); // mov r12d, [rbx+528]
+    emit([0x44, 0x8B, 0xAB, 0x14, 0x02, 0x00, 0x00]); // mov r13d, [rbx+532]
+    mov_imm(0, 1); // write
+    emit([0x4C, 0x89, 0xEF]); // mov rdi, r13
+    emit([0x48, 0x89, 0xDE]); // mov rsi, rbx
+    mov_imm(2, 1);
+    syscall();
+    emit([0x48, 0x83, 0xF8, 0x01]); // cmp rax, 1
+    jcc8(0x74, "pipe_wrote"); // je
+    jmp32("skip_pipe");
+    labels.pipe_wrote = size;
+    mov_imm(0, 0); // read
+    emit([0x4C, 0x89, 0xE7]); // mov rdi, r12
+    emit([0x48, 0x8D, 0xB3, 0x18, 0x02, 0x00, 0x00]); // lea rsi, [rbx+536]
+    mov_imm(2, 1);
+    syscall();
+    emit([0x48, 0x83, 0xF8, 0x01]); // cmp rax, 1
+    jcc8(0x75, "skip_pipe"); // jne
+    emit([0x80, 0xBB, 0x18, 0x02, 0x00, 0x00, 0xA5]); // cmp byte [rbx+536], 0xA5
+    jcc8(0x75, "skip_pipe"); // jne
+    write_str(MSG_PIPE);
+    labels.skip_pipe = size;
 
     // 13. munmap(map, 4096) (rax=11). rbx still holds the mmap address.
     mov_imm(0, 11);
