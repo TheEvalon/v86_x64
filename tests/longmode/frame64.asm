@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit ENTER (0xC8) / LEAVE, plus IMUL/DIV/IDIV r64.
+; Multiboot payload: 64-bit ENTER (0xC8) / LEAVE, plus IMUL/DIV/IDIV r64 (including IMUL imm32).
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -116,6 +116,14 @@ start64:
     cmp rdx, rcx
     jne fail_imul_imm
 
+    ; IMUL r64, r/m64, imm32 (opcode 69). 256 does not fit in imm8.
+    ; 2^32 * 256 = 2^40. 32-bit IMUL would use EAX=0.
+    mov rax, 0x100000000
+    imul rdx, rax, 256
+    mov rcx, 0x10000000000
+    cmp rdx, rcx
+    jne fail_imul_imm32
+
     ; DIV r64: 2^64 / 2. 32-bit DIV uses EDX:EAX = 2^32 / 2 = 2^31.
     mov rdx, 1
     xor eax, eax
@@ -175,6 +183,9 @@ fail_imul:
     jmp fail_out
 fail_imul_imm:
     mov al, 8
+    jmp fail_out
+fail_imul_imm32:
+    mov al, 12
     jmp fail_out
 fail_div:
     mov al, 9
