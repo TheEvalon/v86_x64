@@ -402,6 +402,7 @@ emulator.add_listener("serial0-output-byte", function(byte)
     const pass = [
         "VFS: Cannot open root device",
         "Unable to mount root",
+        "No filesystem could mount root",
         "Kernel panic - not syncing: VFS",
         "Freeing unused kernel image",
         "Freeing unused kernel memory",
@@ -411,12 +412,22 @@ emulator.add_listener("serial0-output-byte", function(byte)
         console.log("linux64: pass (" + pass + ")");
         finish(0);
     }
-    if(serial.includes("Kernel panic - not syncing") &&
-        !serial.includes("Kernel panic - not syncing: VFS"))
+    // Wait for the panic line to finish. The VFS panic is
+    // "Kernel panic - not syncing: VFS: Unable to mount root fs ...";
+    // matching the prefix alone races the rest of the line.
+    const panic_at = serial.lastIndexOf("Kernel panic - not syncing");
+    if(panic_at >= 0)
     {
-        const line = serial.split("\n").find(s => s.includes("Kernel panic - not syncing")) ||
-            "Kernel panic";
-        finish(1, "linux64: kernel panic before VFS: " + line.trim());
+        const rest = serial.slice(panic_at);
+        const nl = rest.indexOf("\n");
+        if(nl >= 0)
+        {
+            const line = rest.slice(0, nl);
+            if(!line.includes("VFS") && !line.includes("Unable to mount root"))
+            {
+                finish(1, "linux64: kernel panic before VFS: " + line.trim());
+            }
+        }
     }
 });
 
