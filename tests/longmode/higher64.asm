@@ -1,5 +1,5 @@
 ; Multiboot payload: run 64-bit code at a canonical higher-half RIP
-; (Linux -2GB window) and CMOV r64. Exit code is written to port 0xF4 (0 = pass).
+; (Linux -2GB window), CMOV r64, and SETCC. Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
 ORG 0x100000
@@ -101,6 +101,23 @@ higher:
     cmp rax, rcx
     jne fail_cmov_keep
 
+    ; SETZ writes only the 8-bit dest. 32-bit SETZ of AL still leaves
+    ; the rest of RAX; a mistaken write_reg32 would zero-extend to 1.
+    mov rax, 0xAAAAAAAAAAAAAAAA
+    xor ecx, ecx
+    setz al
+    mov rbx, 0xAAAAAAAAAAAAAA01
+    cmp rax, rbx
+    jne fail_setz
+
+    mov rax, 0xAAAAAAAAAAAAAAAA
+    mov ecx, 1
+    test ecx, ecx
+    setz al
+    mov rbx, 0xAAAAAAAAAAAAAA00
+    cmp rax, rbx
+    jne fail_setz_clear
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -127,6 +144,20 @@ fail_cmov_keep:
 .hang_cmov_keep:
     hlt
     jmp .hang_cmov_keep
+
+fail_setz:
+    mov al, 4
+    out 0xF4, al
+.hang_setz:
+    hlt
+    jmp .hang_setz
+
+fail_setz_clear:
+    mov al, 5
+    out 0xF4, al
+.hang_setz_clear:
+    hlt
+    jmp .hang_setz_clear
 
 align 8
 gdt:
