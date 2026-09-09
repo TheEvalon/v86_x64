@@ -59,7 +59,7 @@ function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
     // succeeds if a later syscall fails. Extra getpid/gettid/uname/brk/mmap/
-    // arch_prctl/clock_gettime/gettimeofday/writev/munmap writes are diagnostic only.
+    // arch_prctl/clock_gettime/gettimeofday/writev/getcwd/munmap writes are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
@@ -71,9 +71,10 @@ function make_static_init_elf(message)
         Buffer.from("linux64-init: clock\n", "ascii"),
         Buffer.from("linux64-init: gettimeofday\n", "ascii"),
         Buffer.from("linux64-init: writev\n", "ascii"),
+        Buffer.from("linux64-init: getcwd\n", "ascii"),
         Buffer.from("linux64-init: munmap\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_MUNMAP = 10;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5, MSG_GETTID = 6, MSG_CLOCK = 7, MSG_GETTIMEOFDAY = 8, MSG_WRITEV = 9, MSG_GETCWD = 10, MSG_MUNMAP = 11;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
@@ -291,7 +292,18 @@ function make_static_init_elf(message)
     jcc8(0x75, "skip_writev"); // jne
     labels.skip_writev = size;
 
-    // 10. munmap(map, 4096) (rax=11). rbx still holds the mmap address.
+    // 10. getcwd(map+64, 256) (rax=79). Root of the initramfs must start with '/'.
+    mov_imm(0, 79);
+    emit([0x48, 0x8D, 0x7B, 0x40]); // lea rdi, [rbx+64]
+    mov_imm(6, 256);
+    syscall();
+    is_err_jae32("skip_getcwd");
+    emit([0x80, 0x7B, 0x40, 0x2F]); // cmp byte [rbx+64], '/'
+    jcc8(0x75, "skip_getcwd"); // jne
+    write_str(MSG_GETCWD);
+    labels.skip_getcwd = size;
+
+    // 11. munmap(map, 4096) (rax=11). rbx still holds the mmap address.
     mov_imm(0, 11);
     emit([0x48, 0x89, 0xDF]); // mov rdi, rbx
     mov_imm(6, 4096);         // mov rsi, 4096
@@ -301,7 +313,7 @@ function make_static_init_elf(message)
     labels.skip_munmap = size;
     labels.skip_mmap = size;
 
-    // 11. exit(0)
+    // 12. exit(0)
     mov_imm(0, 60);
     emit([0x48, 0x31, 0xFF]); // xor rdi, rdi
     syscall();
