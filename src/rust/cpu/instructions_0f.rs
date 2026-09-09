@@ -551,8 +551,13 @@ pub unsafe fn instr_0F07() {
 }
 #[no_mangle]
 pub unsafe fn instr_0F08() {
-    // invd
-    undefined_instruction();
+    if 0 != *cpl {
+        dbg_log!("invd #gp");
+        trigger_gp(0);
+    }
+    else {
+        // invd
+    };
 }
 #[no_mangle]
 pub unsafe fn instr_0F09() {
