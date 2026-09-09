@@ -1,4 +1,5 @@
-; Multiboot payload: REX.W is ignored on 8-bit / size-independent ops.
+; Multiboot payload: REX.W is ignored on 8-bit / size-independent ops;
+; MOVSX/MOVZX r64 still widen to 64 bits.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -130,6 +131,30 @@ jz_ok:
     cmp rax, rbx
     jne fail_add64
 
+    ; MOVSX r64, r/m8 of 0x80 is 0xFFFFFFFFFFFFFF80.
+    ; 32-bit MOVSX + write_reg32 would yield 0x00000000FFFFFF80.
+    mov rax, 0x0123456789ABCDEF
+    mov bl, 0x80
+    movsx rax, bl
+    mov rcx, 0xFFFFFFFFFFFFFF80
+    cmp rax, rcx
+    jne fail_movsx8
+
+    ; MOVSX r64, r/m16 of 0x8000 is 0xFFFFFFFFFFFF8000.
+    mov rax, 0x0123456789ABCDEF
+    mov dx, 0x8000
+    movsx rax, dx
+    mov rcx, 0xFFFFFFFFFFFF8000
+    cmp rax, rcx
+    jne fail_movsx16
+
+    ; MOVZX r64, r/m8 clears the high 56 bits.
+    mov rax, 0x0123456789ABCDEF
+    mov bl, 0x80
+    movzx rax, bl
+    cmp rax, 0x80
+    jne fail_movzx8
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -166,6 +191,21 @@ fail_mov_r8b:
 
 fail_add64:
     mov al, 8
+    out 0xF4, al
+    jmp hang64
+
+fail_movsx8:
+    mov al, 9
+    out 0xF4, al
+    jmp hang64
+
+fail_movsx16:
+    mov al, 10
+    out 0xF4, al
+    jmp hang64
+
+fail_movzx8:
+    mov al, 11
     out 0xF4, al
     jmp hang64
 
