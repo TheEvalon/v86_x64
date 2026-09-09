@@ -58,21 +58,23 @@ function newc_entry(name, data, mode, extras)
 function make_static_init_elf(message)
 {
     // Static ET_EXEC, no libc. Write the pass line first so linux64 still
-    // succeeds if a later syscall fails. Extra getpid/uname/brk/mmap writes
-    // are diagnostic only.
+    // succeeds if a later syscall fails. Extra getpid/uname/brk/mmap/arch_prctl
+    // writes are diagnostic only.
     const strings = [
         Buffer.from(message, "ascii"),
         Buffer.from("linux64-init: getpid\n", "ascii"),
         Buffer.from("linux64-init: uname\n", "ascii"),
         Buffer.from("linux64-init: brk\n", "ascii"),
         Buffer.from("linux64-init: mmap\n", "ascii"),
+        Buffer.from("linux64-init: archprctl\n", "ascii"),
     ];
-    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4;
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3, MSG_MMAP = 4, MSG_ARCHPRCTL = 5;
     const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
 
     const chunks = [];
     const leas = [];
     const jumps = [];
+    const jumps32 = [];
     const labels = Object.create(null);
     let size = 0;
 
@@ -132,6 +134,22 @@ function make_static_init_elf(message)
         emit([opcode, 0x00]);
     }
 
+    function jmp32(name)
+    {
+        jumps32.push({ off: size, name: name });
+        emit([0xE9, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    function is_err_jae32(skip)
+    {
+        // cmp rax, -4095; jb ok; jmp skip. Keeps the success path in jcc8 range.
+        emit([0x48, 0x3D, 0x01, 0xF0, 0xFF, 0xFF]);
+        const ok = skip + "_ok_" + size;
+        jcc8(0x72, ok); // jb (unsigned below => not IS_ERR)
+        jmp32(skip);
+        labels[ok] = size;
+    }
+
     // 1. write(1, LINUX64_INIT_LINE + "\n") — existing pass bar, must be first.
     write_str(MSG);
 
@@ -179,15 +197,43 @@ function make_static_init_elf(message)
     mov_imm_hi(0, -1);      // mov r8, -1 (fd)
     mov_imm_hi(1, 0);       // mov r9, 0 (offset)
     syscall();
-    emit([0x48, 0x3D, 0x01, 0xF0, 0xFF, 0xFF]); // cmp rax, -4095
-    jcc8(0x73, "skip_mmap"); // jae (unsigned IS_ERR)
+    is_err_jae32("skip_mmap");
     emit([0xC6, 0x00, 0xA5]); // mov byte [rax], 0xA5
     emit([0x80, 0x38, 0xA5]); // cmp byte [rax], 0xA5
-    jcc8(0x75, "skip_mmap"); // jne
+    jcc8(0x74, "mmap_store_ok"); // je
+    jmp32("skip_mmap");
+    labels.mmap_store_ok = size;
+    emit([0x48, 0x89, 0xC3]); // mov rbx, rax
     write_str(MSG_MMAP);
+
+    // 6. arch_prctl(ARCH_SET_FS, map) then load [fs:0]; ARCH_GET_FS round-trip.
+    //    (rax=158). Uses the mmap page so a kernel WRMSR of IA32_FS_BASE is
+    //    visible as a 64-bit FS-prefix load. Diagnostic only.
+    mov_imm(0, 158);        // mov rax, 158 (arch_prctl)
+    mov_imm(7, 0x1002);     // mov rdi, ARCH_SET_FS
+    emit([0x48, 0x89, 0xDE]); // mov rsi, rbx
+    syscall();
+    is_err_jae32("skip_archprctl");
+    emit([0x31, 0xC0]);     // xor eax, eax
+    emit([0x64, 0x8A, 0x00]); // mov al, [fs:rax]
+    emit([0x3C, 0xA5]);     // cmp al, 0xA5
+    jcc8(0x74, "fsload_ok"); // je
+    jmp32("skip_archprctl");
+    labels.fsload_ok = size;
+    mov_imm(0, 158);
+    mov_imm(7, 0x1003);     // mov rdi, ARCH_GET_FS
+    emit([0x48, 0x8D, 0x73, 0x08]); // lea rsi, [rbx+8]
+    syscall();
+    is_err_jae32("skip_archprctl");
+    emit([0x48, 0x3B, 0x5B, 0x08]); // cmp rbx, [rbx+8]
+    jcc8(0x74, "getfs_ok"); // je
+    jmp32("skip_archprctl");
+    labels.getfs_ok = size;
+    write_str(MSG_ARCHPRCTL);
+    labels.skip_archprctl = size;
     labels.skip_mmap = size;
 
-    // 6. exit(0)
+    // 7. exit(0)
     mov_imm(0, 60);
     emit([0x48, 0x31, 0xFF]); // xor rdi, rdi
     syscall();
@@ -210,6 +256,16 @@ function make_static_init_elf(message)
             throw new Error("init elf: jcc to " + j.name + " out of range (" + rel + ")");
         }
         body.writeInt8(rel, j.off + 1);
+    }
+    for(const j of jumps32)
+    {
+        const target = labels[j.name];
+        if(target === undefined)
+        {
+            throw new Error("init elf: missing label " + j.name);
+        }
+        const rel = target - (j.off + 5);
+        body.writeInt32LE(rel, j.off + 1);
     }
     const str_off = [];
     let off = body.length;
