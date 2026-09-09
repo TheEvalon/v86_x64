@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit RCL/RCR through CF, plus SHLD/SHRD and ROL/ROR.
+; Multiboot payload: 64-bit RCL/RCR through CF, plus SHLD/SHRD, ROL/ROR, and SHL r64,CL.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -194,6 +194,14 @@ start64:
     cmp rax, rbx
     jne fail_rol_nop
 
+    ; SHL r64, CL=32. 32-bit SHL masks the count to 5 bits (no-op).
+    mov rax, 1
+    mov cl, 32
+    shl rax, cl
+    mov rbx, 0x100000000
+    cmp rax, rbx
+    jne fail_shlcl
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -283,6 +291,9 @@ fail_ror:
     jmp fail_out
 fail_rol_nop:
     mov al, 29
+    jmp fail_out
+fail_shlcl:
+    mov al, 30
     jmp fail_out
 
 fail_out:
