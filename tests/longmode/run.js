@@ -9,7 +9,7 @@ const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
 process.on("unhandledRejection", exn => { throw exn; });
 
-const ALL_TESTS = ["enter64", "stack64", "idt64", "syscall64", "higher64", "jit64", "rex64", "pf64", "cpl64", "nx64", "cx16", "retf64", "rdtscp", "rcl64", "fxsave64", "xmm8", "popcnt64", "rdrand64", "ud64", "frame64", "fsbase64", "sreg64", "movq64", "rexw8", "lapic64", "msr64"];
+const ALL_TESTS = ["enter64", "stack64", "idt64", "syscall64", "higher64", "jit64", "rex64", "pf64", "cpl64", "nx64", "cx16", "retf64", "rdtscp", "rcl64", "fxsave64", "xmm8", "popcnt64", "rdrand64", "ud64", "frame64", "fsbase64", "sreg64", "movq64", "rexw8", "lapic64", "msr64", "movnti64"];
 const requested = process.argv.slice(2);
 
 if(requested.length === 0)
@@ -71,11 +71,11 @@ emulator.add_listener("emulator-loaded", function() {
     emulator.cpu_exception_hook = function(n) {
         // DEBUG trigger_* skips IDT delivery when this returns true. cx16 and
         // fxsave64 install a #GP handler for misaligned ops, so let vector 13 through.
-        // ud64 installs a #UD handler, so let vector 6 through.
+        // ud64 and movnti64 install a #UD handler, so let vector 6 through.
         if((name === "cx16" || name === "fxsave64") && n === 13) {
             return false;
         }
-        if(name === "ud64" && n === 6) {
+        if((name === "ud64" || name === "movnti64") && n === 6) {
             return false;
         }
         const names = { 0: "DE", 6: "UD", 13: "GP", 14: "PF" };
