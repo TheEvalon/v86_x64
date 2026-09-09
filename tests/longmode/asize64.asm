@@ -1,4 +1,4 @@
-; Multiboot payload: 67h selects 32-bit addressing in 64-bit CS, plus SHL/SHR/SAR and BTC r64.
+; Multiboot payload: 67h selects 32-bit addressing in 64-bit CS, plus SHL/SHR/SAR and BT*.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -135,6 +135,24 @@ start64:
     test rax, rax
     jnz fail_btc
 
+    ; BTS r64 of bit 32. 32-bit BTS would set bit 0.
+    xor eax, eax
+    bts rax, 32
+    jc fail_bts
+    mov rcx, 0x100000000
+    cmp rax, rcx
+    jne fail_bts
+    bts rax, 32
+    jnc fail_bts
+    cmp rax, rcx
+    jne fail_bts
+
+    ; BTR r64 of bit 32. 32-bit BTR would clear bit 0.
+    btr rax, 32
+    jnc fail_btr
+    test rax, rax
+    jnz fail_btr
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -164,6 +182,12 @@ fail_sar:
     jmp fail_out
 fail_btc:
     mov al, 9
+    jmp fail_out
+fail_bts:
+    mov al, 10
+    jmp fail_out
+fail_btr:
+    mov al, 11
     jmp fail_out
 
 fail_out:
