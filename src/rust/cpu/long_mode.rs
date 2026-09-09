@@ -247,6 +247,18 @@ unsafe fn bsr64(old: u64, src: u64) -> u64 {
     }
 }
 
+unsafe fn popcnt64(v: u64) -> u64 {
+    *flags_changed = 0;
+    *flags &= !FLAGS_ALL;
+    if v != 0 {
+        v.count_ones() as u64
+    }
+    else {
+        *flags |= FLAG_ZERO;
+        0
+    }
+}
+
 unsafe fn bt64_flags(base: u64, bit: u64) {
     *flags_changed &= !FLAG_CARRY;
     if base & 1 << (bit & 63) != 0 {
@@ -1605,6 +1617,15 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
             else {
                 write_reg64(EAX, rm);
             }
+        },
+        0xB8 => {
+            if *prefixes & prefix::PREFIX_REPZ == 0 {
+                trigger_ud();
+                return;
+            }
+            let modrm = return_on_pagefault!(read_imm8());
+            let src = return_on_pagefault!(load_rm64(modrm));
+            write_reg64(gpr_reg(modrm), popcnt64(src));
         },
         0xBE => {
             let modrm = return_on_pagefault!(read_imm8());
