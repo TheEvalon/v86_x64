@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit PUSH/POP FS and GS, LAR/LSL/VERR/VERW, SMSW, and CLTS.
+; Multiboot payload: 64-bit PUSH/POP FS and GS, LAR/LSL/VERR/VERW, SMSW, CLTS, and LMSW.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -235,6 +235,29 @@ start64:
     test eax, 1
     jz fail_clts
 
+    ; LMSW loads CR0[3:0]. Set TS; PE stays. Then LMSW 0 must not clear PE.
+    mov eax, 9
+    lmsw ax
+    mov rax, cr0
+    test eax, 8
+    jz fail_lmsw_set
+    test eax, 1
+    jz fail_lmsw_set
+    xor eax, eax
+    lmsw ax
+    mov rax, cr0
+    test eax, 1
+    jz fail_lmsw_pe
+    test eax, 8
+    jnz fail_lmsw_pe
+    mov word [smsw_buf], 9
+    lmsw [smsw_buf]
+    mov rax, cr0
+    test eax, 8
+    jz fail_lmsw_mem
+    test eax, 1
+    jz fail_lmsw_mem
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -356,6 +379,21 @@ fail_clts_set:
 
 fail_clts:
     mov al, 25
+    out 0xF4, al
+    jmp hang64
+
+fail_lmsw_set:
+    mov al, 26
+    out 0xF4, al
+    jmp hang64
+
+fail_lmsw_pe:
+    mov al, 27
+    out 0xF4, al
+    jmp hang64
+
+fail_lmsw_mem:
+    mov al, 28
     out 0xF4, al
     jmp hang64
 
