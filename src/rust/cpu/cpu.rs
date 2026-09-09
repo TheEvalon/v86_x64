@@ -3458,9 +3458,9 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
     true
 }
 
-pub(crate) fn tss64_rsp_offset(cpl: u8) -> u32 {
-    dbg_assert!(cpl <= 2);
-    0x04 + cpl as u32 * 8
+pub(crate) fn tss64_rsp_offset(stack_cpl: u8) -> u32 {
+    dbg_assert!(stack_cpl <= 2);
+    0x04 + stack_cpl as u32 * 8
 }
 
 pub(crate) fn tss64_ist_offset(ist: u8) -> u32 {
