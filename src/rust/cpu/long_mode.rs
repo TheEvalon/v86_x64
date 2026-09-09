@@ -1408,6 +1408,37 @@ unsafe fn dispatch_forced64(opcode: i32) {
     }
 }
 
+/// Intel SDM: these one-byte opcodes are invalid in 64-bit mode.
+/// LDS (`0xC5`) and LES (`0xC4`) are also VEX prefixes; this CPU does not
+/// advertise AVX, so they `#UD` on the opcode byte before ModRM.
+pub fn opcode_invalid_in_64(opcode: i32) -> bool {
+    matches!(
+        opcode,
+        0x06 | 0x07
+            | 0x0E
+            | 0x16
+            | 0x17
+            | 0x1E
+            | 0x1F
+            | 0x27
+            | 0x2F
+            | 0x37
+            | 0x3F
+            | 0x60
+            | 0x61
+            | 0x62
+            | 0x82
+            | 0x9A
+            | 0xC4
+            | 0xC5
+            | 0xCE
+            | 0xD4
+            | 0xD5
+            | 0xD6
+            | 0xEA
+    )
+}
+
 pub fn opcode_is_forced64(opcode: i32) -> bool {
     matches!(
         opcode,
@@ -1870,30 +1901,7 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
 unsafe fn dispatch_opcode(opcode: i32) {
     current_interp_opcode = opcode as u32 | 0x100;
     current_interp_0f = false;
-    // Intel SDM: these one-byte opcodes are invalid in 64-bit mode.
-    if matches!(
-        opcode,
-        0x06 | 0x07
-            | 0x0E
-            | 0x16
-            | 0x17
-            | 0x1E
-            | 0x1F
-            | 0x27
-            | 0x2F
-            | 0x37
-            | 0x3F
-            | 0x60
-            | 0x61
-            | 0x62
-            | 0x82
-            | 0x9A
-            | 0xCE
-            | 0xD4
-            | 0xD5
-            | 0xD6
-            | 0xEA
-    ) {
+    if opcode_invalid_in_64(opcode) {
         trigger_ud();
         return;
     }
@@ -2097,6 +2105,15 @@ mod tests {
         assert_eq!((va >> 39) & 0x1FF, 511);
         assert_eq!((va >> 30) & 0x1FF, 510);
         assert_eq!((va >> 21) & 0x1FF, 8);
+    }
+
+    #[test]
+    fn lds_les_are_invalid_in_64() {
+        assert!(opcode_invalid_in_64(0xC4));
+        assert!(opcode_invalid_in_64(0xC5));
+        assert!(opcode_invalid_in_64(0x27));
+        assert!(!opcode_invalid_in_64(0x90));
+        assert!(!opcode_invalid_in_64(0x8B));
     }
 
     #[test]
