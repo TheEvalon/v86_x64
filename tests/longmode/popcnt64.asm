@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit POPCNT, BSF, and BSR in long mode.
+; Multiboot payload: 64-bit POPCNT, BSF, BSR, and MUL in long mode.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -125,6 +125,25 @@ start64:
     cmp rcx, rbx
     jne fail_bsr0
 
+    ; MUL r64: 2^32 * 3. 32-bit MUL would use EAX=0.
+    mov rax, 0x100000000
+    mov rbx, 3
+    mul rbx
+    mov rcx, 0x300000000
+    cmp rax, rcx
+    jne fail_mul
+    test rdx, rdx
+    jnz fail_mul
+
+    ; High half of the product: 2^32 * 2^32 = 2^64.
+    mov rax, 0x100000000
+    mov rbx, 0x100000000
+    mul rbx
+    test rax, rax
+    jnz fail_mul_hi
+    cmp rdx, 1
+    jne fail_mul_hi
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -160,6 +179,12 @@ fail_bsf0:
     jmp fail_out
 fail_bsr0:
     mov al, 11
+    jmp fail_out
+fail_mul:
+    mov al, 12
+    jmp fail_out
+fail_mul_hi:
+    mov al, 13
     jmp fail_out
 
 fail_out:
