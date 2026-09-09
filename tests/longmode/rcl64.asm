@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit RCL/RCR through CF (REX.W group2 extras 2/3).
+; Multiboot payload: 64-bit RCL/RCR through CF, plus SHLD/SHRD.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -146,6 +146,39 @@ start64:
     cmp qword [mem64], 0
     jne fail_mem_val
 
+    ; SHLD dest, src, 8: dest <<= 8, filled from src[63:56]. CF is dest bit 56.
+    mov rax, 0x0123456789ABCDEF
+    mov rdx, 0xFEDCBA9876543210
+    shld rax, rdx, 8
+    jnc fail_shld_cf
+    mov rbx, 0x23456789ABCDEFFE
+    cmp rax, rbx
+    jne fail_shld
+
+    ; SHRD dest, src, 8: dest >>= 8, filled from src[7:0].
+    mov rax, 0x0123456789ABCDEF
+    shrd rax, rdx, 8
+    mov rbx, 0x100123456789ABCD
+    cmp rax, rbx
+    jne fail_shrd
+
+    ; Count 64 masks to 0: dest and CF unchanged (D3 CL).
+    stc
+    mov rax, 0x0123456789ABCDEF
+    mov cl, 64
+    shld rax, rdx, cl
+    jnc fail_shld_nop
+    mov rbx, 0x0123456789ABCDEF
+    cmp rax, rbx
+    jne fail_shld_nop
+
+    mov rax, 0x0123456789ABCDEF
+    mov [mem64], rax
+    shld qword [mem64], rdx, 8
+    mov rbx, 0x23456789ABCDEFFE
+    cmp qword [mem64], rbx
+    jne fail_shld_mem
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -211,6 +244,21 @@ fail_mem_val:
     jmp fail_out
 fail_mem_cf:
     mov al, 21
+    jmp fail_out
+fail_shld:
+    mov al, 22
+    jmp fail_out
+fail_shld_cf:
+    mov al, 23
+    jmp fail_out
+fail_shrd:
+    mov al, 24
+    jmp fail_out
+fail_shld_nop:
+    mov al, 25
+    jmp fail_out
+fail_shld_mem:
+    mov al, 26
     jmp fail_out
 
 fail_out:
