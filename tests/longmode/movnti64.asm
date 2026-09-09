@@ -1,4 +1,4 @@
-; Multiboot payload: REX.W MOVNTI m64, r64 in long mode.
+; Multiboot payload: REX.W MOVNTI m64, r64 and LFENCE/MFENCE/SFENCE in long mode.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -114,6 +114,31 @@ start64:
     cmp qword [buf + 8], -1
     jne fail_tail
 
+    ; LFENCE/MFENCE/SFENCE are serializing nops: no #UD, GPRs and the stored
+    ; qword unchanged. REX.W is ignored (same encodings Linux emits).
+    mov r8, 0x1111111111111111
+    mov r9, 0x2222222222222222
+    lfence
+    mfence
+    sfence
+    db 0x48
+    lfence
+    db 0x48
+    mfence
+    db 0x48
+    sfence
+    mov rax, 0x1111111111111111
+    cmp r8, rax
+    jne fail_fence
+    mov rax, 0x2222222222222222
+    cmp r9, rax
+    jne fail_fence
+    mov rax, 0xA5A5A5A5A5A5A5A5
+    cmp qword [buf], rax
+    jne fail_fence
+    cmp qword [buf + 8], -1
+    jne fail_tail
+
     ; Register form is #UD. Encoding: REX.W 0F C3 /r (4 bytes).
     mov dword [ud_count], 0
     db 0x48, 0x0F, 0xC3, 0xD8 ; movnti rax, rbx
@@ -159,6 +184,11 @@ fail_ud:
 
 fail_frame:
     mov al, 7
+    out 0xF4, al
+    jmp hang64
+
+fail_fence:
+    mov al, 8
     out 0xF4, al
     jmp hang64
 
