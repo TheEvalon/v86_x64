@@ -47,7 +47,7 @@ const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "..
 
 const TIMEOUT_MS = +process.env.LINUX64_TIMEOUT_MS || 600000;
 const CMDLINE = "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 " +
-    "acpi=off noapic nolapic nosmp nokaslr debug rdinit=/init init=/init";
+    "acpi=off nosmp nokaslr debug rdinit=/init init=/init";
 
 const emulator = new V86({
     bios: { url: path.join(ROOT, "bios/seabios.bin") },
