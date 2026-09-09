@@ -3523,7 +3523,7 @@ pub unsafe fn instr_0FA2() {
             edx = (if true /* have fpu */ { 1 } else {  0 }) |      // fpu
                     vme | 1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 |  // vme, pse, tsc, msr, pae
                     1 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, sep, pge, cmov
-                    1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // mmx, fxsr, sse1, sse2
+                    1 << 19 | 1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // clfsh, mmx, fxsr, sse1, sse2
 
             if *acpi_enabled || *lapic_present {
                 edx |= 1 << 9; // apic
@@ -3843,9 +3843,9 @@ pub unsafe fn instr_0FAE_7_reg(_r: i32) {
     // sfence
 }
 #[no_mangle]
-pub unsafe fn instr_0FAE_7_mem(_addr: i32) {
-    // clflush
-    undefined_instruction();
+pub unsafe fn instr_0FAE_7_mem(addr: i32) {
+    // clflush: cache no-op; still translate the address (read, not write)
+    return_on_pagefault!(readable_or_pagefault(addr, 1));
 }
 pub unsafe fn instr16_0FAF_mem(addr: i32, r: i32) {
     write_reg16(
