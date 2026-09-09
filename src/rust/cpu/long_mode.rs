@@ -1565,6 +1565,35 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
                 write_reg64(gpr_reg(modrm), src);
             }
         },
+        0x6E | 0x7E => {
+            // F3 0F 7E is MOVQ xmm, xmm/m64; do not take the GPR form.
+            if *prefixes & (prefix::PREFIX_F2 | prefix::PREFIX_REPZ) != 0 {
+                run_instruction0f_32(opcode);
+            }
+            else {
+                let modrm = return_on_pagefault!(read_imm8());
+                let xmm = *prefixes & prefix::PREFIX_MASK_OPSIZE != 0;
+                if opcode == 0x6E {
+                    let src = return_on_pagefault!(load_rm64(modrm));
+                    if xmm {
+                        write_xmm128_2(gpr_reg(modrm), src, 0);
+                    }
+                    else {
+                        write_mmx_reg64(modrm >> 3 & 7, src);
+                        transition_fpu_to_mmx();
+                    }
+                }
+                else {
+                    let val =
+                        if xmm { read_xmm64s(gpr_reg(modrm)) } else { read_mmx64s(modrm >> 3 & 7) };
+                    let (addr, _) = return_on_pagefault!(rm64_addr_val(modrm));
+                    return_on_pagefault!(rm64_write(modrm, addr, val));
+                    if !xmm {
+                        transition_fpu_to_mmx();
+                    }
+                }
+            }
+        },
         0xA3 | 0xAB | 0xB3 | 0xBB => {
             let modrm = return_on_pagefault!(read_imm8());
             let bit = read_reg64(gpr_reg(modrm));
