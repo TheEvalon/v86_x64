@@ -1,4 +1,4 @@
-; Multiboot payload: CMPXCHG16B and CPUID.1 CX16 in long mode.
+; Multiboot payload: CMPXCHG8B, CMPXCHG16B, and CPUID.1 CX16 in long mode.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -115,6 +115,31 @@ start64:
     cmp qword [m128 + 8], rcx
     jne fail_match
 
+    ; CMPXCHG8B uses EDX:EAX / ECX:EBX even in 64-bit CS (not RDX:RAX).
+    mov eax, 0xAAAAAAAA
+    mov edx, 0xBBBBBBBB
+    mov ebx, 0x33333333
+    mov ecx, 0x44444444
+    lock cmpxchg8b [m64]
+    jz fail_c8_miss
+    cmp eax, 0xA1A2A3A4
+    jne fail_c8_miss
+    cmp edx, 0xB1B2B3B4
+    jne fail_c8_miss
+    cmp dword [m64], 0xA1A2A3A4
+    jne fail_c8_miss
+    cmp dword [m64 + 4], 0xB1B2B3B4
+    jne fail_c8_miss
+
+    mov ebx, 0xC1C2C3C4
+    mov ecx, 0xD1D2D3D4
+    lock cmpxchg8b [m64]
+    jnz fail_c8_match
+    cmp dword [m64], 0xC1C2C3C4
+    jne fail_c8_match
+    cmp dword [m64 + 4], 0xD1D2D3D4
+    jne fail_c8_match
+
     mov byte [gp_expected], 1
     lock cmpxchg16b [m128 + 1]
     mov al, 5
@@ -153,6 +178,16 @@ fail_gp:
     out 0xF4, al
     jmp hang64
 
+fail_c8_miss:
+    mov al, 7
+    out 0xF4, al
+    jmp hang64
+
+fail_c8_match:
+    mov al, 8
+    out 0xF4, al
+    jmp hang64
+
 hang64:
     hlt
     jmp hang64
@@ -184,6 +219,11 @@ idt_end:
 idt_desc:
     dw idt_end - idt - 1
     dq idt
+
+align 8
+m64:
+    dd 0xA1A2A3A4
+    dd 0xB1B2B3B4
 
 align 16
 m128:
