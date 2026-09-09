@@ -1034,10 +1034,17 @@ unsafe fn call_interrupt_vector_lma(
             "nested fault during long-mode IDT delivery int={}",
             interrupt_nr
         );
-        if DEBUG {
-            let _ = js::cpu_exception_hook(CPU_EXCEPTION_DF);
+        if interrupt_nr == CPU_EXCEPTION_DF {
+            if DEBUG {
+                let _ = js::cpu_exception_hook(CPU_EXCEPTION_DF);
+            }
+            *in_hlt = true;
+            return;
         }
-        *in_hlt = true;
+        // Contributory nested exception → #DF (IST1 on Linux). Do not abort
+        // the emulator; Linux should panic on the DF stack.
+        in_lma_int_delivery = false;
+        call_interrupt_vector_lma(CPU_EXCEPTION_DF, false, Some(0));
         return;
     }
     in_lma_int_delivery = true;
@@ -2502,7 +2509,7 @@ pub unsafe fn translate_address(
     side_effects: bool,
     for_execute: bool,
 ) -> OrPageFault<u32> {
-    if *pending_linear64 > 0xFFFF_FFFF {
+    if efer_lma() {
         let v = virt64_from_i32(address);
         if v > 0xFFFF_FFFF {
             return translate_address64(v, for_writing, user, jit, side_effects, for_execute);
@@ -2516,7 +2523,7 @@ pub unsafe fn translate_address(
 }
 
 pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPageFault<(u32, bool)> {
-    if *pending_linear64 > 0xFFFF_FFFF {
+    if efer_lma() {
         let v = virt64_from_i32(address);
         if v > 0xFFFF_FFFF {
             let phys = translate_address64(v, true, *cpl == 3, false, true, false)?;
@@ -2649,9 +2656,13 @@ pub unsafe fn do_page_walk(
         let mut allow_write_upper = true;
 
         let (page_dir_addr, page_dir_entry) = if lma {
+            let va = virt64_from_i32(addr);
+            if va > 0xFFFF_FFFF {
+                return do_page_walk_high(va, for_writing, user, jit, side_effects, for_execute);
+            }
             let mut allow_write = true;
             let page_dir_addr = walk_ia32e_to_pd(
-                addr as u32 as u64,
+                va,
                 for_writing,
                 user,
                 jit,
@@ -3779,7 +3790,11 @@ unsafe fn phys_of_linear_rip(eip: u64) -> OrPageFault<u32> {
 
 pub unsafe fn gp_if_noncanonical(addr: u64) -> bool {
     if efer_lma() && !is_canonical_va(addr) {
-        dbg_log!("#gp non-canonical {:x}", addr);
+        dbg_log!(
+            "#gp non-canonical {:x} rip={:x}",
+            addr,
+            if *is_64 { get_rip() } else { *instruction_pointer as u32 as u64 }
+        );
         trigger_gp(0);
         true
     }

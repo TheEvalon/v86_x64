@@ -1105,8 +1105,13 @@ unsafe fn dispatch_forced64(opcode: i32) {
                 },
                 2 => {
                     let target = return_on_pagefault!(load_rm64(modrm));
+                    // #GP before pushing the return address: a non-canonical
+                    // target after push underflows a just-emptied kernel stack.
+                    if gp_if_noncanonical(target) {
+                        return;
+                    }
                     return_on_pagefault!(push64(get_rip()));
-                    jump_near64(target);
+                    set_rip(target);
                 },
                 4 => {
                     let target = return_on_pagefault!(load_rm64(modrm));
