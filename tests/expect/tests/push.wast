@@ -111,6 +111,9 @@
             (set_local $l4
               (get_local $l9))
             (i32.store
+              (i32.const 2096)
+              (i32.const 0))
+            (i32.store
               (i32.const 560)
               (i32.or
                 (i32.and

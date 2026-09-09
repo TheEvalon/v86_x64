@@ -203,7 +203,7 @@ unsafe fn sgdt(addr: i32, mask: i32) {
     if *is_64 {
         return_on_pagefault!(writable_or_pagefault(addr, 10));
         safe_write16(addr, *gdtr_size).unwrap();
-        safe_write64(addr + 2, *gdtr_offset as u32 as u64).unwrap();
+        safe_write64(addr + 2, gdtr_base()).unwrap();
         return;
     }
     return_on_pagefault!(writable_or_pagefault(addr, 6));
@@ -224,7 +224,7 @@ unsafe fn sidt(addr: i32, mask: i32) {
     if *is_64 {
         return_on_pagefault!(writable_or_pagefault(addr, 10));
         safe_write16(addr, *idtr_size).unwrap();
-        safe_write64(addr + 2, *idtr_offset as u32 as u64).unwrap();
+        safe_write64(addr + 2, idtr_base()).unwrap();
         return;
     }
     return_on_pagefault!(writable_or_pagefault(addr, 6));
@@ -249,19 +249,19 @@ unsafe fn lgdt(addr: i32, mask: i32) {
     if *is_64 {
         let size = return_on_pagefault!(safe_read16(addr));
         let offset = return_on_pagefault!(safe_read64s(addr + 2));
-        if offset >> 32 != 0 {
-            dbg_log!("#gp lgdt base {:x} exceeds 4G", offset);
-            trigger_gp(0);
+        if gp_if_noncanonical(offset) {
             return;
         }
         *gdtr_size = size;
         *gdtr_offset = offset as i32;
+        *gdtr_offset64 = offset;
         return;
     }
     let size = return_on_pagefault!(safe_read16(addr));
     let offset = return_on_pagefault!(safe_read32s(addr + 2));
     *gdtr_size = size;
     *gdtr_offset = offset & mask;
+    *gdtr_offset64 = (offset & mask) as u32 as u64;
 }
 #[no_mangle]
 pub unsafe fn instr16_0F01_2_mem(addr: i32) { lgdt(addr, 0xFFFFFF); }
@@ -281,19 +281,19 @@ unsafe fn lidt(addr: i32, mask: i32) {
     if *is_64 {
         let size = return_on_pagefault!(safe_read16(addr));
         let offset = return_on_pagefault!(safe_read64s(addr + 2));
-        if offset >> 32 != 0 {
-            dbg_log!("#gp lidt base {:x} exceeds 4G", offset);
-            trigger_gp(0);
+        if gp_if_noncanonical(offset) {
             return;
         }
         *idtr_size = size;
         *idtr_offset = offset as i32;
+        *idtr_offset64 = offset;
         return;
     }
     let size = return_on_pagefault!(safe_read16(addr));
     let offset = return_on_pagefault!(safe_read32s(addr + 2));
     *idtr_size = size;
     *idtr_offset = offset & mask;
+    *idtr_offset64 = (offset & mask) as u32 as u64;
 }
 #[no_mangle]
 pub unsafe fn instr16_0F01_3_mem(addr: i32) { lidt(addr, 0xFFFFFF); }
@@ -840,13 +840,26 @@ pub unsafe fn instr_0F20(r: i32, creg: i32) {
             write_reg32(r, *cr);
         },
         2 => {
-            write_reg32(r, *cr.offset(2));
+            if *is_64 {
+                write_reg64(r, *cr2_64);
+            }
+            else {
+                write_reg32(r, *cr.offset(2));
+            }
         },
         3 => {
             write_reg32(r, *cr.offset(3));
         },
         4 => {
             write_reg32(r, *cr.offset(4));
+        },
+        8 => {
+            if *is_64 {
+                write_reg64(r, cr8);
+            }
+            else {
+                undefined_instruction();
+            }
         },
         _ => {
             dbg_log!("{}", creg);
@@ -899,15 +912,22 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
             set_cr0(data);
         },
         2 => {
-            dbg_log!("cr2 <- {:x}", data);
-            *cr.offset(2) = data
+            if *is_64 {
+                let v = read_reg64(r);
+                dbg_log!("cr2 <- {:x}", v);
+                *cr.offset(2) = v as i32;
+                *cr2_64 = v;
+            }
+            else {
+                dbg_log!("cr2 <- {:x}", data);
+                *cr.offset(2) = data;
+                *cr2_64 = data as u32 as u64;
+            }
         },
         3 => set_cr3(data),
         4 => {
             dbg_log!("cr4 <- {:x}", data);
-            if 0 != data as u32
-                & ((1 << 11 | 1 << 12 | 1 << 15 | 1 << 16 | 1 << 19) as u32 | 0xFFC00000)
-            {
+            if 0 != data as u32 & ((1 << 12 | 1 << 15 | 1 << 19) as u32 | 0xFFC00000) {
                 dbg_log!("trigger_gp: Invalid cr4 bit");
                 trigger_gp(0);
                 return;
@@ -929,6 +949,14 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
                 }
                 *cr.offset(4) = data;
                 update_efer_lma();
+            }
+        },
+        8 => {
+            if *is_64 {
+                cr8 = read_reg64(r) & 0xF;
+            }
+            else {
+                undefined_instruction();
             }
         },
         _ => {
@@ -1339,8 +1367,8 @@ pub unsafe fn instr_0F30() {
         IA32_GS_BASE => set_fs_gs_base_msr(GS, edx_eax(low, high)),
         IA32_KERNEL_GS_BASE => {
             let value = edx_eax(low, high);
-            if value >> 32 != 0 {
-                dbg_log!("#gp KERNEL_GS_BASE {:x} exceeds 4G", value);
+            if !is_canonical_va(value) {
+                dbg_log!("#gp KERNEL_GS_BASE {:x} non-canonical", value);
                 trigger_gp(0);
                 return;
             }
@@ -1379,15 +1407,17 @@ pub unsafe fn instr_0F30() {
         IA32_PERFEVTSEL0 | IA32_PERFEVTSEL1 => {}, // linux/9legacy
         IA32_PMC0 | IA32_PMC1 => {},               // linux
         IA32_PAT => {},
-        IA32_SPEC_CTRL => {},      // linux 5.19
+        IA32_SPEC_CTRL => {}, // linux 5.19
+        IA32_PRED_CMD => {},
         IA32_TSX_CTRL => {},       // linux 5.19
         MSR_TSX_FORCE_ABORT => {}, // linux 5.19
         IA32_MCU_OPT_CTRL => {},   // linux 5.19
         MSR_AMD64_LS_CFG => {},    // linux 5.19
         MSR_AMD64_DE_CFG => {},    // linux 6.1
+        IA32_TSC_AUX => {},
         _ => {
             dbg_log!("Unknown msr: {:x}", index);
-            dbg_assert!(false);
+            trigger_gp(0);
         },
     }
 }
@@ -1455,12 +1485,15 @@ pub unsafe fn instr_0F32() {
         IA32_PMC0 | IA32_PMC1 => {},               // linux
         IA32_PAT => {},
         MSR_PKG_C2_RESIDENCY => {},
-        IA32_SPEC_CTRL => {},      // linux 5.19
+        IA32_SPEC_CTRL => {}, // linux 5.19
+        IA32_PRED_CMD => {},
+        IA32_ARCH_CAPABILITIES => {},
         IA32_TSX_CTRL => {},       // linux 5.19
         MSR_TSX_FORCE_ABORT => {}, // linux 5.19
         IA32_MCU_OPT_CTRL => {},   // linux 5.19
         MSR_AMD64_LS_CFG => {},    // linux 5.19
         MSR_AMD64_DE_CFG => {},    // linux 6.1
+        IA32_TSC_AUX => {},
         IA32_EFER => {
             low = *efer as i32;
             high = (*efer >> 32) as i32;
@@ -1495,7 +1528,8 @@ pub unsafe fn instr_0F32() {
         },
         _ => {
             dbg_log!("Unknown msr: {:x}", index);
-            dbg_assert!(false);
+            trigger_gp(0);
+            return;
         },
     }
 

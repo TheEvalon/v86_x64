@@ -156,23 +156,36 @@ unsafe fn apply_asize64(ea: u64) -> u64 {
 }
 
 unsafe fn linear_from_ea64(default_seg: i32, ea: u64, rip_rel: bool) -> OrPageFault<u64> {
-    let base = if rip_rel {
-        let p = *prefixes & prefix::PREFIX_MASK_SEGMENT;
-        if p == FS as u8 + 1 || p == GS as u8 + 1 {
-            get_seg(p as i32 - 1)? as u32 as u64
-        }
-        else {
-            0
-        }
+    let p = *prefixes & prefix::PREFIX_MASK_SEGMENT;
+    let base = if p == prefix::SEG_PREFIX_ZERO {
+        0
+    }
+    else if p != 0 {
+        fsgs_base64(p as i32 - 1)
+    }
+    else if rip_rel {
+        0
     }
     else {
-        get_seg_prefix(default_seg)? as u32 as u64
+        fsgs_base64(default_seg)
     };
     let linear = base.wrapping_add(ea);
     if gp_if_noncanonical(linear) {
         return Err(());
     }
     Ok(linear)
+}
+
+unsafe fn fsgs_base64(seg: i32) -> u64 {
+    if seg == FS {
+        *msr_fs_base
+    }
+    else if seg == GS {
+        *msr_gs_base
+    }
+    else {
+        0
+    }
 }
 
 /// SIB in 64-bit CS. `mod_has_disp` is true for mod=01/10 (disp follows SIB).
@@ -205,16 +218,49 @@ unsafe fn resolve_sib64(mod_has_disp: bool) -> OrPageFault<(u64, i32)> {
     Ok((ea, seg))
 }
 
-/// 64-bit addressing: REX.B/X, SIB, RIP-relative (`mod=00, rm=101` without REX.B).
-/// `67h` truncates the effective address to 32 bits. Non-canonical linear addresses #GP.
-pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
+/// Bytes of immediate that follow ModRM (and its SIB/displacement) for RIP-relative.
+/// `opcode` uses bit 8 as the generated interpreter's 32-bit opsize flag.
+pub fn trailing_imm_after_modrm(opcode: u32, is_0f: bool, modrm_byte: i32) -> u32 {
+    let op = opcode as u8;
+    if is_0f {
+        return match op {
+            0x70 | 0x71 | 0x72 | 0x73 | 0xA4 | 0xAC | 0xBA | 0xC2 | 0xC4 | 0xC5 | 0xC6 => 1,
+            _ => 0,
+        };
+    }
+    let imm1632 = if opcode & 0x100 != 0 { 4 } else { 2 };
+    match op {
+        0x80 | 0x82 | 0x83 | 0xC0 | 0xC1 | 0xC6 | 0x6B => 1,
+        0x81 | 0x69 | 0xC7 => imm1632,
+        0xF6 => {
+            if modrm_byte >> 3 & 7 == 0 {
+                1
+            }
+            else {
+                0
+            }
+        },
+        0xF7 => {
+            if modrm_byte >> 3 & 7 == 0 {
+                imm1632
+            }
+            else {
+                0
+            }
+        },
+        _ => 0,
+    }
+}
+
+/// Offset from ModRM/SIB/disp. Does not add FS/GS or check canonical form.
+unsafe fn modrm_ea64(modrm_byte: i32) -> OrPageFault<(u64, i32, bool)> {
     dbg_assert!(modrm_byte < 0xC0);
     let rex = *rex_prefix;
     let rm_low = modrm_byte & 7;
     let modb = modrm_byte >> 6;
     let rm = rm_low | (rex & REX_B != 0) as i32 * 8;
 
-    let (ea, seg, rip_rel) = if rm_low == 4 {
+    Ok(if rm_low == 4 {
         let (mut ea, seg) = resolve_sib64(modb != 0)?;
         if modb == 1 {
             ea = ea.wrapping_add(read_imm8s()? as i64 as u64);
@@ -230,9 +276,12 @@ pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
             (read_reg64(13).wrapping_add(disp), SS, false)
         }
         else {
-            // RIP of the next instruction. Immediates after the displacement are
-            // not included (U6 guests use RIP-rel without a trailing immediate).
-            ((get_rip()).wrapping_add(disp), DS, true)
+            // RIP is the next instruction, including a trailing immediate
+            // (e.g. ADD r/m32, imm8 is opcode+modrm+disp32+imm8).
+            let tail =
+                trailing_imm_after_modrm(current_interp_opcode, current_interp_0f, modrm_byte)
+                    as u64;
+            ((get_rip()).wrapping_add(disp).wrapping_add(tail), DS, true)
         }
     }
     else {
@@ -244,7 +293,48 @@ pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
             ea = ea.wrapping_add(read_imm32s()? as i64 as u64);
         }
         (ea, default_seg_rm64(rm), false)
-    };
+    })
+}
 
+/// LEA: wrapping offset only. Non-canonical sums are stored, not #GP
+/// (Linux FineIBT mixes hash values with `lea (%rax,%rdx),%rbx`).
+pub unsafe fn resolve_lea64(modrm_byte: i32) -> OrPageFault<u64> {
+    let (ea, _, _) = modrm_ea64(modrm_byte)?;
+    Ok(apply_asize64(ea))
+}
+
+/// 64-bit addressing: REX.B/X, SIB, RIP-relative (`mod=00, rm=101` without REX.B).
+/// `67h` truncates the effective address to 32 bits. Non-canonical linear addresses #GP.
+pub unsafe fn resolve_modrm64(modrm_byte: i32) -> OrPageFault<u64> {
+    let (ea, seg, rip_rel) = modrm_ea64(modrm_byte)?;
     linear_from_ea64(seg, apply_asize64(ea), rip_rel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trailing_imm_after_modrm;
+
+    #[test]
+    fn group1_imm8_is_one_byte() {
+        assert_eq!(trailing_imm_after_modrm(0x183, false, 0x05), 1);
+        assert_eq!(trailing_imm_after_modrm(0x83, false, 0x05), 1);
+    }
+
+    #[test]
+    fn group1_imm32_is_four_bytes_when_osize32() {
+        assert_eq!(trailing_imm_after_modrm(0x181, false, 0x05), 4);
+        assert_eq!(trailing_imm_after_modrm(0x81, false, 0x05), 2);
+    }
+
+    #[test]
+    fn test_rm_imm_uses_modrm_extra() {
+        assert_eq!(trailing_imm_after_modrm(0x1F7, false, 0x05), 4);
+        assert_eq!(trailing_imm_after_modrm(0x1F7, false, 0x0D), 0);
+    }
+
+    #[test]
+    fn call_m64_has_no_trailing_imm() {
+        assert_eq!(trailing_imm_after_modrm(0x1FF, false, 0x15), 0);
+        assert_eq!(trailing_imm_after_modrm(0x183, false, 0x05), 1);
+    }
 }

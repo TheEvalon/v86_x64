@@ -79,8 +79,8 @@ list of emulated hardware:
 
 Here's an overview of the operating systems supported in v86:
 
-- Linux works pretty well. 64-bit kernels are not supported yet (long mode
-  foundation is in progress; `make longmode-test` covers CPU entry).
+- Linux works pretty well. 64-bit kernels boot far enough to print
+  `Linux version` (`make linux64-test`); `make longmode-test` covers CPU entry.
   - [Buildroot](https://buildroot.org/) can be used to build a minimal image.
     [humphd/browser-vm](https://github.com/humphd/browser-vm) and
     [darin755/browser-buildroot](https://github.com/Darin755/browser-buildroot) have some useful scripts for building one.

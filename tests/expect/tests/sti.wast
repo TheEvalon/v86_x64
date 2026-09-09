@@ -75,6 +75,9 @@
               (set_local $l0
                 (i32.const 53535353))
               (i32.store
+                (i32.const 2080)
+                (i32.const 0))
+              (i32.store
                 (i32.const 560)
                 (i32.or
                   (i32.and
@@ -170,6 +173,9 @@
                 (i32.const 6)))
             (set_local $l0
               (i32.const 42424242))
+            (i32.store
+              (i32.const 2080)
+              (i32.const 0))
             (i32.store
               (i32.const 64)
               (get_local $l0))

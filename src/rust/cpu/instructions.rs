@@ -6,6 +6,7 @@ use crate::cpu::cpu::*;
 use crate::cpu::fpu::*;
 use crate::cpu::global_pointers::*;
 use crate::cpu::misc_instr::*;
+use crate::cpu::modrm::resolve_lea64;
 use crate::cpu::string::*;
 use crate::prefix;
 use crate::softfloat::F80;
@@ -903,6 +904,12 @@ pub unsafe fn instr32_8D_reg(_r: i32, _r2: i32) {
 }
 pub unsafe fn instr32_8D_mem(modrm_byte: i32, r: i32) {
     // lea
+    if *is_64 {
+        if let Ok(addr) = resolve_lea64(modrm_byte) {
+            write_reg32(r, addr as i32);
+        }
+        return;
+    }
     // override prefix, so modrm_resolve does not return the segment part
     *prefixes |= prefix::SEG_PREFIX_ZERO;
     if let Ok(addr) = modrm_resolve(modrm_byte) {

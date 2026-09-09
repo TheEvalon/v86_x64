@@ -121,10 +121,14 @@ pub fn opcode_needs_long_trampoline(
     if long_mode::opcode_is_forced64(opcode as i32) {
         return true;
     }
-    if rex & 0x0F != 0 {
+    if rex != 0 {
         return true;
     }
-    if matches!(opcode, 0xA0..=0xA3) {
+    if matches!(
+        opcode,
+        0x6C..=0x6F | 0xA0..=0xA7 | 0xAA..=0xAF | 0xE0..=0xE3
+    ) {
+        // 64-bit string/LOOP use RSI/RDI/RCX; the 32-bit JIT helpers do not.
         return true;
     }
     !addrsize_override && opcode_has_modrm(opcode) && next & 0xC7 == 0x05
@@ -243,14 +247,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trampoline_rex_w_but_not_empty_rex() {
+    fn trampoline_any_rex() {
         assert!(opcode_needs_long_trampoline(
             long_mode::REX_W,
             0x01,
             0xC0,
             false
         ));
-        assert!(!opcode_needs_long_trampoline(0x40, 0x33, 0xC0, false));
+        assert!(opcode_needs_long_trampoline(0x40, 0x33, 0xC0, false));
     }
 
     #[test]
@@ -261,6 +265,9 @@ mod tests {
         assert!(!opcode_needs_long_trampoline(0, 0x8B, 0x05, true));
         assert!(!opcode_needs_long_trampoline(0, 0x8B, 0xC3, false));
         assert!(opcode_needs_long_trampoline(0, 0xE8, 0, false));
+        assert!(opcode_needs_long_trampoline(0, 0xA4, 0, false));
+        assert!(opcode_needs_long_trampoline(0, 0xAB, 0, false));
+        assert!(opcode_needs_long_trampoline(0, 0xE2, 0, false));
         assert!(!opcode_needs_long_trampoline(0, 0x75, 0, false));
         assert!(!opcode_needs_long_trampoline(0, 0x83, 0xC0, false));
     }

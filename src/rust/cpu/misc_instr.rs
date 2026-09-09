@@ -141,7 +141,8 @@ pub unsafe fn cmovcc32(condition: bool, value: i32, r: i32) {
 pub unsafe fn get_stack_pointer(offset: i32) -> i32 {
     if *is_64 {
         let rsp = read_reg64(ESP).wrapping_add(offset as i64 as u64);
-        return get_seg_ss() + rsp as i32;
+        *pending_linear64 = rsp;
+        return rsp as i32;
     }
     else if *stack_size_32 {
         return get_seg_ss() + read_reg32(ESP) + offset;
@@ -163,12 +164,11 @@ pub unsafe fn adjust_stack_reg(adjustment: i32) {
 }
 
 unsafe fn stack_addr64(rsp: u64) -> OrPageFault<i32> {
-    if rsp >> 32 != 0 {
-        dbg_log!("#gp stack pointer {:x} exceeds 4G", rsp);
-        trigger_gp(0);
+    if gp_if_noncanonical(rsp) {
         return Err(());
     }
-    Ok(get_seg_ss() + rsp as i32)
+    *pending_linear64 = rsp;
+    Ok(rsp as i32)
 }
 
 pub unsafe fn push64(imm64: u64) -> OrPageFault<()> {

@@ -5,10 +5,17 @@
 //! other memory operands. 32-bit-opsize ops in low 4GB may run through the
 //! existing JIT; 64-bit-only encodings trampoline back here.
 
+use crate::cpu::arith::{cmp16, cmp32, cmp8};
 use crate::cpu::cpu::*;
 use crate::cpu::global_pointers::*;
-use crate::cpu::misc_instr::{adjust_stack_reg, pop64, push64};
-use crate::cpu::modrm::resolve_modrm64;
+use crate::cpu::memory;
+use crate::cpu::misc_instr::{
+    adjust_stack_reg, getcf, getzf, pop64, push64, test_b, test_be, test_l, test_le, test_o,
+    test_p, test_s, test_z,
+};
+use crate::cpu::modrm::{resolve_lea64, resolve_modrm64};
+use crate::jit;
+use crate::page::Page;
 use crate::paging::OrPageFault;
 use crate::prefix;
 
@@ -78,6 +85,206 @@ unsafe fn sub64(a: u64, b: u64) -> u64 {
 
 unsafe fn cmp64(a: u64, b: u64) { let _ = sub64(a, b); }
 
+unsafe fn adc64(a: u64, b: u64) -> u64 {
+    let c = getcf() as u64;
+    let (s1, o1) = a.overflowing_add(b);
+    let (res, o2) = s1.overflowing_add(c);
+    let cf = o1 || o2;
+    let of = (a ^ res) & (b ^ res) & 1 << 63 != 0;
+    let af = (a ^ b ^ res) & 0x10 != 0;
+    set_arith_flags64(res, cf, of, af);
+    res
+}
+
+unsafe fn sbb64(a: u64, b: u64) -> u64 {
+    let c = getcf() as u64;
+    let (s1, o1) = a.overflowing_sub(b);
+    let (res, o2) = s1.overflowing_sub(c);
+    let cf = o1 || o2;
+    let of = (a ^ b) & (a ^ res) & 1 << 63 != 0;
+    let af = (a ^ b ^ res) & 0x10 != 0;
+    set_arith_flags64(res, cf, of, af);
+    res
+}
+
+unsafe fn logic64(v: u64) -> u64 {
+    set_arith_flags64(v, false, false, false);
+    v
+}
+
+unsafe fn inc64(a: u64) -> u64 {
+    let cf = getcf();
+    let res = add64(a, 1);
+    *flags = *flags & !FLAG_CARRY | cf as i32;
+    res
+}
+
+unsafe fn dec64(a: u64) -> u64 {
+    let cf = getcf();
+    let res = sub64(a, 1);
+    *flags = *flags & !FLAG_CARRY | cf as i32;
+    res
+}
+
+unsafe fn shift_count64(count: i32) -> u32 { (count as u32) & 63 }
+
+unsafe fn shl64(a: u64, count: i32) -> u64 {
+    let n = shift_count64(count);
+    if n == 0 {
+        return a;
+    }
+    let res = a << n;
+    let cf = a >> (64 - n) & 1 != 0;
+    let of = n == 1 && (res >> 63 != 0) != cf;
+    set_arith_flags64(res, cf, of, false);
+    res
+}
+
+unsafe fn shr64(a: u64, count: i32) -> u64 {
+    let n = shift_count64(count);
+    if n == 0 {
+        return a;
+    }
+    let res = a >> n;
+    let cf = a >> (n - 1) & 1 != 0;
+    let of = n == 1 && a >> 63 != 0;
+    set_arith_flags64(res, cf, of, false);
+    res
+}
+
+unsafe fn sar64(a: u64, count: i32) -> u64 {
+    let n = shift_count64(count);
+    if n == 0 {
+        return a;
+    }
+    let res = ((a as i64) >> n) as u64;
+    let cf = a >> (n - 1) & 1 != 0;
+    set_arith_flags64(res, cf, false, false);
+    res
+}
+
+unsafe fn rol64(a: u64, count: i32) -> u64 {
+    let n = shift_count64(count);
+    if n == 0 {
+        return a;
+    }
+    let res = a.rotate_left(n);
+    let cf = res & 1 != 0;
+    let of = n == 1 && (res >> 63 != 0) != cf;
+    *flags_changed = 0;
+    *flags = *flags & !(FLAG_CARRY | FLAG_OVERFLOW) | cf as i32 | (of as i32) << 11;
+    res
+}
+
+unsafe fn ror64(a: u64, count: i32) -> u64 {
+    let n = shift_count64(count);
+    if n == 0 {
+        return a;
+    }
+    let res = a.rotate_right(n);
+    let cf = res >> 63 != 0;
+    let of = n == 1 && (res >> 63 != 0) != ((res >> 62) & 1 != 0);
+    *flags_changed = 0;
+    *flags = *flags & !(FLAG_CARRY | FLAG_OVERFLOW) | cf as i32 | (of as i32) << 11;
+    res
+}
+
+unsafe fn test64(a: u64, b: u64) { let _ = logic64(a & b); }
+
+unsafe fn bsf64(old: u64, src: u64) -> u64 {
+    *flags_changed = 0;
+    if src == 0 {
+        *flags |= FLAG_ZERO;
+        old
+    }
+    else {
+        *flags &= !FLAG_ZERO;
+        src.trailing_zeros() as u64
+    }
+}
+
+unsafe fn bsr64(old: u64, src: u64) -> u64 {
+    *flags_changed = 0;
+    if src == 0 {
+        *flags |= FLAG_ZERO;
+        old
+    }
+    else {
+        *flags &= !FLAG_ZERO;
+        63 - src.leading_zeros() as u64
+    }
+}
+
+unsafe fn bt64_flags(base: u64, bit: u64) {
+    *flags_changed &= !FLAG_CARRY;
+    if base & 1 << (bit & 63) != 0 {
+        *flags |= FLAG_CARRY;
+    }
+    else {
+        *flags &= !FLAG_CARRY;
+    }
+}
+
+unsafe fn mul64(src: u64) {
+    let a = read_reg64(EAX);
+    let prod = (a as u128) * (src as u128);
+    write_reg64(EAX, prod as u64);
+    write_reg64(EDX, (prod >> 64) as u64);
+    let hi = (prod >> 64) != 0;
+    set_arith_flags64(prod as u64, hi, hi, false);
+}
+
+unsafe fn imul64_ax(src: u64) {
+    let prod = (read_reg64(EAX) as i64 as i128) * (src as i64 as i128);
+    write_reg64(EAX, prod as u64);
+    write_reg64(EDX, (prod >> 64) as u64);
+    let hi = (prod as u64) as i64 >> 63 != (prod >> 64) as i64;
+    set_arith_flags64(prod as u64, hi, hi, false);
+}
+
+unsafe fn imul64_reg(a: u64, b: u64) -> u64 {
+    let prod = (a as i64 as i128) * (b as i64 as i128);
+    let res = prod as u64;
+    let hi = (res as i64) >> 63 != (prod >> 64) as i64;
+    set_arith_flags64(res, hi, hi, false);
+    res
+}
+
+unsafe fn div64(src: u64) {
+    if src == 0 {
+        trigger_de();
+        return;
+    }
+    let num = (read_reg64(EDX) as u128) << 64 | read_reg64(EAX) as u128;
+    let q = num / src as u128;
+    if q > u64::MAX as u128 {
+        trigger_de();
+        return;
+    }
+    write_reg64(EAX, q as u64);
+    write_reg64(EDX, (num % src as u128) as u64);
+}
+
+unsafe fn idiv64(src: u64) {
+    if src == 0 {
+        trigger_de();
+        return;
+    }
+    let num = (read_reg64(EDX) as i64 as i128) << 64 | read_reg64(EAX) as u128 as i128;
+    let d = src as i64 as i128;
+    if d == 0 {
+        trigger_de();
+        return;
+    }
+    let q = num / d;
+    if q > i64::MAX as i128 || q < i64::MIN as i128 {
+        trigger_de();
+        return;
+    }
+    write_reg64(EAX, q as u64);
+    write_reg64(EDX, (num % d) as u64);
+}
+
 unsafe fn rm64_addr_val(modrm: i32) -> OrPageFault<(Option<i32>, u64)> {
     if modrm < 0xC0 {
         let addr = modrm_resolve(modrm)?;
@@ -103,6 +310,323 @@ unsafe fn load_rm64(modrm: i32) -> OrPageFault<u64> { Ok(rm64_addr_val(modrm)?.1
 unsafe fn finish_instruction() {
     *prefixes = 0;
     *rex_prefix = 0;
+    *pending_linear64 = 0;
+    current_interp_opcode = 0;
+    current_interp_0f = false;
+}
+
+fn is_hint_nop(opcode: i32) -> bool { matches!(opcode, 0x18 | 0x19 | 0x1C | 0x1D | 0x1E | 0x1F) }
+
+/// 0F 18–1F are prefetch / multi-byte NOPs. They must not read memory or
+/// #GP a non-canonical EA (Linux FineIBT uses `nopl 0x0(%rax,%rax,1)`).
+unsafe fn dispatch_hint_nop() {
+    let modrm = return_on_pagefault!(read_imm8());
+    if modrm < 0xC0 {
+        let _ = return_on_pagefault!(resolve_lea64(modrm));
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum String64 {
+    Movs,
+    Stos,
+    Lods,
+    Scas,
+    Cmps,
+}
+
+unsafe fn string_read(addr: u64, width: i64) -> OrPageFault<u64> {
+    *pending_linear64 = addr;
+    match width {
+        1 => Ok(safe_read8(addr as i32)? as u32 as u64),
+        2 => Ok(safe_read16(addr as i32)? as u32 as u64),
+        4 => Ok(safe_read32s(addr as i32)? as u32 as u64),
+        8 => safe_read64s(addr as i32),
+        _ => Ok(0),
+    }
+}
+
+unsafe fn string_write(addr: u64, width: i64, v: u64) -> OrPageFault<()> {
+    *pending_linear64 = addr;
+    match width {
+        1 => safe_write8(addr as i32, v as i32),
+        2 => safe_write16(addr as i32, v as i32),
+        4 => safe_write32(addr as i32, v as i32),
+        8 => safe_write64(addr as i32, v),
+        _ => Ok(()),
+    }
+}
+
+unsafe fn string_cmp(width: i64, a: u64, b: u64) {
+    match width {
+        1 => cmp8(a as i32, b as i32),
+        2 => cmp16(a as i32, b as i32),
+        4 => cmp32(a as i32, b as i32),
+        8 => cmp64(a, b),
+        _ => {},
+    }
+}
+
+unsafe fn string_ax(width: i64) -> u64 {
+    match width {
+        1 => read_reg8(AL) as u32 as u64,
+        2 => read_reg16(AX) as u32 as u64,
+        4 => read_reg32(EAX) as u32 as u64,
+        8 => read_reg64(EAX),
+        _ => 0,
+    }
+}
+
+unsafe fn string_set_ax(width: i64, v: u64) {
+    match width {
+        1 => write_reg8(AL, v as i32),
+        2 => write_reg16(AX, v as i32),
+        4 => write_reg32(EAX, v as i32),
+        8 => write_reg64(EAX, v),
+        _ => {},
+    }
+}
+
+unsafe fn string64(kind: String64, width: i64) {
+    let asize32 = *prefixes & prefix::PREFIX_MASK_ADDRSIZE != 0;
+    let dir = if *flags & FLAG_DIRECTION != 0 { -width } else { width };
+    let rep = *prefixes & prefix::PREFIX_MASK_REP != 0;
+    let mut rcx = if rep {
+        if asize32 {
+            read_reg32(ECX) as u32 as u64
+        }
+        else {
+            read_reg64(ECX)
+        }
+    }
+    else {
+        1
+    };
+    if rcx == 0 {
+        return;
+    }
+    let mut rsi = if asize32 { read_reg32(ESI) as u32 as u64 } else { read_reg64(ESI) };
+    let mut rdi = if asize32 { read_reg32(EDI) as u32 as u64 } else { read_reg64(EDI) };
+    let rax = string_ax(width);
+    let repz = *prefixes & prefix::PREFIX_REPZ != 0;
+    let repnz = *prefixes & prefix::PREFIX_REPNZ != 0;
+    let page_of = |a: u64| a & !0xFFF;
+    let mut cmp_stop = false;
+
+    // Linux BSS/heap clears are `rep stosq` of 0. Do a whole page with memset
+    // so a multi-megabyte REP does not block the JS event loop.
+    if kind == String64::Stos && rep && dir > 0 {
+        let splat = rax as u8;
+        let splat_ok = match width {
+            1 => true,
+            2 => rax & 0xFFFF == splat as u64 * 0x0101,
+            4 => rax & 0xFFFF_FFFF == splat as u64 * 0x0101_0101,
+            8 => rax == splat as u64 * 0x0101_0101_0101_0101,
+            _ => false,
+        };
+        if splat_ok && rdi & (width as u64 - 1) == 0 {
+            let max_bytes = (0x1000 - (rdi & 0xFFF)).min(rcx.saturating_mul(width as u64));
+            let n = max_bytes / width as u64;
+            if n > 0 {
+                *pending_linear64 = rdi;
+                match translate_address_write_and_can_skip_dirty(rdi as i32) {
+                    Ok((phys, skip)) => {
+                        let nbytes = (n * width as u64) as u32;
+                        if !memory::in_mapped_range(phys) && (phys & 0xFFF) + nbytes <= 0x1000 {
+                            if !skip {
+                                jit::jit_dirty_page(Page::page_of(phys));
+                            }
+                            memory::memset_no_mmap_or_dirty_check(phys, splat, nbytes);
+                            rdi = rdi.wrapping_add(n * width as u64);
+                            rcx -= n;
+                        }
+                    },
+                    Err(()) => return,
+                }
+            }
+        }
+    }
+
+    if kind == String64::Movs
+        && rep
+        && dir > 0
+        && rdi & (width as u64 - 1) == 0
+        && rsi & (width as u64 - 1) == 0
+    {
+        let max_bytes = (0x1000 - (rdi & 0xFFF))
+            .min(0x1000 - (rsi & 0xFFF))
+            .min(rcx.saturating_mul(width as u64));
+        let n = max_bytes / width as u64;
+        if n > 0 {
+            *pending_linear64 = rsi;
+            let src = match translate_address_read(rsi as i32) {
+                Ok(p) => p,
+                Err(()) => return,
+            };
+            *pending_linear64 = rdi;
+            match translate_address_write_and_can_skip_dirty(rdi as i32) {
+                Ok((dst, skip)) => {
+                    let nbytes = (n * width as u64) as u32;
+                    if !memory::in_mapped_range(src)
+                        && !memory::in_mapped_range(dst)
+                        && (src & 0xFFF) + nbytes <= 0x1000
+                        && (dst & 0xFFF) + nbytes <= 0x1000
+                    {
+                        if !skip {
+                            jit::jit_dirty_page(Page::page_of(dst));
+                        }
+                        memory::memcpy_no_mmap_or_dirty_check(src, dst, nbytes);
+                        rsi = rsi.wrapping_add(n * width as u64);
+                        rdi = rdi.wrapping_add(n * width as u64);
+                        rcx -= n;
+                    }
+                },
+                Err(()) => return,
+            }
+        }
+    }
+
+    let start_rdi_page = page_of(rdi);
+    let start_rsi_page = page_of(rsi);
+    let mut slow = 0u32;
+    const MAX_SLOW: u32 = 256;
+    while rcx > 0 && slow < MAX_SLOW {
+        if matches!(
+            kind,
+            String64::Movs | String64::Stos | String64::Scas | String64::Cmps
+        ) && page_of(rdi) != start_rdi_page
+        {
+            break;
+        }
+        if matches!(kind, String64::Movs | String64::Lods | String64::Cmps)
+            && page_of(rsi) != start_rsi_page
+        {
+            break;
+        }
+        match kind {
+            String64::Movs => {
+                let v = return_on_pagefault!(string_read(rsi, width));
+                return_on_pagefault!(string_write(rdi, width, v));
+                rsi = rsi.wrapping_add(dir as u64);
+                rdi = rdi.wrapping_add(dir as u64);
+            },
+            String64::Stos => {
+                return_on_pagefault!(string_write(rdi, width, rax));
+                rdi = rdi.wrapping_add(dir as u64);
+            },
+            String64::Lods => {
+                string_set_ax(width, return_on_pagefault!(string_read(rsi, width)));
+                rsi = rsi.wrapping_add(dir as u64);
+            },
+            String64::Scas => {
+                string_cmp(width, rax, return_on_pagefault!(string_read(rdi, width)));
+                rdi = rdi.wrapping_add(dir as u64);
+            },
+            String64::Cmps => {
+                let a = return_on_pagefault!(string_read(rsi, width));
+                let b = return_on_pagefault!(string_read(rdi, width));
+                string_cmp(width, a, b);
+                rsi = rsi.wrapping_add(dir as u64);
+                rdi = rdi.wrapping_add(dir as u64);
+            },
+        }
+        rcx -= 1;
+        slow += 1;
+        if matches!(kind, String64::Scas | String64::Cmps) && (repz || repnz) {
+            let z = getzf();
+            if repz && !z || repnz && z {
+                cmp_stop = true;
+                break;
+            }
+        }
+    }
+    if asize32 {
+        if matches!(kind, String64::Movs | String64::Lods | String64::Cmps) {
+            write_reg32(ESI, rsi as i32);
+        }
+        if matches!(
+            kind,
+            String64::Movs | String64::Stos | String64::Scas | String64::Cmps
+        ) {
+            write_reg32(EDI, rdi as i32);
+        }
+        if rep {
+            write_reg32(ECX, rcx as i32);
+        }
+    }
+    else {
+        if matches!(kind, String64::Movs | String64::Lods | String64::Cmps) {
+            write_reg64(ESI, rsi);
+        }
+        if matches!(
+            kind,
+            String64::Movs | String64::Stos | String64::Scas | String64::Cmps
+        ) {
+            write_reg64(EDI, rdi);
+        }
+        if rep {
+            write_reg64(ECX, rcx);
+        }
+    }
+    if rep && rcx > 0 && !cmp_stop {
+        set_rip(*previous_rip);
+        after_block_boundary();
+    }
+}
+
+unsafe fn dispatch_string64(opcode: i32) {
+    let width = if matches!(opcode, 0xA4 | 0xA6 | 0xAA | 0xAC | 0xAE) {
+        1
+    }
+    else if rex_w() {
+        8
+    }
+    else if is_osize_32() {
+        4
+    }
+    else {
+        2
+    };
+    let kind = match opcode {
+        0xA4 | 0xA5 => String64::Movs,
+        0xA6 | 0xA7 => String64::Cmps,
+        0xAA | 0xAB => String64::Stos,
+        0xAC | 0xAD => String64::Lods,
+        _ => String64::Scas,
+    };
+    string64(kind, width);
+}
+
+unsafe fn dispatch_loop64(opcode: i32) {
+    let rel = return_on_pagefault!(read_imm8s());
+    let asize32 = *prefixes & prefix::PREFIX_MASK_ADDRSIZE != 0;
+    if opcode == 0xE3 {
+        let cx = if asize32 { read_reg32(ECX) as u32 as u64 } else { read_reg64(ECX) };
+        if cx == 0 {
+            jump_near64(get_rip().wrapping_add(rel as i64 as u64));
+        }
+        return;
+    }
+    let rcx = if asize32 {
+        let c = (read_reg32(ECX) as u32).wrapping_sub(1);
+        write_reg32(ECX, c as i32);
+        c as u64
+    }
+    else {
+        let c = read_reg64(ECX).wrapping_sub(1);
+        write_reg64(ECX, c);
+        c
+    };
+    let zf = getzf();
+    let take = match opcode {
+        0xE0 => rcx != 0 && !zf,
+        0xE1 => rcx != 0 && zf,
+        0xE2 => rcx != 0,
+        _ => false,
+    };
+    if take {
+        jump_near64(get_rip().wrapping_add(rel as i64 as u64));
+    }
 }
 
 unsafe fn run_legacy_opcode(opcode: i32) {
@@ -111,22 +635,45 @@ unsafe fn run_legacy_opcode(opcode: i32) {
 }
 
 unsafe fn dispatch_rex_w(opcode: i32) {
+    current_interp_opcode = opcode as u32 | 0x100;
+    current_interp_0f = false;
     match opcode {
         0x05 => {
             let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
             let rax = add64(read_reg64(EAX), imm);
             write_reg64(EAX, rax);
         },
+        0x0D => {
+            let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+            write_reg64(EAX, logic64(read_reg64(EAX) | imm));
+        },
+        0x15 => {
+            let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+            write_reg64(EAX, adc64(read_reg64(EAX), imm));
+        },
+        0x1D => {
+            let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+            write_reg64(EAX, sbb64(read_reg64(EAX), imm));
+        },
+        0x25 => {
+            let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+            write_reg64(EAX, logic64(read_reg64(EAX) & imm));
+        },
         0x2D => {
             let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
             let rax = sub64(read_reg64(EAX), imm);
             write_reg64(EAX, rax);
         },
+        0x35 => {
+            let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+            write_reg64(EAX, logic64(read_reg64(EAX) ^ imm));
+        },
         0x3D => {
             let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
             cmp64(read_reg64(EAX), imm);
         },
-        0x01 | 0x03 | 0x29 | 0x2B | 0x31 | 0x33 | 0x09 | 0x0B | 0x21 | 0x23 | 0x39 | 0x3B => {
+        0x01 | 0x03 | 0x09 | 0x0B | 0x11 | 0x13 | 0x19 | 0x1B | 0x21 | 0x23 | 0x29 | 0x2B
+        | 0x31 | 0x33 | 0x39 | 0x3B => {
             let modrm = return_on_pagefault!(read_imm8());
             let reg = gpr_reg(modrm);
             let (addr, rm) = return_on_pagefault!(rm64_addr_val(modrm));
@@ -134,38 +681,18 @@ unsafe fn dispatch_rex_w(opcode: i32) {
             let (to_reg, result) = match opcode {
                 0x01 => (false, add64(rm, r)),
                 0x03 => (true, add64(r, rm)),
+                0x09 => (false, logic64(rm | r)),
+                0x0B => (true, logic64(r | rm)),
+                0x11 => (false, adc64(rm, r)),
+                0x13 => (true, adc64(r, rm)),
+                0x19 => (false, sbb64(rm, r)),
+                0x1B => (true, sbb64(r, rm)),
+                0x21 => (false, logic64(rm & r)),
+                0x23 => (true, logic64(r & rm)),
                 0x29 => (false, sub64(rm, r)),
                 0x2B => (true, sub64(r, rm)),
-                0x31 => {
-                    let v = rm ^ r;
-                    set_arith_flags64(v, false, false, false);
-                    (false, v)
-                },
-                0x33 => {
-                    let v = r ^ rm;
-                    set_arith_flags64(v, false, false, false);
-                    (true, v)
-                },
-                0x09 => {
-                    let v = rm | r;
-                    set_arith_flags64(v, false, false, false);
-                    (false, v)
-                },
-                0x0B => {
-                    let v = r | rm;
-                    set_arith_flags64(v, false, false, false);
-                    (true, v)
-                },
-                0x21 => {
-                    let v = rm & r;
-                    set_arith_flags64(v, false, false, false);
-                    (false, v)
-                },
-                0x23 => {
-                    let v = r & rm;
-                    set_arith_flags64(v, false, false, false);
-                    (true, v)
-                },
+                0x31 => (false, logic64(rm ^ r)),
+                0x33 => (true, logic64(r ^ rm)),
                 0x39 => {
                     cmp64(rm, r);
                     finish_instruction();
@@ -202,8 +729,23 @@ unsafe fn dispatch_rex_w(opcode: i32) {
                 0 => {
                     let _ = rm64_write(modrm, addr, add64(dst, imm));
                 },
+                1 => {
+                    let _ = rm64_write(modrm, addr, logic64(dst | imm));
+                },
+                2 => {
+                    let _ = rm64_write(modrm, addr, adc64(dst, imm));
+                },
+                3 => {
+                    let _ = rm64_write(modrm, addr, sbb64(dst, imm));
+                },
+                4 => {
+                    let _ = rm64_write(modrm, addr, logic64(dst & imm));
+                },
                 5 => {
                     let _ = rm64_write(modrm, addr, sub64(dst, imm));
+                },
+                6 => {
+                    let _ = rm64_write(modrm, addr, logic64(dst ^ imm));
                 },
                 7 => cmp64(dst, imm),
                 _ => {
@@ -213,11 +755,37 @@ unsafe fn dispatch_rex_w(opcode: i32) {
                 },
             }
         },
+        0x69 | 0x6B => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let src = return_on_pagefault!(load_rm64(modrm));
+            let imm = if opcode == 0x6B {
+                return_on_pagefault!(read_imm8s()) as i64 as u64
+            }
+            else {
+                return_on_pagefault!(read_imm32s()) as i64 as u64
+            };
+            write_reg64(gpr_reg(modrm), imul64_reg(src, imm));
+        },
+        0x85 => {
+            let modrm = return_on_pagefault!(read_imm8());
+            test64(
+                return_on_pagefault!(load_rm64(modrm)),
+                read_reg64(gpr_reg(modrm)),
+            );
+        },
+        0x87 => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let (addr, rm) = return_on_pagefault!(rm64_addr_val(modrm));
+            let r = gpr_reg(modrm);
+            let tmp = read_reg64(r);
+            write_reg64(r, rm);
+            let _ = rm64_write(modrm, addr, tmp);
+        },
         0x89 => {
             let modrm = return_on_pagefault!(read_imm8());
             if modrm < 0xC0 {
                 let addr = return_on_pagefault!(modrm_resolve(modrm));
-                let _ = safe_write64(addr, read_reg64(gpr_reg(modrm)));
+                return_on_pagefault!(safe_write64(addr, read_reg64(gpr_reg(modrm))));
             }
             else {
                 write_reg64(gpr_rm(modrm), read_reg64(gpr_reg(modrm)));
@@ -234,7 +802,7 @@ unsafe fn dispatch_rex_w(opcode: i32) {
                 trigger_ud();
                 return;
             }
-            let addr = return_on_pagefault!(resolve_modrm64(modrm));
+            let addr = return_on_pagefault!(resolve_lea64(modrm));
             write_reg64(gpr_reg(modrm), addr);
         },
         0xB8..=0xBF => {
@@ -257,6 +825,91 @@ unsafe fn dispatch_rex_w(opcode: i32) {
                 write_reg64(gpr_rm(modrm), imm);
             }
         },
+        0x90..=0x97 => {
+            let r = gpr_opcode(opcode);
+            if r != EAX {
+                let a = read_reg64(EAX);
+                write_reg64(EAX, read_reg64(r));
+                write_reg64(r, a);
+            }
+        },
+        0x98 => {
+            write_reg64(EAX, read_reg32(EAX) as i64 as u64);
+        },
+        0x99 => {
+            write_reg64(EDX, ((read_reg64(EAX) as i64) >> 63) as u64);
+        },
+        0xA5 => string64(String64::Movs, 8),
+        0xA7 => string64(String64::Cmps, 8),
+        0xAB => string64(String64::Stos, 8),
+        0xAD => string64(String64::Lods, 8),
+        0xAF => string64(String64::Scas, 8),
+        0xA1 => {
+            let addr = return_on_pagefault!(read_moffs());
+            write_reg64(EAX, return_on_pagefault!(safe_read64s(addr)));
+        },
+        0xA3 => {
+            let addr = return_on_pagefault!(read_moffs());
+            return_on_pagefault!(safe_write64(addr, read_reg64(EAX)));
+        },
+        0xA9 => {
+            let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+            test64(read_reg64(EAX), imm);
+        },
+        0xC1 | 0xD1 | 0xD3 => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let extra = modrm >> 3 & 7;
+            let (addr, dst) = return_on_pagefault!(rm64_addr_val(modrm));
+            let count = if opcode == 0xC1 {
+                return_on_pagefault!(read_imm8())
+            }
+            else if opcode == 0xD1 {
+                1
+            }
+            else {
+                read_reg8(CL)
+            };
+            let res = match extra {
+                0 => rol64(dst, count),
+                1 => ror64(dst, count),
+                4 | 6 => shl64(dst, count),
+                5 => shr64(dst, count),
+                7 => sar64(dst, count),
+                _ => {
+                    dbg_log!("unhandled 64-bit group2 extra={}", extra);
+                    trigger_ud();
+                    return;
+                },
+            };
+            let _ = rm64_write(modrm, addr, res);
+        },
+        0xF7 => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let extra = modrm >> 3 & 7;
+            match extra {
+                0 | 1 => {
+                    let dst = return_on_pagefault!(load_rm64(modrm));
+                    let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+                    test64(dst, imm);
+                },
+                2 => {
+                    let (addr, dst) = return_on_pagefault!(rm64_addr_val(modrm));
+                    let _ = rm64_write(modrm, addr, !dst);
+                },
+                3 => {
+                    let (addr, dst) = return_on_pagefault!(rm64_addr_val(modrm));
+                    let _ = rm64_write(modrm, addr, sub64(0, dst));
+                },
+                4 => mul64(return_on_pagefault!(load_rm64(modrm))),
+                5 => imul64_ax(return_on_pagefault!(load_rm64(modrm))),
+                6 => div64(return_on_pagefault!(load_rm64(modrm))),
+                7 => idiv64(return_on_pagefault!(load_rm64(modrm))),
+                _ => {
+                    trigger_ud();
+                    return;
+                },
+            }
+        },
         _ => {
             dbg_log!("unimplemented REX.W opcode {:02x}", opcode);
             trigger_ud();
@@ -273,7 +926,78 @@ unsafe fn jump_near64(target: u64) {
     set_rip(target);
 }
 
+unsafe fn load_cs_64(selector: i32) -> bool {
+    let cs_selector = SegmentSelector::of_u16(selector as u16);
+    let info = match return_on_pagefault!(lookup_segment_selector(cs_selector), false) {
+        Ok((desc, _)) => desc,
+        Err(SelectorNullOrInvalid::IsNull) => {
+            trigger_gp(0);
+            return false;
+        },
+        Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
+            trigger_gp(selector & !3);
+            return false;
+        },
+    };
+    if info.is_system() || !info.is_executable() {
+        trigger_gp(selector & !3);
+        return false;
+    }
+    if cs_selector.rpl() < *cpl {
+        trigger_gp(selector & !3);
+        return false;
+    }
+    if info.is_dc() && info.dpl() > cs_selector.rpl() {
+        trigger_gp(selector & !3);
+        return false;
+    }
+    if !info.is_dc() && info.dpl() != cs_selector.rpl() {
+        trigger_gp(selector & !3);
+        return false;
+    }
+    if !info.is_present() {
+        trigger_np(selector & !3);
+        return false;
+    }
+    if cs_selector.rpl() > *cpl {
+        dbg_log!("far jump/return privilege change not implemented in 64-bit");
+        trigger_gp(selector & !3);
+        return false;
+    }
+    update_cs_from_descriptor(info);
+    *segment_is_null.offset(CS as isize) = false;
+    *segment_limits.offset(CS as isize) = info.effective_limit();
+    *segment_access_bytes.offset(CS as isize) = info.access_byte();
+    *segment_offsets.offset(CS as isize) = info.base();
+    *sreg.offset(CS as isize) = selector as u16;
+    true
+}
+
+unsafe fn retf64(stack_adjust: i32) {
+    let new_rip = return_on_pagefault!(pop64());
+    let new_cs = return_on_pagefault!(pop64()) as u16 as i32;
+    if !load_cs_64(new_cs) {
+        return;
+    }
+    if stack_adjust != 0 {
+        adjust_stack_reg(stack_adjust);
+    }
+    jump_near64(new_rip);
+}
+
+unsafe fn jmp_far64(addr: i32) {
+    let target = return_on_pagefault!(safe_read64s(addr));
+    *pending_linear64 = virt64_from_i32(addr).wrapping_add(8);
+    let sel = return_on_pagefault!(safe_read16(addr.wrapping_add(8)));
+    if !load_cs_64(sel) {
+        return;
+    }
+    jump_near64(target);
+}
+
 unsafe fn dispatch_forced64(opcode: i32) {
+    current_interp_opcode = opcode as u32 | 0x100;
+    current_interp_0f = false;
     match opcode {
         0x50..=0x57 => {
             return_on_pagefault!(push64(read_reg64(gpr_opcode(opcode))));
@@ -337,19 +1061,19 @@ unsafe fn dispatch_forced64(opcode: i32) {
         },
         0xC9 => {
             let rbp = read_reg64(EBP);
-            if rbp >> 32 != 0 {
-                dbg_log!("#gp leave rbp {:x} exceeds 4G", rbp);
-                trigger_gp(0);
+            if gp_if_noncanonical(rbp) {
                 return;
             }
-            let new_rbp = return_on_pagefault!(safe_read64s(get_seg_ss() + rbp as i32));
+            *pending_linear64 = rbp;
+            let new_rbp = return_on_pagefault!(safe_read64s(rbp as i32));
             write_reg64(ESP, rbp.wrapping_add(8));
             write_reg64(EBP, new_rbp);
         },
-        0xCA | 0xCB => {
-            dbg_log!("far RET not implemented in 64-bit CS");
-            trigger_ud();
+        0xCA => {
+            let imm16 = return_on_pagefault!(read_imm16());
+            retf64(imm16);
         },
+        0xCB => retf64(0),
         0xCF => iretq(),
         0xE8 => {
             let rel = return_on_pagefault!(read_imm32s());
@@ -369,6 +1093,16 @@ unsafe fn dispatch_forced64(opcode: i32) {
             let modrm = return_on_pagefault!(read_imm8());
             let extra = modrm >> 3 & 7;
             match extra {
+                0 | 1 => {
+                    if !rex_w() {
+                        set_rip(saved_rip);
+                        run_legacy_opcode(opcode);
+                        return;
+                    }
+                    let (addr, dst) = return_on_pagefault!(rm64_addr_val(modrm));
+                    let res = if extra == 0 { inc64(dst) } else { dec64(dst) };
+                    let _ = rm64_write(modrm, addr, res);
+                },
                 2 => {
                     let target = return_on_pagefault!(load_rm64(modrm));
                     return_on_pagefault!(push64(get_rip()));
@@ -381,6 +1115,20 @@ unsafe fn dispatch_forced64(opcode: i32) {
                 6 => {
                     let value = return_on_pagefault!(load_rm64(modrm));
                     return_on_pagefault!(push64(value));
+                },
+                3 | 5 => {
+                    if modrm >= 0xC0 {
+                        trigger_ud();
+                        return;
+                    }
+                    let addr = return_on_pagefault!(modrm_resolve(modrm));
+                    if extra == 3 {
+                        let ret_cs = *sreg.offset(CS as isize) as u64;
+                        let ret_rip = get_rip();
+                        return_on_pagefault!(push64(ret_cs));
+                        return_on_pagefault!(push64(ret_rip));
+                    }
+                    jmp_far64(addr);
                 },
                 _ => {
                     set_rip(saved_rip);
@@ -417,7 +1165,286 @@ pub fn opcode_is_forced64(opcode: i32) -> bool {
     )
 }
 
+unsafe fn dispatch_movsxd() {
+    let modrm = return_on_pagefault!(read_imm8());
+    let src = if modrm < 0xC0 {
+        let addr = return_on_pagefault!(modrm_resolve(modrm));
+        return_on_pagefault!(safe_read32s(addr)) as i64 as u64
+    }
+    else {
+        read_reg32(gpr_rm(modrm)) as i64 as u64
+    };
+    if rex_w() {
+        write_reg64(gpr_reg(modrm), src);
+    }
+    else {
+        write_reg32(gpr_reg(modrm), src as i32);
+    }
+    finish_instruction();
+}
+
+unsafe fn dispatch_rex_legacy(opcode: i32) -> bool {
+    match opcode {
+        0xB0..=0xB7 => {
+            let imm = match read_imm8() {
+                Ok(o) => o,
+                Err(()) => return true,
+            };
+            write_reg8(gpr_opcode(opcode), imm);
+            finish_instruction();
+            true
+        },
+        0xB8..=0xBF => {
+            let imm = match read_imm32s() {
+                Ok(o) => o,
+                Err(()) => return true,
+            };
+            write_reg32(gpr_opcode(opcode), imm);
+            finish_instruction();
+            true
+        },
+        0x90..=0x97 => {
+            let r = gpr_opcode(opcode);
+            if r != EAX {
+                let a = read_reg32(EAX);
+                write_reg32(EAX, read_reg32(r));
+                write_reg32(r, a);
+            }
+            finish_instruction();
+            true
+        },
+        _ => false,
+    }
+}
+
+fn cmov64_cond(opcode: i32) -> bool {
+    unsafe {
+        match opcode & 0xF {
+            0 => test_o(),
+            1 => !test_o(),
+            2 => test_b(),
+            3 => !test_b(),
+            4 => test_z(),
+            5 => !test_z(),
+            6 => test_be(),
+            7 => !test_be(),
+            8 => test_s(),
+            9 => !test_s(),
+            10 => test_p(),
+            11 => !test_p(),
+            12 => test_l(),
+            13 => !test_l(),
+            14 => test_le(),
+            15 => !test_le(),
+            _ => false,
+        }
+    }
+}
+
+unsafe fn load_rm8(modrm: i32) -> OrPageFault<i32> {
+    if modrm < 0xC0 {
+        let addr = modrm_resolve(modrm)?;
+        safe_read8(addr)
+    }
+    else {
+        Ok(read_reg8(gpr_rm(modrm)))
+    }
+}
+
+unsafe fn load_rm16(modrm: i32) -> OrPageFault<i32> {
+    if modrm < 0xC0 {
+        let addr = modrm_resolve(modrm)?;
+        safe_read16(addr)
+    }
+    else {
+        Ok(read_reg16(gpr_rm(modrm)))
+    }
+}
+
+unsafe fn dispatch_rex_w_0f(opcode: i32) {
+    current_interp_opcode = opcode as u32 | 0x100;
+    current_interp_0f = true;
+    match opcode {
+        0x40..=0x4F => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let src = return_on_pagefault!(load_rm64(modrm));
+            if cmov64_cond(opcode) {
+                write_reg64(gpr_reg(modrm), src);
+            }
+        },
+        0xA3 | 0xAB | 0xB3 | 0xBB => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let bit = read_reg64(gpr_reg(modrm));
+            if modrm < 0xC0 {
+                let base = return_on_pagefault!(resolve_modrm64(modrm));
+                let addr = base.wrapping_add((bit as i64 >> 3) as u64);
+                *pending_linear64 = addr;
+                let byte = return_on_pagefault!(safe_read8(addr as i32)) as u64;
+                let b = bit & 7;
+                *flags_changed &= !FLAG_CARRY;
+                if byte & 1 << b != 0 {
+                    *flags |= FLAG_CARRY;
+                }
+                else {
+                    *flags &= !FLAG_CARRY;
+                }
+                let new = match opcode {
+                    0xA3 => byte,
+                    0xAB => byte | 1 << b,
+                    0xB3 => byte & !(1 << b),
+                    _ => byte ^ 1 << b,
+                };
+                if opcode != 0xA3 {
+                    *pending_linear64 = addr;
+                    let _ = safe_write8(addr as i32, new as i32);
+                }
+            }
+            else {
+                let r = gpr_rm(modrm);
+                let val = read_reg64(r);
+                bt64_flags(val, bit);
+                let b = bit & 63;
+                let new = match opcode {
+                    0xA3 => val,
+                    0xAB => val | 1 << b,
+                    0xB3 => val & !(1 << b),
+                    _ => val ^ 1 << b,
+                };
+                if opcode != 0xA3 {
+                    write_reg64(r, new);
+                }
+            }
+        },
+        0xA4 | 0xA5 | 0xAC | 0xAD => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let (addr, dst) = return_on_pagefault!(rm64_addr_val(modrm));
+            let src = read_reg64(gpr_reg(modrm));
+            let count = if opcode == 0xA4 || opcode == 0xAC {
+                return_on_pagefault!(read_imm8())
+            }
+            else {
+                read_reg8(CL)
+            };
+            let n = shift_count64(count);
+            let res = if n == 0 {
+                dst
+            }
+            else if opcode == 0xA4 || opcode == 0xA5 {
+                let r = dst << n | src >> (64 - n);
+                let cf = dst >> (64 - n) & 1 != 0;
+                let of = n == 1 && (r >> 63 != 0) != cf;
+                set_arith_flags64(r, cf, of, false);
+                r
+            }
+            else {
+                let r = dst >> n | src << (64 - n);
+                let cf = dst >> (n - 1) & 1 != 0;
+                let of = n == 1 && (dst >> 63 != 0);
+                set_arith_flags64(r, cf, of, false);
+                r
+            };
+            let _ = rm64_write(modrm, addr, res);
+        },
+        0xAF => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let r = gpr_reg(modrm);
+            let src = return_on_pagefault!(load_rm64(modrm));
+            write_reg64(r, imul64_reg(read_reg64(r), src));
+        },
+        0xB1 => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let (addr, rm) = return_on_pagefault!(rm64_addr_val(modrm));
+            let rax = read_reg64(EAX);
+            cmp64(rax, rm);
+            if *flags & FLAG_ZERO != 0 {
+                let _ = rm64_write(modrm, addr, read_reg64(gpr_reg(modrm)));
+            }
+            else {
+                write_reg64(EAX, rm);
+            }
+        },
+        0xBE => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let v = return_on_pagefault!(load_rm8(modrm)) as i8 as i64 as u64;
+            write_reg64(gpr_reg(modrm), v);
+        },
+        0xBF => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let v = return_on_pagefault!(load_rm16(modrm)) as i16 as i64 as u64;
+            write_reg64(gpr_reg(modrm), v);
+        },
+        0xBA => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let extra = modrm >> 3 & 7;
+            if extra < 4 {
+                trigger_ud();
+                return;
+            }
+            // Imm8 follows the full ModRM address (disp8/disp32/SIB). Reading it
+            // first turns RIP-relative `btsq $63, m64` into a bogus canonical
+            // hole VA (Linux `early_pmd_flags` -> #PF with an empty IDT -> #DF).
+            let (addr, val) = return_on_pagefault!(rm64_addr_val(modrm));
+            let imm = return_on_pagefault!(read_imm8()) as u64;
+            bt64_flags(val, imm);
+            let b = imm & 63;
+            let new = match extra {
+                4 => val,
+                5 => val | 1 << b,
+                6 => val & !(1 << b),
+                _ => val ^ 1 << b,
+            };
+            if extra != 4 {
+                let _ = rm64_write(modrm, addr, new);
+            }
+        },
+        0xBC => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let r = gpr_reg(modrm);
+            let src = return_on_pagefault!(load_rm64(modrm));
+            write_reg64(r, bsf64(read_reg64(r), src));
+        },
+        0xBD => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let r = gpr_reg(modrm);
+            let src = return_on_pagefault!(load_rm64(modrm));
+            write_reg64(r, bsr64(read_reg64(r), src));
+        },
+        0xC1 => {
+            let modrm = return_on_pagefault!(read_imm8());
+            let (addr, rm) = return_on_pagefault!(rm64_addr_val(modrm));
+            let r = gpr_reg(modrm);
+            let tmp = read_reg64(r);
+            write_reg64(r, rm);
+            let _ = rm64_write(modrm, addr, add64(rm, tmp));
+        },
+        0xC8..=0xCF => {
+            let r = gpr_opcode(opcode);
+            write_reg64(r, read_reg64(r).swap_bytes());
+        },
+        _ => {
+            run_instruction0f_32(opcode);
+        },
+    }
+    finish_instruction();
+}
+
 unsafe fn dispatch_opcode(opcode: i32) {
+    current_interp_opcode = opcode as u32 | 0x100;
+    current_interp_0f = false;
+    if opcode == 0x63 {
+        dispatch_movsxd();
+        return;
+    }
+    if matches!(opcode, 0xA4..=0xA7 | 0xAA..=0xAF) {
+        dispatch_string64(opcode);
+        finish_instruction();
+        return;
+    }
+    if matches!(opcode, 0xE0..=0xE3) {
+        dispatch_loop64(opcode);
+        finish_instruction();
+        return;
+    }
     if !is_osize_32() {
         run_legacy_opcode(opcode);
         return;
@@ -431,6 +1458,9 @@ unsafe fn dispatch_opcode(opcode: i32) {
         dispatch_rex_w(opcode);
         return;
     }
+    if *rex_prefix != 0 && dispatch_rex_legacy(opcode) {
+        return;
+    }
     run_legacy_opcode(opcode);
 }
 
@@ -439,6 +1469,9 @@ pub unsafe fn run_one() {
     dbg_assert!(*is_64);
     *rex_prefix = 0;
     *prefixes = 0;
+    *pending_linear64 = 0;
+    current_interp_opcode = 0;
+    current_interp_0f = false;
 
     loop {
         let byte = return_on_pagefault!(read_imm8());
@@ -471,8 +1504,17 @@ pub unsafe fn run_one() {
                 let opcode = return_on_pagefault!(read_imm8());
                 if opcode == 0x0F {
                     let opcode = return_on_pagefault!(read_imm8());
-                    run_instruction0f_32(opcode);
-                    finish_instruction();
+                    if is_hint_nop(opcode) {
+                        dispatch_hint_nop();
+                        finish_instruction();
+                    }
+                    else if rex_w() {
+                        dispatch_rex_w_0f(opcode);
+                    }
+                    else {
+                        run_instruction0f_32(opcode);
+                        finish_instruction();
+                    }
                     return;
                 }
                 dispatch_opcode(opcode);
@@ -480,8 +1522,17 @@ pub unsafe fn run_one() {
             },
             0x0F => {
                 let opcode = return_on_pagefault!(read_imm8());
-                run_instruction0f_32(opcode);
-                finish_instruction();
+                if is_hint_nop(opcode) {
+                    dispatch_hint_nop();
+                    finish_instruction();
+                }
+                else if rex_w() {
+                    dispatch_rex_w_0f(opcode);
+                }
+                else {
+                    run_instruction0f_32(opcode);
+                    finish_instruction();
+                }
                 return;
             },
             _ => {
@@ -554,6 +1605,14 @@ mod tests {
         assert_eq!((va >> 39) & 0x1FF, 511);
         assert_eq!((va >> 30) & 0x1FF, 510);
         assert_eq!((va >> 21) & 0x1FF, 0);
+    }
+
+    #[test]
+    fn linux_kernel_map_is_pd_index_8() {
+        let va = 0xFFFF_FFFF_8100_0000u64;
+        assert_eq!((va >> 39) & 0x1FF, 511);
+        assert_eq!((va >> 30) & 0x1FF, 510);
+        assert_eq!((va >> 21) & 0x1FF, 8);
     }
 
     #[test]
