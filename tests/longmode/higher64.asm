@@ -1,5 +1,5 @@
 ; Multiboot payload: run 64-bit code at a canonical higher-half RIP
-; (Linux -2GB window). Exit code is written to port 0xF4 (0 = pass).
+; (Linux -2GB window) and CMOV r64. Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
 ORG 0x100000
@@ -82,6 +82,25 @@ higher:
     cmp rax, rbx
     jne fail64
 
+    ; CMOV r64: taken copies the full 64-bit src (higher-half LEA).
+    ; 32-bit CMOV would zero-extend the low half of that address.
+    mov rax, 0xAAAAAAAAAAAAAAAA
+    lea rbx, [higher]
+    xor ecx, ecx
+    cmove rax, rbx
+    cmp rax, rbx
+    jne fail_cmov
+
+    ; Not taken must leave dest unchanged. 32-bit CMOV still zero-extends
+    ; the dest even when the condition is false.
+    mov rax, 0xAAAAAAAAAAAAAAAA
+    mov ecx, 1
+    test ecx, ecx
+    cmove rax, rbx
+    mov rcx, 0xAAAAAAAAAAAAAAAA
+    cmp rax, rcx
+    jne fail_cmov_keep
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -94,6 +113,20 @@ fail64:
 .bad:
     hlt
     jmp .bad
+
+fail_cmov:
+    mov al, 2
+    out 0xF4, al
+.hang_cmov:
+    hlt
+    jmp .hang_cmov
+
+fail_cmov_keep:
+    mov al, 3
+    out 0xF4, al
+.hang_cmov_keep:
+    hlt
+    jmp .hang_cmov_keep
 
 align 8
 gdt:
