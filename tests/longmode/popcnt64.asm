@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit POPCNT (F3 REX.W 0F B8) in long mode.
+; Multiboot payload: 64-bit POPCNT, BSF, and BSR in long mode.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -97,6 +97,34 @@ start64:
     cmp rax, 3
     jne fail_mem
 
+    ; BSF: lowest set bit. 0xFFFF0000FFFF0000 -> 16. 32-bit BSF would also
+    ; be 16, so check a source whose only bits are in the high half.
+    mov rax, 0x0001000000000000
+    bsf rcx, rax
+    jz fail_bsf
+    cmp rcx, 48
+    jne fail_bsf
+
+    ; BSR: highest set bit, including bit 63.
+    mov rax, 0x8000000000000005
+    bsr rcx, rax
+    jz fail_bsr
+    cmp rcx, 63
+    jne fail_bsr
+
+    ; Zero source: ZF=1 and dest unchanged.
+    mov rcx, 0xA5A5A5A5A5A5A5A5
+    xor rax, rax
+    bsf rcx, rax
+    jnz fail_bsf0
+    mov rbx, 0xA5A5A5A5A5A5A5A5
+    cmp rcx, rbx
+    jne fail_bsf0
+    bsr rcx, rax
+    jnz fail_bsr0
+    cmp rcx, rbx
+    jne fail_bsr0
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -120,6 +148,18 @@ fail_zf1:
     jmp fail_out
 fail_mem:
     mov al, 7
+    jmp fail_out
+fail_bsf:
+    mov al, 8
+    jmp fail_out
+fail_bsr:
+    mov al, 9
+    jmp fail_out
+fail_bsf0:
+    mov al, 10
+    jmp fail_out
+fail_bsr0:
+    mov al, 11
     jmp fail_out
 
 fail_out:
