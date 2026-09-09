@@ -1316,6 +1316,33 @@ unsafe fn load_rm16(modrm: i32) -> OrPageFault<i32> {
     }
 }
 
+/// REX.W 0F C7 /1 m128: CMPXCHG16B. Register form is #UD; misaligned is #GP(0).
+unsafe fn cmpxchg16b_mem(addr: i32) {
+    if *pending_linear64 & 15 != 0 {
+        trigger_gp(0);
+        return;
+    }
+    return_on_pagefault!(writable_or_pagefault(addr, 16));
+    let m = return_on_pagefault!(safe_read128s(addr));
+    let low = m.u64[0];
+    let high = m.u64[1];
+    if read_reg64(EAX) == low && read_reg64(EDX) == high {
+        *flags |= FLAG_ZERO;
+        let _ = safe_write128(
+            addr,
+            reg128 {
+                u64: [read_reg64(EBX), read_reg64(ECX)],
+            },
+        );
+    }
+    else {
+        *flags &= !FLAG_ZERO;
+        write_reg64(EAX, low);
+        write_reg64(EDX, high);
+    }
+    *flags_changed &= !FLAG_ZERO;
+}
+
 unsafe fn dispatch_rex_w_0f(opcode: i32) {
     current_interp_opcode = opcode as u32 | 0x100;
     current_interp_0f = true;
@@ -1471,6 +1498,31 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
             let tmp = read_reg64(r);
             write_reg64(r, rm);
             let _ = rm64_write(modrm, addr, add64(rm, tmp));
+        },
+        0xC7 => {
+            let modrm = return_on_pagefault!(read_imm8());
+            match modrm >> 3 & 7 {
+                1 => {
+                    if modrm >= 0xC0 {
+                        trigger_ud();
+                        return;
+                    }
+                    let addr = return_on_pagefault!(modrm_resolve(modrm));
+                    cmpxchg16b_mem(addr);
+                },
+                6 => {
+                    // rdrand: memory form is #UD; REX.W still uses the 32-bit writer.
+                    if modrm < 0xC0 {
+                        trigger_ud();
+                        return;
+                    }
+                    crate::cpu::instructions_0f::instr32_0FC7_6_reg(gpr_rm(modrm));
+                },
+                _ => {
+                    trigger_ud();
+                    return;
+                },
+            }
         },
         0xC8..=0xCF => {
             let r = gpr_opcode(opcode);

@@ -3463,7 +3463,7 @@ pub unsafe fn instr_0FA2() {
         1 => {
             eax = 3 | 7 << 4 | 6 << 8; // pentium3
             ebx = 1 << 16 | 8 << 8; // cpu count, clflush size
-            ecx = 1 << 0 | 1 << 23 | 1 << 30; // sse3, popcnt, rdrand
+            ecx = 1 << 0 | 1 << 13 | 1 << 23 | 1 << 30; // sse3, cx16, popcnt, rdrand
             let vme = 0 << 1;
             if config::VMWARE_HYPERVISOR_PORT {
                 ecx |= 1 << 31
@@ -3539,7 +3539,7 @@ pub unsafe fn instr_0FA2() {
             // AMD64 feature flags: SYSCALL, NX, long mode.
             eax = 0;
             ebx = 0;
-            ecx = 0;
+            ecx = 1 << 0; // lahf_lm (LAHF/SAHF already execute in 64-bit CS)
             edx = 1 << 11 | 1 << 20 | 1 << 29; // SCE, NX, LM
         },
 
