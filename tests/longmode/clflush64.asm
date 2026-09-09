@@ -131,6 +131,20 @@ start64:
     dec rcx
     jnz .check66
 
+    ; WBINVD then INVD are CPL0 cache no-ops: no #UD/#GP, memory unchanged.
+    wbinvd
+    invd
+
+    mov rax, 0xA5A5A5A5A5A5A5A5
+    mov rcx, 8
+    lea rsi, [buf]
+.check_invd:
+    cmp qword [rsi], rax
+    jne fail_invd
+    add rsi, 8
+    dec rcx
+    jnz .check_invd
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -151,6 +165,9 @@ fail_mid:
     jmp fail_out
 fail_opt:
     mov al, 6
+    jmp fail_out
+fail_invd:
+    mov al, 7
     jmp fail_out
 
 fail_out:
