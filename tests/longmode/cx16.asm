@@ -1,4 +1,4 @@
-; Multiboot payload: CMPXCHG8B, CMPXCHG16B, CMPXCHG r64, XCHG r64, and CPUID.1 CX16 in long mode.
+; Multiboot payload: CMPXCHG8B, CMPXCHG16B, CMPXCHG r64, XCHG r64, CMP r64, and CPUID.1 CX16 in long mode.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -181,6 +181,14 @@ start64:
     cmp r8, rcx
     jne fail_xchg
 
+    ; CMP r64 of 2^32 vs 1. 32-bit CMP of EAX=0 vs 1 is below.
+    mov rax, 0x100000000
+    cmp rax, 1
+    jb fail_cmp
+    je fail_cmp
+    cmp rax, rax
+    jne fail_cmp
+
     mov byte [gp_expected], 1
     lock cmpxchg16b [m128 + 1]
     mov al, 5
@@ -241,6 +249,11 @@ fail_cx_match:
 
 fail_xchg:
     mov al, 11
+    out 0xF4, al
+    jmp hang64
+
+fail_cmp:
+    mov al, 12
     out 0xF4, al
     jmp hang64
 
