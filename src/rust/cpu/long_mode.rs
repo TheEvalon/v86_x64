@@ -1431,6 +1431,67 @@ pub fn opcode_is_forced64(opcode: i32) -> bool {
     )
 }
 
+/// REX.W does not select a 64-bit operand for these one-byte opcodes.
+/// Architecturally the W bit is ignored; they must not `#UD`.
+pub fn opcode_ignores_rex_w(opcode: i32) -> bool {
+    matches!(
+        opcode,
+        0x00
+            | 0x02
+            | 0x04
+            | 0x08
+            | 0x0A
+            | 0x0C
+            | 0x10
+            | 0x12
+            | 0x14
+            | 0x18
+            | 0x1A
+            | 0x1C
+            | 0x20
+            | 0x22
+            | 0x24
+            | 0x28
+            | 0x2A
+            | 0x2C
+            | 0x30
+            | 0x32
+            | 0x34
+            | 0x38
+            | 0x3A
+            | 0x3C
+            | 0x70..=0x7F
+            | 0x80
+            | 0x84
+            | 0x86
+            | 0x88
+            | 0x8A
+            | 0x8C
+            | 0x8E
+            | 0x9B
+            | 0x9E
+            | 0x9F
+            | 0xA0
+            | 0xA2
+            | 0xA8
+            | 0xB0..=0xB7
+            | 0xC0
+            | 0xC6
+            | 0xCC
+            | 0xCD
+            | 0xD0
+            | 0xD2
+            | 0xD7
+            | 0xE4..=0xE7
+            | 0xEC..=0xEF
+            | 0xF4
+            | 0xF5
+            | 0xF6
+            | 0xF8..=0xFD
+            | 0xFE
+    )
+}
+
 unsafe fn dispatch_movsxd() {
     let modrm = return_on_pagefault!(read_imm8());
     let src = if modrm < 0xC0 {
@@ -1477,6 +1538,13 @@ unsafe fn dispatch_rex_legacy(opcode: i32) -> bool {
                 write_reg32(r, a);
             }
             finish_instruction();
+            true
+        },
+        0x9E | 0x9F => {
+            // SAHF/LAHF always use AH. Any REX prefix would make write_reg8(AH)
+            // update SPL instead; W (and R/X/B) are ignored for these opcodes.
+            *rex_prefix = 0;
+            run_legacy_opcode(opcode);
             true
         },
         _ => false,
@@ -1842,7 +1910,7 @@ unsafe fn dispatch_opcode(opcode: i32) {
         finish_instruction();
         return;
     }
-    if rex_w() {
+    if rex_w() && !opcode_ignores_rex_w(opcode) {
         dispatch_rex_w(opcode);
         return;
     }
@@ -2033,5 +2101,20 @@ mod tests {
         assert!(!opcode_is_forced64(0x01));
         assert!(!opcode_is_forced64(0x75));
         assert!(!opcode_is_forced64(0x83));
+    }
+
+    #[test]
+    fn opcode_ignores_rex_w_on_byte_and_size_independent_ops() {
+        assert!(opcode_ignores_rex_w(0x88));
+        assert!(opcode_ignores_rex_w(0x04));
+        assert!(opcode_ignores_rex_w(0x74));
+        assert!(opcode_ignores_rex_w(0x9E));
+        assert!(opcode_ignores_rex_w(0xB0));
+        assert!(opcode_ignores_rex_w(0xFE));
+        assert!(!opcode_ignores_rex_w(0x89));
+        assert!(!opcode_ignores_rex_w(0x05));
+        assert!(!opcode_ignores_rex_w(0x90));
+        assert!(!opcode_ignores_rex_w(0xB8));
+        assert!(!opcode_ignores_rex_w(0xC3));
     }
 }
