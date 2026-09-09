@@ -57,24 +57,142 @@ function newc_entry(name, data, mode, extras)
 
 function make_static_init_elf(message)
 {
-    const msg = Buffer.from(message, "ascii");
+    // Static ET_EXEC, no libc. Write the pass line first so linux64 still
+    // succeeds if a later syscall fails. Extra getpid/uname/brk writes are
+    // diagnostic only.
+    const strings = [
+        Buffer.from(message, "ascii"),
+        Buffer.from("linux64-init: getpid\n", "ascii"),
+        Buffer.from("linux64-init: uname\n", "ascii"),
+        Buffer.from("linux64-init: brk\n", "ascii"),
+    ];
+    const MSG = 0, MSG_GETPID = 1, MSG_UNAME = 2, MSG_BRK = 3;
+    const UTS_BUF = 400; // struct utsname is 6 * 65 = 390 bytes
+
     const chunks = [];
-    chunks.push(Buffer.from([0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00])); // mov rax, 1 (write)
-    chunks.push(Buffer.from([0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00])); // mov rdi, 1 (stdout)
-    const lea_at = Buffer.concat(chunks).length;
-    chunks.push(Buffer.from([0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00])); // lea rsi, [rip+disp]
-    const rdx = Buffer.alloc(7);
-    rdx[0] = 0x48; rdx[1] = 0xC7; rdx[2] = 0xC2;
-    rdx.writeUInt32LE(msg.length, 3);
-    chunks.push(rdx); // mov rdx, len
-    chunks.push(Buffer.from([0x0F, 0x05])); // syscall
-    chunks.push(Buffer.from([0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00])); // mov rax, 60 (exit)
-    chunks.push(Buffer.from([0x48, 0x31, 0xFF])); // xor rdi, rdi
-    chunks.push(Buffer.from([0x0F, 0x05])); // syscall
+    const leas = [];
+    const jumps = [];
+    const labels = Object.create(null);
+    let size = 0;
+
+    function emit(bytes)
+    {
+        const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+        chunks.push(buf);
+        size += buf.length;
+    }
+
+    function mov_imm(reg, imm)
+    {
+        // REX.W mov r64, imm32 (sign-extended): 48 C7 C0+reg
+        const b = Buffer.alloc(7);
+        b[0] = 0x48;
+        b[1] = 0xC7;
+        b[2] = 0xC0 | (reg & 7);
+        b.writeUInt32LE(imm >>> 0, 3);
+        emit(b);
+    }
+
+    function lea_rsi(str_index)
+    {
+        leas.push({ off: size, str_index: str_index });
+        emit([0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    function syscall()
+    {
+        emit([0x0F, 0x05]);
+    }
+
+    function write_str(str_index)
+    {
+        mov_imm(0, 1); // mov rax, 1 (write)
+        mov_imm(7, 1); // mov rdi, 1 (stdout)
+        lea_rsi(str_index);
+        mov_imm(2, strings[str_index].length); // mov rdx, len
+        syscall();
+    }
+
+    function jcc8(opcode, name)
+    {
+        jumps.push({ off: size, name: name });
+        emit([opcode, 0x00]);
+    }
+
+    // 1. write(1, LINUX64_INIT_LINE + "\n") — existing pass bar, must be first.
+    write_str(MSG);
+
+    // 2. getpid (rax=39); success if pid > 0 (usually 1).
+    mov_imm(0, 39);
+    syscall();
+    emit([0x48, 0x85, 0xC0]); // test rax, rax
+    jcc8(0x7E, "skip_getpid"); // jle
+    write_str(MSG_GETPID);
+    labels.skip_getpid = size;
+
+    // 3. uname (rax=63) into a stack buffer; sysname must start with "Linux".
+    emit([0x48, 0x81, 0xEC,
+        UTS_BUF & 0xFF, UTS_BUF >> 8 & 0xFF, 0x00, 0x00]); // sub rsp, UTS_BUF
+    mov_imm(0, 63);
+    emit([0x48, 0x89, 0xE7]); // mov rdi, rsp
+    syscall();
+    emit([0x48, 0x85, 0xC0]); // test rax, rax
+    jcc8(0x75, "skip_uname"); // jnz
+    emit([0x81, 0x3C, 0x24, 0x4C, 0x69, 0x6E, 0x75]); // cmp dword [rsp], "Linu"
+    jcc8(0x75, "skip_uname"); // jne
+    emit([0x80, 0x7C, 0x24, 0x04, 0x78]); // cmp byte [rsp+4], 'x'
+    jcc8(0x75, "skip_uname"); // jne
+    write_str(MSG_UNAME);
+    labels.skip_uname = size;
+    emit([0x48, 0x81, 0xC4,
+        UTS_BUF & 0xFF, UTS_BUF >> 8 & 0xFF, 0x00, 0x00]); // add rsp, UTS_BUF
+
+    // 4. brk(NULL) (rax=12); success if the returned break is not -4095..-1.
+    mov_imm(0, 12);
+    emit([0x48, 0x31, 0xFF]); // xor rdi, rdi
+    syscall();
+    emit([0x48, 0x3D, 0x01, 0xF0, 0xFF, 0xFF]); // cmp rax, -4095
+    jcc8(0x73, "skip_brk"); // jae (unsigned IS_ERR)
+    write_str(MSG_BRK);
+    labels.skip_brk = size;
+
+    // 5. exit(0)
+    mov_imm(0, 60);
+    emit([0x48, 0x31, 0xFF]); // xor rdi, rdi
+    syscall();
+
     const body = Buffer.concat(chunks);
-    const disp = body.length - (lea_at + 7);
-    body.writeInt32LE(disp, lea_at + 3);
-    const code = Buffer.concat([body, msg]);
+    if(body.length !== size)
+    {
+        throw new Error("init elf: size mismatch");
+    }
+    for(const j of jumps)
+    {
+        const target = labels[j.name];
+        if(target === undefined)
+        {
+            throw new Error("init elf: missing label " + j.name);
+        }
+        const rel = target - (j.off + 2);
+        if(rel < -128 || rel > 127)
+        {
+            throw new Error("init elf: jcc to " + j.name + " out of range (" + rel + ")");
+        }
+        body.writeInt8(rel, j.off + 1);
+    }
+    const str_off = [];
+    let off = body.length;
+    for(const s of strings)
+    {
+        str_off.push(off);
+        off += s.length;
+    }
+    for(const lea of leas)
+    {
+        const disp = str_off[lea.str_index] - (lea.off + 7);
+        body.writeInt32LE(disp, lea.off + 3);
+    }
+    const code = Buffer.concat([body, ...strings]);
 
     const ehsize = 64;
     const phsize = 56;
