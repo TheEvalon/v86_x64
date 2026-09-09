@@ -1,4 +1,4 @@
-; Multiboot payload: 64-bit PUSH/POP FS and GS, LAR/LSL/VERR/VERW, SMSW, CLTS, and LMSW.
+; Multiboot payload: 64-bit PUSH/POP FS and GS, LAR/LSL/VERR/VERW, SMSW, CLTS, LMSW, SLDT, and STR.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -258,6 +258,39 @@ start64:
     test eax, 1
     jz fail_lmsw_mem
 
+    ; LLDT of the null selector, then SLDT r32/r64/m16 must read back 0.
+    xor eax, eax
+    lldt ax
+    mov rax, -1
+    sldt eax
+    test eax, eax
+    jnz fail_sldt
+    mov r8, -1
+    o64 sldt r8
+    test r8, r8
+    jnz fail_sldt
+    mov word [smsw_buf], 0xFFFF
+    sldt [smsw_buf]
+    cmp word [smsw_buf], 0
+    jne fail_sldt_mem
+
+    ; STR r32/r64 zero-extends the 16-bit selector; memory form matches AX.
+    mov rax, -1
+    str eax
+    mov edx, eax
+    and edx, 0xFFFF
+    cmp eax, edx
+    jne fail_str
+    mov r8, -1
+    o64 str r8
+    movzx r9, ax
+    cmp r8, r9
+    jne fail_str
+    mov word [smsw_buf], 0xFFFF
+    str [smsw_buf]
+    cmp word [smsw_buf], ax
+    jne fail_str_mem
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -394,6 +427,26 @@ fail_lmsw_pe:
 
 fail_lmsw_mem:
     mov al, 28
+    out 0xF4, al
+    jmp hang64
+
+fail_sldt:
+    mov al, 29
+    out 0xF4, al
+    jmp hang64
+
+fail_sldt_mem:
+    mov al, 30
+    out 0xF4, al
+    jmp hang64
+
+fail_str:
+    mov al, 31
+    out 0xF4, al
+    jmp hang64
+
+fail_str_mem:
+    mov al, 32
     out 0xF4, al
     jmp hang64
 
