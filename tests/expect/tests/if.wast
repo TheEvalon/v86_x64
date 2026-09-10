@@ -125,6 +125,9 @@
                   (get_local $l1)
                   (i32.const 1)))
               (i32.store
+                (i32.const 2084)
+                (i32.const 0))
+              (i32.store
                 (i32.const 112)
                 (get_local $l1))
               (i64.store
@@ -173,6 +176,9 @@
               (i32.add
                 (get_local $l3)
                 (i32.const 1)))
+            (i32.store
+              (i32.const 2092)
+              (i32.const 0))
             (i32.store
               (i32.const 112)
               (get_local $l3))

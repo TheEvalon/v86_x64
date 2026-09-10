@@ -73,6 +73,9 @@
                 (get_local $l3)
                 (get_local $l0)))
             (i32.store
+              (i32.const 2092)
+              (i32.const 0))
+            (i32.store
               (i32.const 112)
               (get_local $l3))
             (i64.store
