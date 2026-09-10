@@ -2838,91 +2838,91 @@ pub unsafe fn do_page_walk(
             global = g;
         }
         else {
-        let kernel_write_override = !user && 0 == cr0 & CR0_WP;
-        let mut allow_write = allow_write_upper && page_dir_entry & PAGE_TABLE_RW_MASK != 0;
-        allow_user &= page_dir_entry & PAGE_TABLE_USER_MASK != 0;
+            let kernel_write_override = !user && 0 == cr0 & CR0_WP;
+            let mut allow_write = allow_write_upper && page_dir_entry & PAGE_TABLE_RW_MASK != 0;
+            allow_user &= page_dir_entry & PAGE_TABLE_USER_MASK != 0;
 
-        // PAE 2MB pages use PDE.PS; CR4.PSE is ignored (Intel SDM). Legacy
-        // 4MB pages still need CR4.PSE. `pae` is also true when LMA is set.
-        if 0 != page_dir_entry & PAGE_TABLE_PSE_MASK && (pae || 0 != cr4 & CR4_PSE) {
-            // size bit is set
+            // PAE 2MB pages use PDE.PS; CR4.PSE is ignored (Intel SDM). Legacy
+            // 4MB pages still need CR4.PSE. `pae` is also true when LMA is set.
+            if 0 != page_dir_entry & PAGE_TABLE_PSE_MASK && (pae || 0 != cr4 & CR4_PSE) {
+                // size bit is set
 
-            if for_execute && !allow_exec
-                || for_writing && !allow_write && !kernel_write_override
-                || user && !allow_user
-            {
-                if side_effects {
-                    trigger_pagefault(addr, true, for_writing, user, jit, for_execute);
+                if for_execute && !allow_exec
+                    || for_writing && !allow_write && !kernel_write_override
+                    || user && !allow_user
+                {
+                    if side_effects {
+                        trigger_pagefault(addr, true, for_writing, user, jit, for_execute);
+                    }
+                    return Err(());
                 }
-                return Err(());
-            }
 
-            // set the accessed and dirty bits
+                // set the accessed and dirty bits
 
-            let new_page_dir_entry = page_dir_entry
-                | PAGE_TABLE_ACCESSED_MASK
-                | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
+                let new_page_dir_entry = page_dir_entry
+                    | PAGE_TABLE_ACCESSED_MASK
+                    | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
 
-            if side_effects && page_dir_entry != new_page_dir_entry {
-                memory::write8(page_dir_addr, new_page_dir_entry);
-            }
+                if side_effects && page_dir_entry != new_page_dir_entry {
+                    memory::write8(page_dir_addr, new_page_dir_entry);
+                }
 
-            high = if pae {
-                page_dir_entry as u32 & 0xFFE00000 | (addr & 0x1FF000) as u32
+                high = if pae {
+                    page_dir_entry as u32 & 0xFFE00000 | (addr & 0x1FF000) as u32
+                }
+                else {
+                    page_dir_entry as u32 & 0xFFC00000 | (addr & 0x3FF000) as u32
+                };
+                global = page_dir_entry & PAGE_TABLE_GLOBAL_MASK == PAGE_TABLE_GLOBAL_MASK
             }
             else {
-                page_dir_entry as u32 & 0xFFC00000 | (addr & 0x3FF000) as u32
-            };
-            global = page_dir_entry & PAGE_TABLE_GLOBAL_MASK == PAGE_TABLE_GLOBAL_MASK
-        }
-        else {
-            let (page_table_addr, page_table_entry) = if pae {
-                let page_table_addr =
-                    (page_dir_entry as u32 & 0xFFFFF000) + (((addr as u32 >> 12) & 0x1FF) << 3);
-                let page_table_entry = memory::read64s(page_table_addr);
-                pte64_check_phys32(page_table_entry);
-                allow_exec &= !pte64_is_nx(page_table_entry);
+                let (page_table_addr, page_table_entry) = if pae {
+                    let page_table_addr =
+                        (page_dir_entry as u32 & 0xFFFFF000) + (((addr as u32 >> 12) & 0x1FF) << 3);
+                    let page_table_entry = memory::read64s(page_table_addr);
+                    pte64_check_phys32(page_table_entry);
+                    allow_exec &= !pte64_is_nx(page_table_entry);
 
-                (page_table_addr, page_table_entry as i32)
-            }
-            else {
-                let page_table_addr =
-                    (page_dir_entry as u32 & 0xFFFFF000) + (((addr as u32 >> 12) & 0x3FF) << 2);
-                let page_table_entry = memory::read32s(page_table_addr);
-                (page_table_addr, page_table_entry)
-            };
-
-            let present = page_table_entry & PAGE_TABLE_PRESENT_MASK != 0;
-            allow_write &= page_table_entry & PAGE_TABLE_RW_MASK != 0;
-            allow_user &= page_table_entry & PAGE_TABLE_USER_MASK != 0;
-
-            if !present
-                || for_execute && !allow_exec
-                || for_writing && !allow_write && !kernel_write_override
-                || user && !allow_user
-            {
-                if side_effects {
-                    trigger_pagefault(addr, present, for_writing, user, jit, for_execute);
+                    (page_table_addr, page_table_entry as i32)
                 }
-                return Err(());
-            }
+                else {
+                    let page_table_addr =
+                        (page_dir_entry as u32 & 0xFFFFF000) + (((addr as u32 >> 12) & 0x3FF) << 2);
+                    let page_table_entry = memory::read32s(page_table_addr);
+                    (page_table_addr, page_table_entry)
+                };
 
-            // Set the accessed and dirty bits
-            // Note: dirty bit is only set on the page table entry
-            let new_page_dir_entry = page_dir_entry | PAGE_TABLE_ACCESSED_MASK;
-            if side_effects && new_page_dir_entry != page_dir_entry {
-                memory::write8(page_dir_addr, new_page_dir_entry);
-            }
-            let new_page_table_entry = page_table_entry
-                | PAGE_TABLE_ACCESSED_MASK
-                | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
-            if side_effects && page_table_entry != new_page_table_entry {
-                memory::write8(page_table_addr, new_page_table_entry);
-            }
+                let present = page_table_entry & PAGE_TABLE_PRESENT_MASK != 0;
+                allow_write &= page_table_entry & PAGE_TABLE_RW_MASK != 0;
+                allow_user &= page_table_entry & PAGE_TABLE_USER_MASK != 0;
 
-            high = page_table_entry as u32 & 0xFFFFF000;
-            global = page_table_entry & PAGE_TABLE_GLOBAL_MASK == PAGE_TABLE_GLOBAL_MASK
-        }
+                if !present
+                    || for_execute && !allow_exec
+                    || for_writing && !allow_write && !kernel_write_override
+                    || user && !allow_user
+                {
+                    if side_effects {
+                        trigger_pagefault(addr, present, for_writing, user, jit, for_execute);
+                    }
+                    return Err(());
+                }
+
+                // Set the accessed and dirty bits
+                // Note: dirty bit is only set on the page table entry
+                let new_page_dir_entry = page_dir_entry | PAGE_TABLE_ACCESSED_MASK;
+                if side_effects && new_page_dir_entry != page_dir_entry {
+                    memory::write8(page_dir_addr, new_page_dir_entry);
+                }
+                let new_page_table_entry = page_table_entry
+                    | PAGE_TABLE_ACCESSED_MASK
+                    | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
+                if side_effects && page_table_entry != new_page_table_entry {
+                    memory::write8(page_table_addr, new_page_table_entry);
+                }
+
+                high = page_table_entry as u32 & 0xFFFFF000;
+                global = page_table_entry & PAGE_TABLE_GLOBAL_MASK == PAGE_TABLE_GLOBAL_MASK
+            }
         }
     }
 
@@ -3041,99 +3041,99 @@ unsafe fn do_page_walk_high(
             });
         },
         Ia32eWalk::Pd(page_dir_addr) => {
-    let page_dir_entry64 = memory::read64s(page_dir_addr);
-    pte64_check_phys32(page_dir_entry64);
-    allow_exec &= !pte64_is_nx(page_dir_entry64);
-    let page_dir_entry = page_dir_entry64 as i32;
+            let page_dir_entry64 = memory::read64s(page_dir_addr);
+            pte64_check_phys32(page_dir_entry64);
+            allow_exec &= !pte64_is_nx(page_dir_entry64);
+            let page_dir_entry = page_dir_entry64 as i32;
 
-    if page_dir_entry & PAGE_TABLE_PRESENT_MASK == 0 {
-        if side_effects {
-            trigger_pagefault_virt(addr, false, for_writing, user, jit, for_execute);
-        }
-        return Err(());
-    }
-
-    let kernel_write_override = !user && 0 == cr0 & CR0_WP;
-    allow_write = allow_write && page_dir_entry & PAGE_TABLE_RW_MASK != 0;
-    allow_user &= page_dir_entry & PAGE_TABLE_USER_MASK != 0;
-
-    let (high, global) = if page_dir_entry & PAGE_TABLE_PSE_MASK != 0 {
-        if for_execute && !allow_exec
-            || for_writing && !allow_write && !kernel_write_override
-            || user && !allow_user
-        {
-            if side_effects {
-                trigger_pagefault_virt(addr, true, for_writing, user, jit, for_execute);
+            if page_dir_entry & PAGE_TABLE_PRESENT_MASK == 0 {
+                if side_effects {
+                    trigger_pagefault_virt(addr, false, for_writing, user, jit, for_execute);
+                }
+                return Err(());
             }
-            return Err(());
-        }
-        let new_page_dir_entry = page_dir_entry
-            | PAGE_TABLE_ACCESSED_MASK
-            | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
-        if side_effects && page_dir_entry != new_page_dir_entry {
-            memory::write8(page_dir_addr, new_page_dir_entry);
-        }
-        (
-            page_dir_entry as u32 & 0xFFE00000 | (addr as u32 & 0x1FF000),
-            page_dir_entry & PAGE_TABLE_GLOBAL_MASK == PAGE_TABLE_GLOBAL_MASK,
-        )
-    }
-    else {
-        let page_table_addr =
-            (page_dir_entry as u32 & 0xFFFFF000) + (((addr as u32 >> 12) & 0x1FF) << 3);
-        let page_table_entry64 = memory::read64s(page_table_addr);
-        pte64_check_phys32(page_table_entry64);
-        allow_exec &= !pte64_is_nx(page_table_entry64);
-        let page_table_entry = page_table_entry64 as i32;
-        let present = page_table_entry & PAGE_TABLE_PRESENT_MASK != 0;
-        allow_write &= page_table_entry & PAGE_TABLE_RW_MASK != 0;
-        allow_user &= page_table_entry & PAGE_TABLE_USER_MASK != 0;
-        if !present
-            || for_execute && !allow_exec
-            || for_writing && !allow_write && !kernel_write_override
-            || user && !allow_user
-        {
-            if side_effects {
-                trigger_pagefault_virt(addr, present, for_writing, user, jit, for_execute);
-            }
-            return Err(());
-        }
-        let new_page_dir_entry = page_dir_entry | PAGE_TABLE_ACCESSED_MASK;
-        if side_effects && new_page_dir_entry != page_dir_entry {
-            memory::write8(page_dir_addr, new_page_dir_entry);
-        }
-        let new_page_table_entry = page_table_entry
-            | PAGE_TABLE_ACCESSED_MASK
-            | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
-        if side_effects && page_table_entry != new_page_table_entry {
-            memory::write8(page_table_addr, new_page_table_entry);
-        }
-        (
-            page_table_entry as u32 & 0xFFFFF000,
-            page_table_entry & PAGE_TABLE_GLOBAL_MASK == PAGE_TABLE_GLOBAL_MASK,
-        )
-    };
 
-    let is_in_mapped_range = memory::in_mapped_range(high);
-    let info_bits = TLB_VALID
-        | if for_writing { 0 } else { TLB_READONLY }
-        | if allow_user { 0 } else { TLB_NO_USER }
-        | if is_in_mapped_range { TLB_IN_MAPPED_RANGE } else { 0 }
-        | if global && 0 != cr4 & CR4_PGE { TLB_GLOBAL } else { 0 }
-        | if allow_exec { 0 } else { TLB_NO_EXEC };
-    let page = (addr as u32 >> 12) as i32;
-    let tlb_entry = (high + memory::mem8 as u32) as i32 ^ page << 12 | info_bits as i32;
-    if side_effects {
-        let idx = hash_tlb_index(addr);
-        tlb_hash_tag[idx] = addr & !0xFFF;
-        tlb_hash_data[idx] = tlb_entry;
-    }
-    Ok(if DEBUG {
-        std::num::NonZeroI32::new(tlb_entry).unwrap()
-    }
-    else {
-        std::num::NonZeroI32::new_unchecked(tlb_entry)
-    })
+            let kernel_write_override = !user && 0 == cr0 & CR0_WP;
+            allow_write = allow_write && page_dir_entry & PAGE_TABLE_RW_MASK != 0;
+            allow_user &= page_dir_entry & PAGE_TABLE_USER_MASK != 0;
+
+            let (high, global) = if page_dir_entry & PAGE_TABLE_PSE_MASK != 0 {
+                if for_execute && !allow_exec
+                    || for_writing && !allow_write && !kernel_write_override
+                    || user && !allow_user
+                {
+                    if side_effects {
+                        trigger_pagefault_virt(addr, true, for_writing, user, jit, for_execute);
+                    }
+                    return Err(());
+                }
+                let new_page_dir_entry = page_dir_entry
+                    | PAGE_TABLE_ACCESSED_MASK
+                    | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
+                if side_effects && page_dir_entry != new_page_dir_entry {
+                    memory::write8(page_dir_addr, new_page_dir_entry);
+                }
+                (
+                    page_dir_entry as u32 & 0xFFE00000 | (addr as u32 & 0x1FF000),
+                    page_dir_entry & PAGE_TABLE_GLOBAL_MASK == PAGE_TABLE_GLOBAL_MASK,
+                )
+            }
+            else {
+                let page_table_addr =
+                    (page_dir_entry as u32 & 0xFFFFF000) + (((addr as u32 >> 12) & 0x1FF) << 3);
+                let page_table_entry64 = memory::read64s(page_table_addr);
+                pte64_check_phys32(page_table_entry64);
+                allow_exec &= !pte64_is_nx(page_table_entry64);
+                let page_table_entry = page_table_entry64 as i32;
+                let present = page_table_entry & PAGE_TABLE_PRESENT_MASK != 0;
+                allow_write &= page_table_entry & PAGE_TABLE_RW_MASK != 0;
+                allow_user &= page_table_entry & PAGE_TABLE_USER_MASK != 0;
+                if !present
+                    || for_execute && !allow_exec
+                    || for_writing && !allow_write && !kernel_write_override
+                    || user && !allow_user
+                {
+                    if side_effects {
+                        trigger_pagefault_virt(addr, present, for_writing, user, jit, for_execute);
+                    }
+                    return Err(());
+                }
+                let new_page_dir_entry = page_dir_entry | PAGE_TABLE_ACCESSED_MASK;
+                if side_effects && new_page_dir_entry != page_dir_entry {
+                    memory::write8(page_dir_addr, new_page_dir_entry);
+                }
+                let new_page_table_entry = page_table_entry
+                    | PAGE_TABLE_ACCESSED_MASK
+                    | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
+                if side_effects && page_table_entry != new_page_table_entry {
+                    memory::write8(page_table_addr, new_page_table_entry);
+                }
+                (
+                    page_table_entry as u32 & 0xFFFFF000,
+                    page_table_entry & PAGE_TABLE_GLOBAL_MASK == PAGE_TABLE_GLOBAL_MASK,
+                )
+            };
+
+            let is_in_mapped_range = memory::in_mapped_range(high);
+            let info_bits = TLB_VALID
+                | if for_writing { 0 } else { TLB_READONLY }
+                | if allow_user { 0 } else { TLB_NO_USER }
+                | if is_in_mapped_range { TLB_IN_MAPPED_RANGE } else { 0 }
+                | if global && 0 != cr4 & CR4_PGE { TLB_GLOBAL } else { 0 }
+                | if allow_exec { 0 } else { TLB_NO_EXEC };
+            let page = (addr as u32 >> 12) as i32;
+            let tlb_entry = (high + memory::mem8 as u32) as i32 ^ page << 12 | info_bits as i32;
+            if side_effects {
+                let idx = hash_tlb_index(addr);
+                tlb_hash_tag[idx] = addr & !0xFFF;
+                tlb_hash_data[idx] = tlb_entry;
+            }
+            Ok(if DEBUG {
+                std::num::NonZeroI32::new(tlb_entry).unwrap()
+            }
+            else {
+                std::num::NonZeroI32::new_unchecked(tlb_entry)
+            })
         },
     }
 }
@@ -3596,43 +3596,42 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
     }
 
     let selector = SegmentSelector::of_u16(selector_raw as u16);
-    let (mut descriptor, _) =
-        match return_on_pagefault!(lookup_segment_selector(selector), false) {
-            Ok(desc) => desc,
-            Err(SelectorNullOrInvalid::IsNull) => {
-                if reg == SS {
-                    // Null SS is valid in 64-bit mode at CPL0 (startup_64 does `mov ss, 0`).
-                    if *is_64 && *cpl == 0 {
-                        *sreg.offset(SS as isize) = selector_raw as u16;
-                        *segment_is_null.offset(SS as isize) = true;
-                        *segment_offsets.offset(SS as isize) = 0;
-                        *stack_size_32 = true;
-                        update_state_flags();
-                        return true;
-                    }
-                    dbg_log!("#GP for loading 0 in SS sel={:x}", selector_raw);
-                    trigger_gp(0);
-                    return false;
-                }
-                else {
-                    // es, ds, fs, gs
-                    *sreg.offset(reg as isize) = selector_raw as u16;
-                    *segment_is_null.offset(reg as isize) = true;
+    let (mut descriptor, _) = match return_on_pagefault!(lookup_segment_selector(selector), false) {
+        Ok(desc) => desc,
+        Err(SelectorNullOrInvalid::IsNull) => {
+            if reg == SS {
+                // Null SS is valid in 64-bit mode at CPL0 (startup_64 does `mov ss, 0`).
+                if *is_64 && *cpl == 0 {
+                    *sreg.offset(SS as isize) = selector_raw as u16;
+                    *segment_is_null.offset(SS as isize) = true;
+                    *segment_offsets.offset(SS as isize) = 0;
+                    *stack_size_32 = true;
                     update_state_flags();
                     return true;
                 }
-            },
-            Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
-                dbg_log!(
-                    "#GP for loading invalid in seg={} sel={:x}",
-                    reg,
-                    selector_raw,
-                );
-                dbg_trace();
-                trigger_gp(selector_raw & !3);
+                dbg_log!("#GP for loading 0 in SS sel={:x}", selector_raw);
+                trigger_gp(0);
                 return false;
-            },
-        };
+            }
+            else {
+                // es, ds, fs, gs
+                *sreg.offset(reg as isize) = selector_raw as u16;
+                *segment_is_null.offset(reg as isize) = true;
+                update_state_flags();
+                return true;
+            }
+        },
+        Err(SelectorNullOrInvalid::OutsideOfTableLimit) => {
+            dbg_log!(
+                "#GP for loading invalid in seg={} sel={:x}",
+                reg,
+                selector_raw,
+            );
+            dbg_trace();
+            trigger_gp(selector_raw & !3);
+            return false;
+        },
+    };
 
     if reg == SS {
         if descriptor.is_system()
@@ -3700,7 +3699,9 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
         else {
             *segment_offsets.offset(LDTR as isize) as u32 as u64
         };
-        let vis = table_base.wrapping_add(selector.descriptor_offset() as u64).wrapping_add(5);
+        let vis = table_base
+            .wrapping_add(selector.descriptor_offset() as u64)
+            .wrapping_add(5);
         if gp_if_noncanonical(vis) {
             return false;
         }
