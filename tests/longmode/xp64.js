@@ -170,6 +170,7 @@ let logged_fa80_pf = false;
 let logged_rsp_drop = false;
 let pf_count = 0;
 let last_screenshot_score = -1;
+let saved_boot_menu = false;
 
 function u64_from_pair(view)
 {
@@ -1117,6 +1118,15 @@ emulator.add_listener("emulator-loaded", function()
                 {
                     last_screenshot_score = score;
                     save_boot_screenshot("live");
+                }
+                // SeaBIOS fills every cell (printable=2000), so a later NTLDR
+                // recovery menu never raises the score. Snapshot it while VGA
+                // is still in text mode so the hardware font is used.
+                const full = screen_text();
+                if(!saved_boot_menu && /Start Windows Normally|Safe Mode/.test(full))
+                {
+                    saved_boot_menu = true;
+                    save_boot_screenshot("menu");
                 }
             }
             catch(_e)
