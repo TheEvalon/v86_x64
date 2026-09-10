@@ -3521,20 +3521,26 @@ pub unsafe fn instr_0FA2() {
         },
 
         1 => {
-            // Pentium 4 / Nocona (family 15, model 4, stepping 3). Family 6
-            // model 7 is a Pentium III: XP x64's KiInitializeKernel treats that
-            // as impossible with EFER.LMA and DbgBreakPoint's into KeBugCheck
-            // 0x1E (KMODE_EXCEPTION_NOT_HANDLED).
+            // Pentium 4 / Nocona (family 15, model 4, stepping 3).
+            // XP x64 KiInitializePcr requires EDX bits 0x0789F3FD and
+            // CPUID.80000001 EDX.SCE; missing any is bugcheck 0x5D
+            // (UNSUPPORTED_PROCESSOR). Family 6 model < 0xF is a Pentium III
+            // and is also rejected. APIC stays conditional so pic.js still
+            // uses the 8259.
             eax = 3 | 4 << 4 | 0xF << 8;
             ebx = 1 << 16 | 8 << 8; // cpu count, clflush size
             ecx = 1 << 0 | 1 << 13 | 1 << 23 | 1 << 30; // sse3, cx16, popcnt, rdrand
-            let vme = 0 << 1;
             if config::VMWARE_HYPERVISOR_PORT {
                 ecx |= 1 << 31
             }; // hypervisor
-            edx = (if true /* have fpu */ { 1 } else {  0 }) |      // fpu
-                    vme | 1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 |  // vme, pse, tsc, msr, pae
-                    1 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, sep, pge, cmov
+            edx = 1 | // fpu
+                    1 << 2 | // de
+                    1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 | // pse, tsc, msr, pae
+                    1 << 7 | // mce
+                    1 << 8 | 1 << 11 | // cx8, sep
+                    1 << 12 | 1 << 13 | 1 << 14 | // mtrr, pge, mca
+                    1 << 15 | // cmov
+                    1 << 16 | 1 << 17 | // pat, pse36
                     1 << 19 | 1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // clfsh, mmx, fxsr, sse1, sse2
 
             if *acpi_enabled || *lapic_present {
