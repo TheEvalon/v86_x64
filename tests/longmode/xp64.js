@@ -235,7 +235,9 @@ function phys_of_virt(cpu, virt)
 function pte_selfmap_va(virt)
 {
     // Windows IA-32e self-map: PML4[0x1ED] recursively maps the tables.
-    return 0xFFFFF68000000000n + ((as_u64(virt) >> 12n) << 3n);
+    // Mask after >>9 so the canonical 1s in a higher-half VA do not overflow
+    // the 48-bit self-map window (<<3 of the unmasked VPN does).
+    return 0xFFFFF68000000000n + ((as_u64(virt) >> 9n) & 0x7FFFFFFFF8n);
 }
 
 function walk_virt(cpu, virt)
@@ -926,6 +928,28 @@ function dump_regs(cpu)
     return parts.join(" ");
 }
 
+function dump_rsp_drop(cpu)
+{
+    try
+    {
+        const v = cpu.dbg_rsp_drop;
+        if(!v)
+        {
+            return "(no view)";
+        }
+        const u64 = i => BigInt(v[i * 2] >>> 0) + (BigInt(v[i * 2 + 1] >>> 0) << 32n);
+        return "last=" + hex64(u64(0)) +
+            " rip=" + hex64(u64(1)) +
+            " from=" + hex64(u64(2)) +
+            " to=" + hex64(u64(3)) +
+            " prev=" + hex64(u64(4));
+    }
+    catch(e)
+    {
+        return "(" + e + ")";
+    }
+}
+
 function dump_stuck(cpu)
 {
     const rip = u64_from_pair(cpu.rip64);
@@ -957,6 +981,7 @@ function dump_stuck(cpu)
         "\npic=" + dump_pic(cpu) +
         "\n" + scan_irq_frames(cpu) +
         "\npf_count=" + pf_count +
+        "\nrsp_drop=" + dump_rsp_drop(cpu) +
         "\nstack_ptes:\n" + dump_stack_ptes(cpu) +
         "\nvga=" + dump_vga(cpu) +
         "\ngdt_mem=" + dump_stack_words(cpu, 0xFFFFF80000300000n, 8) +

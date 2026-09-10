@@ -323,12 +323,19 @@ else {
 
     emulator.cpu_exception_hook = function(n)
     {
-        emulator.v86.cpu.instruction_counter[0] += 100000; // always make progress
-
         if(waiting_to_receive_next_test)
         {
+            emulator.v86.cpu.instruction_counter[0] += 100000;
             return true;
         }
+
+        // Guest #PF must hit the IDT. Do not treat it as a recorded test fault.
+        if(n === 14)
+        {
+            return false;
+        }
+
+        emulator.v86.cpu.instruction_counter[0] += 100000; // always make progress
 
         const exceptions = {
             0: "DE",

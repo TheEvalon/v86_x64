@@ -194,6 +194,16 @@ high_entry:
     cmp qword [rax], rbx
     jne fail_popm
 
+    ; XLAT uses RBX+AL. is_asize_32() is sticky-true in 64-bit CS, so the
+    ; 32-bit helper would truncate a higher-half table pointer.
+    lea rbx, [bitmap]
+    mov byte [rbx], 0xAA
+    mov byte [rbx + 1], 0xBB
+    mov al, 1
+    xlat
+    cmp al, 0xBB
+    jne fail_xlat
+
     ; 32-bit BTS with a bit offset one page away. bt_mem used i32
     ; arithmetic and the 4K pending window, so the bit landed at a
     ; truncated low VA instead of bitmap+0x1000.
@@ -270,6 +280,10 @@ fail_popm:
     jmp hang64
 fail_bts32:
     mov al, 11
+    out 0xF4, al
+    jmp hang64
+fail_xlat:
+    mov al, 12
     out 0xF4, al
     jmp hang64
 hang64:

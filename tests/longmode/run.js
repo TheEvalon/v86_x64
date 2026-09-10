@@ -72,10 +72,14 @@ emulator.add_listener("emulator-loaded", function() {
         // DEBUG trigger_* skips IDT delivery when this returns true. cx16 and
         // fxsave64 install a #GP handler for misaligned ops, so let vector 13 through.
         // ud64 and movnti64 install a #UD handler, so let vector 6 through.
+        // pf64 installs a #PF handler and takes faults on purpose.
         if((name === "cx16" || name === "fxsave64") && n === 13) {
             return false;
         }
         if((name === "ud64" || name === "movnti64") && n === 6) {
+            return false;
+        }
+        if(n === 14) {
             return false;
         }
         const names = { 0: "DE", 6: "UD", 13: "GP", 14: "PF" };

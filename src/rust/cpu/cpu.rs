@@ -3357,6 +3357,13 @@ pub unsafe fn trigger_pagefault_virt(
         if *is_64 {
             *rip = *previous_rip;
         }
+        if DEBUG {
+            // Same DEBUG hook as #GP/#UD. Runners that install a guest #PF
+            // IDT (pf64, XP) must return false so delivery still happens.
+            if js::cpu_exception_hook(CPU_EXCEPTION_PF) {
+                return;
+            }
+        }
         call_interrupt_vector(CPU_EXCEPTION_PF, false, Some(error_code));
     }
 }
@@ -4586,6 +4593,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
             *previous_ip = start_eip;
             *previous_rip = start_rip;
             crate::cpu::long_mode::run_one();
+            note_kernel_stack_drop(start_rip);
         }
         else {
             let opcode = *memory::mem8.offset(phys_addr as isize) as i32;
@@ -4618,6 +4626,29 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
     }
 
     *instruction_counter += i;
+}
+
+/// Record the first large RSP drop on the Windows XP x64 PCR stack
+/// (`0xfffff80000300000`..`0xfffff80000308000`). Sampled after each
+/// interpreted 64-bit instruction so the XP probe can name the smasher.
+unsafe fn note_kernel_stack_drop(start_rip: u64) {
+    let rsp = read_reg64(ESP);
+    let prev = *dbg_rsp_last;
+    *dbg_rsp_last = rsp;
+    if prev == 0 || *dbg_rsp_drop_rip != 0 {
+        return;
+    }
+    let drop = prev.wrapping_sub(rsp);
+    if drop < 0x200 || drop >= 0x0010_0000 {
+        return;
+    }
+    if prev < 0xFFFF_F800_0030_0000 || prev >= 0xFFFF_F800_0030_8000 {
+        return;
+    }
+    *dbg_rsp_drop_rip = start_rip;
+    *dbg_rsp_drop_from = prev;
+    *dbg_rsp_drop_to = rsp;
+    *dbg_rsp_drop_prev = *previous_rip;
 }
 
 #[no_mangle]
@@ -6097,6 +6128,11 @@ pub unsafe fn reset_cpu() {
     *pending_linear64 = 0;
     *cr2_64 = 0;
     *tr_base64 = 0;
+    *dbg_rsp_last = 0;
+    *dbg_rsp_drop_rip = 0;
+    *dbg_rsp_drop_from = 0;
+    *dbg_rsp_drop_to = 0;
+    *dbg_rsp_drop_prev = 0;
 
     *cr = 1 << 30 | 1 << 29 | 1 << 4;
     *cr.offset(2) = 0;

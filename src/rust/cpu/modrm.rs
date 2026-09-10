@@ -146,7 +146,7 @@ fn default_seg_rm64(rm: i32) -> i32 {
     }
 }
 
-unsafe fn apply_asize64(ea: u64) -> u64 {
+pub(crate) unsafe fn apply_asize64(ea: u64) -> u64 {
     if *prefixes & prefix::PREFIX_MASK_ADDRSIZE != 0 {
         ea as u32 as u64
     }
@@ -155,7 +155,11 @@ unsafe fn apply_asize64(ea: u64) -> u64 {
     }
 }
 
-unsafe fn linear_from_ea64(default_seg: i32, ea: u64, rip_rel: bool) -> OrPageFault<u64> {
+pub(crate) unsafe fn linear_from_ea64(
+    default_seg: i32,
+    ea: u64,
+    rip_rel: bool,
+) -> OrPageFault<u64> {
     let p = *prefixes & prefix::PREFIX_MASK_SEGMENT;
     let base = if p == prefix::SEG_PREFIX_ZERO {
         0

@@ -108,6 +108,27 @@ start64:
     pushfq
     popfq
 
+    ; 66h must not turn PUSH r / CALL / RET into 16-bit stack ops.
+    mov rax, 0x0123456789ABCDEF
+    mov r8, rsp
+    db 0x66
+    push rax
+    mov r9, rsp
+    sub r8, r9
+    cmp r8, 8
+    jne fail66
+    pop r10
+    cmp r10, rax
+    jne fail66
+
+    mov r8, rsp
+    db 0x66
+    call osize_ret
+    cmp rax, 0x44
+    jne fail66
+    cmp rsp, r8
+    jne fail66
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -121,6 +142,16 @@ near_fn:
 indirect_fn:
     mov rax, 0x43
     ret
+
+osize_ret:
+    mov rax, 0x44
+    db 0x66
+    ret
+
+fail66:
+    mov al, 2
+    out 0xF4, al
+    jmp fail64.bad
 
 fail64:
     mov al, 1

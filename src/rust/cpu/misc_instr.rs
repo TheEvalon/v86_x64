@@ -202,7 +202,18 @@ pub unsafe fn push16_ss16_mem(addr: i32) -> OrPageFault<()> { push16_ss16(safe_r
 pub unsafe fn push16_ss32_mem(addr: i32) -> OrPageFault<()> { push16_ss32(safe_read16(addr)?) }
 
 pub unsafe fn push16(imm16: i32) -> OrPageFault<()> {
-    if *stack_size_32 {
+    if *is_64 {
+        // 66h PUSH in 64-bit CS still uses a 64-bit RSP (Intel: SS.B is ignored).
+        let new_rsp = read_reg64(ESP).wrapping_sub(2);
+        if gp_if_noncanonical(new_rsp) {
+            return Err(());
+        }
+        *pending_linear64 = new_rsp;
+        safe_write16(new_rsp as i32, imm16)?;
+        write_reg64(ESP, new_rsp);
+        Ok(())
+    }
+    else if *stack_size_32 {
         push16_ss32(imm16)
     }
     else {
@@ -251,7 +262,17 @@ pub unsafe fn push32_sreg(i: i32) -> OrPageFault<()> {
 }
 
 pub unsafe fn pop16() -> OrPageFault<i32> {
-    if *stack_size_32 {
+    if *is_64 {
+        let rsp = read_reg64(ESP);
+        if gp_if_noncanonical(rsp) {
+            return Err(());
+        }
+        *pending_linear64 = rsp;
+        let result = safe_read16(rsp as i32)?;
+        write_reg64(ESP, rsp.wrapping_add(2));
+        Ok(result)
+    }
+    else if *stack_size_32 {
         pop16_ss32()
     }
     else {

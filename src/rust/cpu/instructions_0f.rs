@@ -30,6 +30,7 @@ use crate::cpu::misc_instr::{
 use crate::cpu::misc_instr::{lar, lsl, verr, verw};
 use crate::cpu::misc_instr::{lss16, lss32};
 use crate::cpu::sse_instr::*;
+use crate::paging::OrPageFault;
 
 fn edx_eax(low: i32, high: i32) -> u64 { low as u32 as u64 | (high as u32 as u64) << 32 }
 
@@ -5312,6 +5313,20 @@ pub unsafe fn instr_660FF6_mem(addr: i32, r: i32) {
 }
 
 pub unsafe fn instr_0FF7_mem(_addr: i32, _r: i32) { trigger_ud(); }
+
+unsafe fn maskmov_linear_dest() -> OrPageFault<i32> {
+    if *is_64 {
+        let asize32 = *prefixes & crate::prefix::PREFIX_MASK_ADDRSIZE != 0;
+        let rdi = if asize32 { read_reg32(EDI) as u32 as u64 } else { read_reg64(EDI) };
+        let addr = crate::cpu::modrm::linear_from_ea64(DS, rdi, false)?;
+        *pending_linear64 = addr;
+        Ok(addr as i32)
+    }
+    else {
+        get_seg_prefix_ds(get_reg_asize(EDI))
+    }
+}
+
 #[no_mangle]
 pub unsafe fn maskmovq(r1: i32, r2: i32, addr: i32) {
     // maskmovq mm, mm
@@ -5326,7 +5341,7 @@ pub unsafe fn maskmovq(r1: i32, r2: i32, addr: i32) {
     transition_fpu_to_mmx();
 }
 pub unsafe fn instr_0FF7_reg(r1: i32, r2: i32) {
-    let addr = return_on_pagefault!(get_seg_prefix_ds(get_reg_asize(EDI)));
+    let addr = return_on_pagefault!(maskmov_linear_dest());
     return_on_pagefault!(writable_or_pagefault(addr, 8));
     maskmovq(r1, r2, addr)
 }
@@ -5345,7 +5360,7 @@ pub unsafe fn maskmovdqu(r1: i32, r2: i32, addr: i32) {
     }
 }
 pub unsafe fn instr_660FF7_reg(r1: i32, r2: i32) {
-    let addr = return_on_pagefault!(get_seg_prefix_ds(get_reg_asize(EDI)));
+    let addr = return_on_pagefault!(maskmov_linear_dest());
     return_on_pagefault!(writable_or_pagefault(addr, 16));
     maskmovdqu(r1, r2, addr)
 }

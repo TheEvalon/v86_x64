@@ -102,6 +102,12 @@ pub const cr2_64: *mut u64 = 2280 as *mut u64;
 pub const tr_base64: *mut u64 = 2288 as *mut u64;
 pub const msr_tsc_aux: *mut u64 = 2296 as *mut u64;
 pub const reg_xmm8: *mut reg128 = 2304 as *mut reg128; // 8 × 16 = 128 bytes, ends 2432
+/// First large RSP drop on the XP x64 PCR stack (below rustc WASM global-base).
+pub const dbg_rsp_last: *mut u64 = 2432 as *mut u64;
+pub const dbg_rsp_drop_rip: *mut u64 = 2440 as *mut u64;
+pub const dbg_rsp_drop_from: *mut u64 = 2448 as *mut u64;
+pub const dbg_rsp_drop_to: *mut u64 = 2456 as *mut u64;
+pub const dbg_rsp_drop_prev: *mut u64 = 2464 as *mut u64;
 
 pub unsafe fn xmm_ptr(r: i32) -> *mut reg128 {
     dbg_assert!(r >= 0 && r < 16);
