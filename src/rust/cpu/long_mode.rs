@@ -777,6 +777,58 @@ unsafe fn dispatch_xlat64() {
     write_reg8(AL, v);
 }
 
+/// Absolute moffs (A0–A3). 64-bit CS uses a 64-bit offset, or 32-bit with 67h.
+/// FS/GS bases still apply: MSVC encodes `mov rax, gs:[0x30]` (TEB→PEB) as
+/// `67 65 48 A1 30 00 00 00`. The 32-bit helpers add a truncated `get_seg`,
+/// and the REX.W path used to skip the segment entirely (linear = 0x30).
+unsafe fn moffs_linear64() -> OrPageFault<u64> {
+    let offset = if *prefixes & prefix::PREFIX_MASK_ADDRSIZE != 0 {
+        read_imm32s()? as u32 as u64
+    }
+    else {
+        read_imm64()?
+    };
+    let addr = linear_from_ea64(DS, offset, false)?;
+    *pending_linear64 = addr;
+    Ok(addr)
+}
+
+unsafe fn dispatch_moffs64(opcode: i32) {
+    let addr = return_on_pagefault!(moffs_linear64());
+    match opcode {
+        0xA0 => {
+            let v = return_on_pagefault!(safe_read8(addr as i32));
+            write_reg8(AL, v);
+        },
+        0xA2 => {
+            return_on_pagefault!(safe_write8(addr as i32, read_reg8(AL)));
+        },
+        0xA1 => {
+            if rex_w() {
+                write_reg64(EAX, return_on_pagefault!(safe_read64s(addr as i32)));
+            }
+            else if is_osize_32() {
+                write_reg32(EAX, return_on_pagefault!(safe_read32s(addr as i32)));
+            }
+            else {
+                write_reg16(AX, return_on_pagefault!(safe_read16(addr as i32)));
+            }
+        },
+        0xA3 => {
+            if rex_w() {
+                return_on_pagefault!(safe_write64(addr as i32, read_reg64(EAX)));
+            }
+            else if is_osize_32() {
+                return_on_pagefault!(safe_write32(addr as i32, read_reg32(EAX)));
+            }
+            else {
+                return_on_pagefault!(safe_write16(addr as i32, read_reg16(AX)));
+            }
+        },
+        _ => {},
+    }
+}
+
 unsafe fn dispatch_rex_w(opcode: i32) {
     current_interp_opcode = opcode as u32 | 0x100;
     current_interp_0f = false;
@@ -987,14 +1039,6 @@ unsafe fn dispatch_rex_w(opcode: i32) {
         0xAB => string64(String64::Stos, 8),
         0xAD => string64(String64::Lods, 8),
         0xAF => string64(String64::Scas, 8),
-        0xA1 => {
-            let addr = return_on_pagefault!(read_moffs());
-            write_reg64(EAX, return_on_pagefault!(safe_read64s(addr)));
-        },
-        0xA3 => {
-            let addr = return_on_pagefault!(read_moffs());
-            return_on_pagefault!(safe_write64(addr, read_reg64(EAX)));
-        },
         0xA9 => {
             let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
             test64(read_reg64(EAX), imm);
@@ -2110,6 +2154,13 @@ unsafe fn dispatch_opcode(opcode: i32) {
         finish_instruction();
         return;
     }
+    // A0–A3 moffs: 64-bit offset (32-bit with 67h) plus FS/GS. Must run
+    // before REX.W / 16-bit fallbacks so `67 65 48 A1` is not a raw 0x30.
+    if matches!(opcode, 0xA0..=0xA3) {
+        dispatch_moffs64(opcode);
+        finish_instruction();
+        return;
+    }
     // REX.W wins over 66h (`66 48 B8` is MOV r64, imm64, not MOV AX, imm16).
     if rex_w() && !opcode_ignores_rex_w(opcode) {
         dispatch_rex_w(opcode);
@@ -2318,6 +2369,10 @@ mod tests {
         assert!(opcode_ignores_rex_w(0x9E));
         assert!(opcode_ignores_rex_w(0xB0));
         assert!(opcode_ignores_rex_w(0xFE));
+        assert!(opcode_ignores_rex_w(0xA0));
+        assert!(opcode_ignores_rex_w(0xA2));
+        assert!(!opcode_ignores_rex_w(0xA1));
+        assert!(!opcode_ignores_rex_w(0xA3));
         assert!(!opcode_ignores_rex_w(0x89));
         assert!(!opcode_ignores_rex_w(0x05));
         assert!(!opcode_ignores_rex_w(0x90));

@@ -116,6 +116,28 @@ start64:
     cmp rsi, rax
     jne fail_zext
 
+    ; `67 65 48 A1 30 00 00 00` is MSVC `mov rax, gs:[0x30]` (TEB PEB).
+    ; moffs used to skip FS/GS, so linear=0x30 and XP winlogon AVd.
+    mov rax, 0xBAD0BAD0BAD0BAD0
+    mov [0x30], rax
+    mov rax, 0x0000000100000030
+    mov rcx, 0x1122334455667788
+    mov [rax], rcx
+    mov ecx, 0xC0000101
+    xor eax, eax
+    mov edx, 1
+    wrmsr
+    xor eax, eax
+    db 0x67, 0x65, 0x48, 0xA1, 0x30, 0x00, 0x00, 0x00
+    mov rcx, 0x1122334455667788
+    cmp rax, rcx
+    jne fail_moffs
+    xor eax, eax
+    db 0x67, 0x65, 0xA1, 0x30, 0x00, 0x00, 0x00
+    mov rcx, 0x55667788
+    cmp rax, rcx
+    jne fail_moffs
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -133,6 +155,9 @@ fail_trunc:
     jmp fail_out
 fail_zext:
     mov al, 5
+    jmp fail_out
+fail_moffs:
+    mov al, 6
     jmp fail_out
 fail64:
     mov al, 1
