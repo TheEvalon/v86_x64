@@ -484,20 +484,15 @@ function render_vga_text_rgba()
 
 function render_text_rgba(lines)
 {
-    const vga = render_vga_text_rgba();
-    if(vga)
-    {
-        return vga;
-    }
     const cols = Math.max(80, ...lines.map(s => s.length));
     const rows = Math.max(25, lines.length);
     const cw = 8, ch = 16;
     const width = cols * cw;
     const height = rows * ch;
     const rgba = Buffer.alloc(width * height * 4, 0);
-    for(let i = 3; i < rgba.length; i += 4)
+    for(let i = 0; i < rgba.length; i += 4)
     {
-        rgba[i] = 255;
+        rgba[i + 3] = 255;
     }
     for(let y = 0; y < rows; y++)
     {
@@ -511,21 +506,69 @@ function render_text_rgba(lines)
             }
             for(let py = 1; py < ch - 1; py++)
             {
+                const rowbit = glyph_row(code, py);
                 for(let px = 1; px < cw - 1; px++)
                 {
-                    const bit = ((code << py) ^ (px * 13)) & 8;
-                    if(!bit)
+                    if((rowbit >> (7 - px)) & 1)
                     {
-                        continue;
+                        const o = ((y * ch + py) * width + (x * cw + px)) * 4;
+                        rgba[o] = rgba[o + 1] = rgba[o + 2] = 0xC0;
+                        rgba[o + 3] = 255;
                     }
-                    const o = ((y * ch + py) * width + (x * cw + px)) * 4;
-                    rgba[o] = rgba[o + 1] = rgba[o + 2] = 0xC0;
-                    rgba[o + 3] = 255;
                 }
             }
         }
     }
     return { width, height, rgba };
+}
+
+function glyph_row(code, py)
+{
+    const gy = py >> 1;
+    if(code >= 48 && code <= 57)
+    {
+        const bits = [0x3E, 0x06, 0x3C, 0x3C, 0x12, 0x3E, 0x3E, 0x20, 0x3E, 0x3E];
+        const n = bits[code - 48];
+        if(gy === 0 || gy === 6)
+        {
+            return n;
+        }
+        if(gy === 3 && (code === 50 || code === 51 || code === 52 || code === 53 || code === 56 || code === 57))
+        {
+            return 0x3E;
+        }
+        return (code & 1 ? 0x22 : 0x20) | ((code & 2) ? 0x02 : 0);
+    }
+    if((code >= 65 && code <= 90) || (code >= 97 && code <= 122))
+    {
+        const u = code & ~32;
+        if(gy === 0)
+        {
+            return 0x3E;
+        }
+        if(gy === 3 && u !== 73 && u !== 84)
+        {
+            return 0x3E;
+        }
+        if(gy === 6 && u !== 73)
+        {
+            return 0x22;
+        }
+        return 0x22;
+    }
+    if(code === 46)
+    {
+        return gy === 6 ? 0x08 : 0;
+    }
+    if(code === 58)
+    {
+        return gy === 2 || gy === 5 ? 0x08 : 0;
+    }
+    if(code === 45)
+    {
+        return gy === 3 ? 0x3E : 0;
+    }
+    return gy & 1 ? 0x2A : 0x14;
 }
 
 function grab_vga_rgba()
@@ -585,12 +628,28 @@ function save_boot_screenshot(label)
         catch(_e)
         {}
         const gfx = grab_vga_rgba();
-        const text = screen_text();
-        const img = gfx || render_text_rgba(text ? text.split("\n") : [""]);
+        const vga_font = render_vga_text_rgba();
+        const vga_info = dump_vga(emulator.v86.cpu);
+        const text = screen_text() || (vga_info.split("vga_text:\n")[1] || "");
+        let font_ok = false;
+        try
+        {
+            const font = emulator.v86.cpu.devices.vga.plane2;
+            for(let i = 32 * 32; i < 127 * 32 && font; i++)
+            {
+                if(font[i])
+                {
+                    font_ok = true;
+                    break;
+                }
+            }
+        }
+        catch(_e)
+        {}
+        const img = gfx || (font_ok && vga_font) || render_text_rgba(text ? text.split("\n") : [""]);
         fs.writeFileSync(dest, encode_png(img.width, img.height, img.rgba));
         const txt_out = dest.replace(/\.png$/i, ".txt");
-        fs.writeFileSync(txt_out, (text || "(blank text screen)") + "\n" +
-            dump_vga(emulator.v86.cpu) + "\n");
+        fs.writeFileSync(txt_out, (text || "(blank text screen)") + "\n" + vga_info + "\n");
         console.error("xp64 screenshot: " + dest + " " + img.width + "x" + img.height +
             (gfx ? " graphical" : " text"));
         return dest;
@@ -665,25 +724,100 @@ function dump_vga(cpu)
         const vga = cpu.devices.vga;
         const mem = vga.vga_memory;
         let nonzero = 0;
-        for(let i = 0; i < Math.min(mem.length, 4000); i++)
+        let printable = 0;
+        const cols = vga.max_cols || 80;
+        const rows = [];
+        let addr = (vga.start_address || 0) << 1;
+        for(let r = 0; r < (vga.max_rows || 25); r++)
         {
-            if(mem[i])
+            let line = "";
+            for(let c = 0; c < cols; c++)
             {
-                nonzero++;
+                const chr = mem[addr] || 0;
+                const attr = mem[addr | 1] || 0;
+                if(chr)
+                {
+                    nonzero++;
+                }
+                if(attr)
+                {
+                    nonzero++;
+                }
+                if(chr >= 32 && chr < 127)
+                {
+                    printable++;
+                    line += String.fromCharCode(chr);
+                }
+                else
+                {
+                    line += chr ? "." : " ";
+                }
+                addr += 2;
             }
+            rows.push(line.replace(/\s+$/g, ""));
+        }
+        let font_nz = 0;
+        const font = vga.plane2;
+        if(font)
+        {
+            for(let i = 0; i < 256 * 32; i++)
+            {
+                if(font[i])
+                {
+                    font_nz++;
+                }
+            }
+        }
+        const hex0 = [];
+        for(let i = 0; i < 32; i++)
+        {
+            hex0.push(("0" + mem[i].toString(16)).slice(-2));
         }
         return "graphical=" + (+vga.graphical_mode) +
             " svga=" + (+vga.svga_enabled) +
             " attr=" + hex64(vga.attribute_mode >>> 0) +
+            " crtc=" + hex64(vga.crtc_mode >>> 0) +
             " cols=" + (vga.max_cols || 0) +
             " rows=" + (vga.max_rows || 0) +
             " start=" + hex64(vga.start_address >>> 0) +
-            " text_nz=" + nonzero;
+            " text_nz=" + nonzero +
+            " printable=" + printable +
+            " font_nz=" + font_nz +
+            " mem0=" + hex0.join(" ") +
+            "\nvga_text:\n" + rows.filter(Boolean).join("\n");
     }
     catch(e)
     {
         return "(vga " + e + ")";
     }
+}
+
+function scan_irq_frames(cpu)
+{
+    const top = 0xFFFFF80000308000n;
+    const bot = 0xFFFFF80000300000n;
+    let frames = 0;
+    let sample = [];
+    for(let va = top - 40n; va >= bot; va -= 8n)
+    {
+        const phys = phys_of_virt(cpu, va);
+        if(phys === null)
+        {
+            continue;
+        }
+        const cs = rd64_phys(cpu, phys + 8);
+        const ss = rd64_phys(cpu, phys + 32);
+        if(cs === 0x10n && ss === 0x18n)
+        {
+            frames++;
+            if(sample.length < 6)
+            {
+                sample.push(hex64(va) + " rip=" + hex64(rd64_phys(cpu, phys)) +
+                    " rsp=" + hex64(rd64_phys(cpu, phys + 24)));
+            }
+        }
+    }
+    return "irq_frames=" + frames + (sample.length ? " " + sample.join(" ; ") : "");
 }
 
 function dump_apic(cpu)
@@ -801,6 +935,7 @@ function dump_stuck(cpu)
         "\napic=" + dump_apic(cpu) +
         "\nioapic=" + dump_ioapic(cpu) +
         "\npic=" + dump_pic(cpu) +
+        "\n" + scan_irq_frames(cpu) +
         "\nvga=" + dump_vga(cpu) +
         "\ngdt_mem=" + dump_stack_words(cpu, 0xFFFFF80000300000n, 8) +
         "\nrsp_mem=" + dump_stack_words(cpu, BigInt(cpu.reg32[4] >>> 0) + (BigInt(cpu.reg_high32[4] >>> 0) << 32n), 8);
