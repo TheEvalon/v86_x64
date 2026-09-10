@@ -878,6 +878,52 @@ function dump_ram_ascii(cpu, phys, n)
     return hex64(phys) + " \"" + chars.join("") + "\"";
 }
 
+function dump_ram_hex(cpu, phys, n)
+{
+    const mem = cpu.mem8;
+    const bytes = [];
+    for(let i = 0; i < n; i++)
+    {
+        bytes.push(("0" + mem[phys + i].toString(16)).slice(-2));
+    }
+    return hex64(phys) + " [" + bytes.join(" ") + "]";
+}
+
+function utf16_cstr_phys(cpu, phys, max_chars)
+{
+    const mem = cpu.mem8;
+    const chars = [];
+    for(let i = 0; i < max_chars; i++)
+    {
+        const lo = mem[phys + i * 2];
+        const hi = mem[phys + i * 2 + 1];
+        const c = lo | hi << 8;
+        if(c === 0)
+        {
+            break;
+        }
+        chars.push(c >= 32 && c < 127 ? String.fromCharCode(c) : ".");
+    }
+    return chars.join("");
+}
+
+function utf16_expand_phys(cpu, phys)
+{
+    let start = phys;
+    let steps = 0;
+    while(start >= 2 && steps < 160)
+    {
+        const c = cpu.mem8[start - 2] | cpu.mem8[start - 1] << 8;
+        if(c < 32 || c > 126)
+        {
+            break;
+        }
+        start -= 2;
+        steps++;
+    }
+    return hex64(start) + " \"" + utf16_cstr_phys(cpu, start, 180) + "\"";
+}
+
 function dump_loader_paths(cpu)
 {
     const parts = [];
@@ -889,11 +935,33 @@ function dump_loader_paths(cpu)
         ["basesrv", "basesrv"],
         ["winsrv.dll", "winsrv.dll"],
         ["KnownDlls", Buffer.from([0x4B, 0, 0x6E, 0, 0x6F, 0, 0x77, 0, 0x6E, 0, 0x44, 0, 0x6C, 0, 0x6C, 0, 0x73, 0])],
+        ["u16_winsrv", Buffer.from("w\0i\0n\0s\0r\0v\0")],
+        ["u16_sys32", Buffer.from("C\0:\0\\\0W\0I\0N\0D\0O\0W\0S\0\\\0s\0y\0s\0t\0e\0m\0")],
+        ["Default Load Path", "Default Load Path"],
     ];
     for(const [label, needle] of needles)
     {
-        const hits = find_ram(cpu, needle, 4);
-        parts.push(label + "_phys=" + (hits.length ? hits.map(h => dump_ram_ascii(cpu, h, 48)).join(" ; ") : "none"));
+        const hits = find_ram(cpu, needle, 6);
+        if(!hits.length)
+        {
+            parts.push(label + "_phys=none");
+            continue;
+        }
+        const shown = hits.map(function(h)
+        {
+            if(label.indexOf("u16_") === 0)
+            {
+                return utf16_expand_phys(cpu, h);
+            }
+            if(label === "winsrv.dll")
+            {
+                const before = Math.max(0, h - 64);
+                return dump_ram_ascii(cpu, h, 48) + " before=" + dump_ram_hex(cpu, before, 16) +
+                    " ascii_before=" + dump_ram_ascii(cpu, before, 64);
+            }
+            return dump_ram_ascii(cpu, h, 64);
+        });
+        parts.push(label + "_phys=" + shown.join(" ; "));
     }
     return parts.join("\n");
 }
