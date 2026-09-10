@@ -405,10 +405,22 @@ function encode_png(width, height, rgba)
     ]);
 }
 
-function palette_rgb(pal, index)
+const CGA16 = [
+    [0x00, 0x00, 0x00], [0x00, 0x00, 0xAA], [0x00, 0xAA, 0x00], [0x00, 0xAA, 0xAA],
+    [0xAA, 0x00, 0x00], [0xAA, 0x00, 0xAA], [0xAA, 0x55, 0x00], [0xAA, 0xAA, 0xAA],
+    [0x55, 0x55, 0x55], [0x55, 0x55, 0xFF], [0x55, 0xFF, 0x55], [0x55, 0xFF, 0xFF],
+    [0xFF, 0x55, 0x55], [0xFF, 0x55, 0xFF], [0xFF, 0xFF, 0x55], [0xFF, 0xFF, 0xFF],
+];
+
+function palette_rgb(pal, index, fallback)
 {
     const color = pal[index] >>> 0;
-    return [color >>> 16 & 0xFF, color >>> 8 & 0xFF, color & 0xFF];
+    const rgb = [color >>> 16 & 0xFF, color >>> 8 & 0xFF, color & 0xFF];
+    if(rgb[0] | rgb[1] | rgb[2])
+    {
+        return rgb;
+    }
+    return fallback || rgb;
 }
 
 function render_vga_text_rgba()
@@ -442,8 +454,8 @@ function render_vga_text_rgba()
                 const attr = mem[addr | 1] || 0;
                 const fg_i = dac_mask & dac_map[attr & 0xF];
                 const bg_i = dac_mask & dac_map[attr >> 4 & 0xF];
-                const fg = palette_rgb(pal, fg_i);
-                const bg = palette_rgb(pal, bg_i);
+                const fg = palette_rgb(pal, fg_i, CGA16[attr & 0xF]);
+                const bg = palette_rgb(pal, bg_i, CGA16[attr >> 4 & 0xF]);
                 for(let py = 0; py < ch; py++)
                 {
                     const bits = font[(chr << 5) + py] || 0;
@@ -557,22 +569,31 @@ function grab_vga_rgba()
     }
 }
 
-function save_boot_screenshot()
+function save_boot_screenshot(label)
 {
     const out = process.env.XP64_SCREENSHOT ||
         path.join("/opt/cursor/artifacts", "xp64_boot_screen.png");
+    const dest = label ? out.replace(/\.png$/i, "_" + label + ".png") : out;
     try
     {
-        fs.mkdirSync(path.dirname(out), { recursive: true });
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        try
+        {
+            emulator.v86.cpu.devices.vga.complete_redraw();
+            emulator.v86.cpu.devices.vga.screen_fill_buffer();
+        }
+        catch(_e)
+        {}
         const gfx = grab_vga_rgba();
         const text = screen_text();
         const img = gfx || render_text_rgba(text ? text.split("\n") : [""]);
-        fs.writeFileSync(out, encode_png(img.width, img.height, img.rgba));
-        const txt_out = out.replace(/\.png$/i, ".txt");
-        fs.writeFileSync(txt_out, text || "(blank text screen)\n");
-        console.error("xp64 screenshot: " + out + " " + img.width + "x" + img.height +
+        fs.writeFileSync(dest, encode_png(img.width, img.height, img.rgba));
+        const txt_out = dest.replace(/\.png$/i, ".txt");
+        fs.writeFileSync(txt_out, (text || "(blank text screen)") + "\n" +
+            dump_vga(emulator.v86.cpu) + "\n");
+        console.error("xp64 screenshot: " + dest + " " + img.width + "x" + img.height +
             (gfx ? " graphical" : " text"));
-        return out;
+        return dest;
     }
     catch(e)
     {
@@ -600,6 +621,68 @@ function dump_at(cpu, virt)
     catch(_e)
     {
         return "(unreadable)";
+    }
+}
+
+function dump_pic(cpu)
+{
+    try
+    {
+        const m = new Uint8Array(cpu.wasm_memory.buffer, cpu.get_pic_addr_master(), 16);
+        const s = new Uint8Array(cpu.wasm_memory.buffer, cpu.get_pic_addr_slave(), 16);
+        return "master mask=" + hex64(m[0]) + " map=" + hex64(m[1]) +
+            " isr=" + hex64(m[2]) + " irr=" + hex64(m[3]) +
+            " slave mask=" + hex64(s[0]) + " map=" + hex64(s[1]) +
+            " isr=" + hex64(s[2]) + " irr=" + hex64(s[3]);
+    }
+    catch(e)
+    {
+        return "(pic " + e + ")";
+    }
+}
+
+function dump_stack_words(cpu, virt, count)
+{
+    const parts = [];
+    for(let i = 0; i < count; i++)
+    {
+        const va = as_u64(virt) + BigInt(i * 8);
+        const phys = phys_of_virt(cpu, va);
+        if(phys === null)
+        {
+            parts.push(hex64(va) + "=unmapped");
+            continue;
+        }
+        parts.push(hex64(va) + "=" + hex64(rd64_phys(cpu, phys)));
+    }
+    return parts.join(" ");
+}
+
+function dump_vga(cpu)
+{
+    try
+    {
+        const vga = cpu.devices.vga;
+        const mem = vga.vga_memory;
+        let nonzero = 0;
+        for(let i = 0; i < Math.min(mem.length, 4000); i++)
+        {
+            if(mem[i])
+            {
+                nonzero++;
+            }
+        }
+        return "graphical=" + (+vga.graphical_mode) +
+            " svga=" + (+vga.svga_enabled) +
+            " attr=" + hex64(vga.attribute_mode >>> 0) +
+            " cols=" + (vga.max_cols || 0) +
+            " rows=" + (vga.max_rows || 0) +
+            " start=" + hex64(vga.start_address >>> 0) +
+            " text_nz=" + nonzero;
+    }
+    catch(e)
+    {
+        return "(vga " + e + ")";
     }
 }
 
@@ -716,7 +799,11 @@ function dump_stuck(cpu)
         "\n" + dump_pml4(cpu) +
         "\n" + walks +
         "\napic=" + dump_apic(cpu) +
-        "\nioapic=" + dump_ioapic(cpu);
+        "\nioapic=" + dump_ioapic(cpu) +
+        "\npic=" + dump_pic(cpu) +
+        "\nvga=" + dump_vga(cpu) +
+        "\ngdt_mem=" + dump_stack_words(cpu, 0xFFFFF80000300000n, 8) +
+        "\nrsp_mem=" + dump_stack_words(cpu, BigInt(cpu.reg32[4] >>> 0) + (BigInt(cpu.reg_high32[4] >>> 0) << 32n), 8);
 }
 
 function finish(code, message)
@@ -791,6 +878,12 @@ emulator.add_listener("emulator-loaded", function()
             saw_is_64 = true;
             console.error("xp64: CS.L " + dump_regs(cpu0));
             console.log("xp64: entered long mode");
+            try
+            {
+                save_boot_screenshot("lma");
+            }
+            catch(_e)
+            {}
             hold_timer = setTimeout(() => {
                 finish(0, "xp64: pass (long mode held " + HOLD_MS + "ms)");
             }, HOLD_MS);

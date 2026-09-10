@@ -5937,10 +5937,16 @@ pub unsafe fn store_current_tsc() { *current_tsc = read_tsc(); }
 #[no_mangle]
 pub unsafe fn handle_irqs() {
     if *flags & FLAG_INTERRUPT != 0 {
-        if let Some(irq) = pic::pic_acknowledge_irq() {
-            pic_call_irq(irq)
+        // Long mode always uses the local APIC. The 8259 is still wired here,
+        // so acknowledging it first would bypass CR8/TPR and nest IRQ8 on the
+        // 32KB PCR stack until it overwrote the GDT.
+        if !efer_lma() {
+            if let Some(irq) = pic::pic_acknowledge_irq() {
+                pic_call_irq(irq);
+                return;
+            }
         }
-        else if *apic_enabled || *acpi_enabled {
+        if *apic_enabled || *acpi_enabled {
             if let Some(irq) = apic::acknowledge_irq() {
                 pic_call_irq(irq)
             }
@@ -6091,6 +6097,8 @@ pub unsafe fn reset_cpu() {
     *cr.offset(3) = 0;
     *cr.offset(4) = 0;
     cr8 = 0;
+    // Hardware reset leaves IA32_APIC_BASE.EN set when an APIC exists.
+    *apic_enabled = *lapic_present;
     in_lma_int_delivery = false;
     in_lma_df_delivery = false;
     *dreg.offset(6) = 0xFFFF0FF0u32 as i32;
