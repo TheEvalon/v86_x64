@@ -4018,11 +4018,8 @@ pub unsafe fn load_pdpte(cr3: i32) {
     for i in 0..4 {
         let mut pdpt_entry = memory::read64s(cr3 as u32 + 8 * i as u32) as u64;
         pdpt_entry &= !0b1110_0000_0000;
-        dbg_assert!(pdpt_entry & 0b11000 == 0, "TODO");
-        dbg_assert!(
-            pdpt_entry as u64 & 0xFFFF_FFFF_0000_0000 == 0,
-            "Unsupported: PDPT entry larger than 32 bits"
-        );
+        // Bit 63 is NX/XD, not a physical address. Match walk_ia32e_to_pd.
+        pte64_check_phys32(pdpt_entry as i64);
         if pdpt_entry as i32 & PAGE_TABLE_PRESENT_MASK != 0 {
             dbg_assert!(
                 pdpt_entry & 0b1_1110_0110 == 0,
