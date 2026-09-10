@@ -117,10 +117,18 @@ fn cr8_from_tpr(tpr: u32) -> u64 { (tpr as u64 >> 4) & 0xF }
 pub fn read_cr8() -> u64 { cr8_from_tpr(get_apic().tpr) }
 
 pub fn set_cr8(value: u64) {
-    let mut apic = get_apic();
-    apic.tpr = tpr_from_cr8(value);
+    {
+        let mut apic = get_apic();
+        apic.tpr = tpr_from_cr8(value);
+        unsafe {
+            crate::cpu::cpu::cr8 = value & 0xF;
+        }
+    }
+    // Lowering TPR can unblock a self-IPI already sitting in IRR
+    // (HalRequestSoftwareInterrupt at APC_LEVEL). Evaluate now; waiting
+    // for the next main-loop slice lets the guest reuse a stack KEVENT.
     unsafe {
-        crate::cpu::cpu::cr8 = value & 0xF;
+        crate::cpu::cpu::handle_irqs();
     }
 }
 
@@ -300,7 +308,14 @@ pub fn write32(addr: u32, value: u32) {
     if !local_apic_mmio_active() {
         return;
     }
-    write32_internal(&mut get_apic(), addr, value)
+    write32_internal(&mut get_apic(), addr, value);
+    // TPR and ICR writes can make a pending IRR vector eligible. Drop the
+    // APIC lock first: handle_irqs -> acknowledge_irq tries to take it.
+    if addr == 0x80 || addr == 0x300 {
+        unsafe {
+            crate::cpu::cpu::handle_irqs();
+        }
+    }
 }
 
 fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {

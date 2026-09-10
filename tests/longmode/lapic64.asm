@@ -121,6 +121,35 @@ en_ok:
     test eax, eax
     jnz fail_cr8
 
+    ; Lowering CR8 must deliver a self-IPI that TPR had masked. XP's
+    ; IopSynchronousCall stack KEVENT is signaled from a special kernel APC
+    ; requested via HalRequestSoftwareInterrupt while CR8=2.
+    lea rax, [ipi_handler]
+    mov [idt_vec21], ax
+    shr rax, 16
+    mov [idt_vec21 + 6], ax
+    shr rax, 16
+    mov [idt_vec21 + 8], eax
+    lidt [idt_desc]
+    mov al, 0xFF
+    out 0x21, al
+    out 0xA1, al
+    sti
+    nop
+
+    mov dword [rel ipi_flag], 0
+    mov rax, 2
+    mov cr8, rax
+    mov esi, 0xFEE00300
+    mov dword [rsi], 0x40021
+    cmp dword [rel ipi_flag], 0
+    jne fail_ipi_early
+
+    xor eax, eax
+    mov cr8, rax
+    cmp dword [rel ipi_flag], 1
+    jne fail_ipi_late
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -154,6 +183,43 @@ fail_cr8:
     mov al, 7
     out 0xF4, al
     jmp hang64
+
+fail_ipi_early:
+    mov al, 8
+    out 0xF4, al
+    jmp hang64
+
+fail_ipi_late:
+    mov al, 9
+    out 0xF4, al
+    jmp hang64
+
+ipi_handler:
+    inc dword [rel ipi_flag]
+    mov esi, 0xFEE000B0
+    mov dword [rsi], 0
+    iretq
+
+align 8
+ipi_flag:
+    dd 0
+
+align 16
+idt:
+    times 0x21 * 16 db 0
+idt_vec21:
+    dw 0
+    dw 0x08
+    db 0
+    db 0x8E
+    dw 0
+    dd 0
+    dd 0
+idt_end:
+
+idt_desc:
+    dw idt_end - idt - 1
+    dq idt
 
 hang64:
     hlt
