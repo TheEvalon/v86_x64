@@ -144,7 +144,8 @@ const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "..
 
 const TIMEOUT_MS = +process.env.XP64_TIMEOUT_MS || 180000;
 const HOLD_MS = +process.env.XP64_HOLD_MS || 5000;
-const ACPI = process.env.XP64_ACPI === "1";
+// QEMU-installed XP x64 uses the ACPI HAL; Standard PC is XP64_ACPI=0.
+const ACPI = process.env.XP64_ACPI !== "0";
 
 const emulator = new V86({
     bios: { url: path.join(ROOT, "bios/seabios.bin") },
