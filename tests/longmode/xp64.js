@@ -739,9 +739,71 @@ function rd64_virt(cpu, virt)
     return rd64_phys(cpu, phys);
 }
 
+function utf16_at(cpu, virt, nbytes)
+{
+    const phys = phys_of_virt(cpu, virt);
+    if(phys === null)
+    {
+        return null;
+    }
+    const chars = [];
+    const n = Math.max(0, Math.min(nbytes || 0, 240));
+    for(let i = 0; i + 1 < n; i += 2)
+    {
+        const c = cpu.mem8[phys + i] | cpu.mem8[phys + i + 1] << 8;
+        if(c === 0)
+        {
+            break;
+        }
+        chars.push(c >= 32 && c < 127 ? String.fromCharCode(c) : "\\u" +
+            ("000" + c.toString(16)).slice(-4));
+    }
+    return chars.join("");
+}
+
+function dump_bytes_va(cpu, virt, n)
+{
+    const phys = phys_of_virt(cpu, virt);
+    if(phys === null)
+    {
+        return hex64(virt) + " unmapped";
+    }
+    const bytes = [];
+    for(let i = 0; i < n; i++)
+    {
+        bytes.push(("0" + cpu.mem8[phys + i].toString(16)).slice(-2));
+    }
+    return hex64(virt) + " [" + bytes.join(" ") + "]";
+}
+
+function dump_ustr(cpu, va)
+{
+    const phys = phys_of_virt(cpu, va);
+    if(phys === null)
+    {
+        return hex64(va) + " unmapped";
+    }
+    const len = cpu.mem8[phys] | cpu.mem8[phys + 1] << 8;
+    const maxlen = cpu.mem8[phys + 2] | cpu.mem8[phys + 3] << 8;
+    const buf = rd64_phys(cpu, phys + 8);
+    const s = utf16_at(cpu, buf, Math.min(len, 200));
+    return hex64(va) + " ustr len=" + len + "/" + maxlen +
+        " buf=" + hex64(buf) + " \"" + (s === null ? "unmapped" : s) + "\"";
+}
+
+function looks_kernel_ptr(v)
+{
+    if(v === null || v < 0xFFFF800000000000n)
+    {
+        return false;
+    }
+    return true;
+}
+
 function dump_bugcheck(cpu)
 {
     const words = [];
+    const extra = [];
     for(let i = 0; i < 5; i++)
     {
         const v = rd64_virt(cpu, KI_BUGCHECK_DATA + BigInt(i * 8));
@@ -750,6 +812,12 @@ function dump_bugcheck(cpu)
             saw_bugcheck_data = true;
         }
         words.push(v === null ? "unmapped" : hex64(v));
+        if(looks_kernel_ptr(v))
+        {
+            extra.push("p" + i + "_raw=" + dump_bytes_va(cpu, v, 16));
+            extra.push("p" + i + "_ustr=" + dump_ustr(cpu, v));
+            extra.push("p" + i + "_utf16=" + JSON.stringify(utf16_at(cpu, v, 64)));
+        }
     }
     const gs = u64_from_pair(cpu.msr_gs_base);
     const pcr20 = rd64_virt(cpu, gs + 0x20n);
@@ -762,7 +830,8 @@ function dump_bugcheck(cpu)
             " +1a0=" + (code === null ? "unmapped" : hex64(code)) +
             " +1a8=" + (p1 === null ? "unmapped" : hex64(p1));
     }
-    return "KiBugCheckData=" + words.join(" ") + " " + prcb;
+    return "KiBugCheckData=" + words.join(" ") + " " + prcb +
+        (extra.length ? "\n" + extra.join("\n") : "");
 }
 
 function dump_reboot(cpu)
