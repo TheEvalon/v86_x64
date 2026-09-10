@@ -168,9 +168,19 @@ let saw_is_64 = false;
 let hold_timer = null;
 let logged_fa80_pf = false;
 let logged_rsp_drop = false;
+let logged_bugcheck = false;
+let last_lma_line = "";
+let last_reboot_dump = "";
+let lma_generation = 0;
+let saw_hw_reset = false;
+let saw_bugcheck_data = false;
 let pf_count = 0;
 let last_screenshot_score = -1;
 let saved_boot_menu = false;
+const NTOS_BUGCHECK = 0xFFFFF80001041690n;
+const KI_BUGCHECK_DATA = 0xFFFFF800011A2880n;
+const MAX_LMA_GENERATIONS = 3;
+const LOGON_RE = /Log On to Windows|Welcome to Windows|Ctrl\+Alt\+Del|Press Ctrl.*Alt.*Delete|to log on/i;
 
 function u64_from_pair(view)
 {
@@ -696,17 +706,18 @@ function save_boot_screenshot(label)
     }
 }
 
-function dump_at(cpu, virt)
+function dump_at(cpu, virt, count)
 {
     try
     {
+        const n = count || 16;
         const phys = phys_of_virt(cpu, virt);
         if(phys === null)
         {
             return "(unreadable)";
         }
         const bytes = [];
-        for(let i = 0; i < 16; i++)
+        for(let i = 0; i < n; i++)
         {
             bytes.push(("0" + cpu.mem8[phys + i].toString(16)).slice(-2));
         }
@@ -716,6 +727,53 @@ function dump_at(cpu, virt)
     {
         return "(unreadable)";
     }
+}
+
+function rd64_virt(cpu, virt)
+{
+    const phys = phys_of_virt(cpu, virt);
+    if(phys === null)
+    {
+        return null;
+    }
+    return rd64_phys(cpu, phys);
+}
+
+function dump_bugcheck(cpu)
+{
+    const words = [];
+    for(let i = 0; i < 5; i++)
+    {
+        const v = rd64_virt(cpu, KI_BUGCHECK_DATA + BigInt(i * 8));
+        if(v && v !== 0n)
+        {
+            saw_bugcheck_data = true;
+        }
+        words.push(v === null ? "unmapped" : hex64(v));
+    }
+    const gs = u64_from_pair(cpu.msr_gs_base);
+    const pcr20 = rd64_virt(cpu, gs + 0x20n);
+    let prcb = "(unmapped)";
+    if(pcr20 !== null)
+    {
+        const code = rd64_virt(cpu, pcr20 + 0x1A0n);
+        const p1 = rd64_virt(cpu, pcr20 + 0x1A8n);
+        prcb = "pcr20=" + hex64(pcr20) +
+            " +1a0=" + (code === null ? "unmapped" : hex64(code)) +
+            " +1a8=" + (p1 === null ? "unmapped" : hex64(p1));
+    }
+    return "KiBugCheckData=" + words.join(" ") + " " + prcb;
+}
+
+function dump_reboot(cpu)
+{
+    const rip = u64_from_pair(cpu.rip64);
+    const rsp = BigInt(cpu.reg32[4] >>> 0) + (BigInt(cpu.reg_high32[4] >>> 0) << 32n);
+    return dump_regs(cpu) +
+        "\nrip_bytes=" + dump_at(cpu, rip, 32) +
+        "\n" + dump_bugcheck(cpu) +
+        "\nrsp_mem=" + dump_stack_words(cpu, rsp, 16) +
+        "\n" + dump_stuck(cpu);
 }
 
 function dump_pic(cpu)
@@ -1111,6 +1169,55 @@ function finish(code, message)
 emulator.add_listener("emulator-loaded", function()
 {
     const cpu0 = emulator.v86.cpu;
+    const orig_reboot = cpu0.reboot_internal.bind(cpu0);
+    cpu0.reboot_internal = function()
+    {
+        if(!finished && (saw_lma || cpu0.is_64[0]))
+        {
+            saw_hw_reset = true;
+            try
+            {
+                last_reboot_dump = dump_reboot(cpu0);
+                console.error("xp64: reboot_internal gen=" + lma_generation +
+                    "\n" + last_reboot_dump);
+            }
+            catch(e)
+            {
+                console.error("xp64: reboot_internal dump failed: " + e);
+            }
+            try
+            {
+                save_boot_screenshot("hwreset");
+            }
+            catch(_e)
+            {}
+            if(saw_bugcheck_data || logged_bugcheck)
+            {
+                finish(1, "xp64: firmware reboot after bugcheck\nlast_lma=" +
+                    last_lma_line);
+                return;
+            }
+        }
+        return orig_reboot();
+    };
+    try
+    {
+        const ps2 = cpu0.devices.ps2;
+        if(ps2 && typeof ps2.port64_write === "function")
+        {
+            const orig_p64 = ps2.port64_write.bind(ps2);
+            ps2.port64_write = function(write_byte)
+            {
+                if(write_byte === 0xFE && (saw_lma || cpu0.is_64[0]))
+                {
+                    console.error("xp64: KBC reset command (port 64, 0xFE)");
+                }
+                return orig_p64(write_byte);
+            };
+        }
+    }
+    catch(_e)
+    {}
     const orig_main_loop = cpu0.main_loop.bind(cpu0);
     let last_log = Date.now();
     cpu0.main_loop = function()
@@ -1124,7 +1231,48 @@ emulator.add_listener("emulator-loaded", function()
         if(efer & EFER_LMA && !saw_lma)
         {
             saw_lma = true;
-            console.error("xp64: EFER.LMA " + dump_regs(cpu0));
+            lma_generation++;
+            console.error("xp64: EFER.LMA gen=" + lma_generation + " " + dump_regs(cpu0));
+        }
+        if(saw_lma && !(efer & EFER_LMA))
+        {
+            if(hold_timer)
+            {
+                clearTimeout(hold_timer);
+                hold_timer = null;
+            }
+            const why = "xp64: LMA dropped gen=" + lma_generation +
+                (saw_hw_reset ? " (hardware reset)" : " (not via reboot_internal)") +
+                "\nlast_lma=" + last_lma_line +
+                (last_reboot_dump ? "\nlast_reboot=" + last_reboot_dump.slice(0, 2000) : "");
+            saw_lma = false;
+            saw_is_64 = false;
+            logged_bugcheck = false;
+            logged_rsp_drop = false;
+            if(saw_bugcheck_data || !saw_hw_reset || lma_generation >= MAX_LMA_GENERATIONS)
+            {
+                finish(1, why);
+                return;
+            }
+            console.error(why + "\nxp64: continuing into next firmware boot");
+            saw_hw_reset = false;
+            last_reboot_dump = "";
+        }
+        if(cpu0.is_64[0] && !logged_bugcheck)
+        {
+            const rip = u64_from_pair(cpu0.rip64);
+            if(rip === NTOS_BUGCHECK)
+            {
+                logged_bugcheck = true;
+                try
+                {
+                    dump_bugcheck(cpu0);
+                }
+                catch(_e)
+                {}
+                console.error("xp64: KeBugCheckEx " + dump_regs(cpu0) +
+                    "\n" + dump_stuck(cpu0));
+            }
         }
         if(cpu0.is_64[0] && !logged_rsp_drop)
         {
@@ -1138,7 +1286,7 @@ emulator.add_listener("emulator-loaded", function()
         if(cpu0.is_64[0] && !saw_is_64)
         {
             saw_is_64 = true;
-            console.error("xp64: CS.L " + dump_regs(cpu0));
+            console.error("xp64: CS.L gen=" + lma_generation + " " + dump_regs(cpu0));
             console.log("xp64: entered long mode");
             try
             {
@@ -1146,8 +1294,18 @@ emulator.add_listener("emulator-loaded", function()
             }
             catch(_e)
             {}
+            if(hold_timer)
+            {
+                clearTimeout(hold_timer);
+            }
             hold_timer = setTimeout(() => {
-                finish(0, "xp64: pass (long mode held " + HOLD_MS + "ms)");
+                const efer_now = emulator.v86.cpu.efer[0] >>> 0;
+                if(!(efer_now & EFER_LMA))
+                {
+                    return;
+                }
+                finish(0, "xp64: pass (long mode held " + HOLD_MS +
+                    "ms gen=" + lma_generation + ")");
             }, HOLD_MS);
         }
         const now = Date.now();
@@ -1155,8 +1313,22 @@ emulator.add_listener("emulator-loaded", function()
         {
             last_log = now;
             const text = screen_text().split("\n").filter(Boolean).slice(-6).join(" | ");
-            console.error("xp64: " + dump_regs(cpu0) +
-                " pf=" + pf_count + (text ? " screen=[" + text + "]" : ""));
+            const rip = u64_from_pair(cpu0.rip64);
+            last_lma_line = dump_regs(cpu0) + " pf=" + pf_count +
+                " rip_bytes=" + dump_at(cpu0, rip, 32);
+            try
+            {
+                last_lma_line += " " + dump_bugcheck(cpu0);
+            }
+            catch(_e)
+            {}
+            console.error("xp64: " + last_lma_line + (text ? " screen=[" + text + "]" : ""));
+            if(LOGON_RE.test(screen_text()))
+            {
+                finish(0, "xp64: pass (logon text) gen=" + lma_generation +
+                    "\n" + last_lma_line);
+                return orig_main_loop();
+            }
             try
             {
                 const info = dump_vga(cpu0);
