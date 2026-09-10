@@ -2637,12 +2637,34 @@ pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPage
 //
 // 64-bit entries can describe physical addresses over 32 bits and an NX bit
 // (bit 63). Bit 63 is not a physical-address bit. Physical addresses above 32
-// bits are still unsupported.
-unsafe fn pte64_check_phys32(entry: i64) {
-    dbg_assert!(
-        entry as u64 & 0x000F_FFFF_0000_0000 == 0,
-        "Unsupported: Page table entry larger than 32 bits"
-    );
+// bits are still unsupported. Not-present entries (prototype/transition PTEs)
+// may use bits 32–51 as software fields; only present translations fault.
+const PTE64_PHYS_ABOVE_32: u64 = 0x000F_FFFF_0000_0000;
+
+unsafe fn pte64_has_phys_above_32(entry: i64) -> bool { entry as u64 & PTE64_PHYS_ABOVE_32 != 0 }
+
+unsafe fn fault_present_pte64(
+    entry: i64,
+    addr: u64,
+    for_writing: bool,
+    user: bool,
+    jit: bool,
+    side_effects: bool,
+    for_execute: bool,
+) -> OrPageFault<()> {
+    if entry as i32 & PAGE_TABLE_PRESENT_MASK == 0 {
+        if side_effects {
+            trigger_pagefault_virt(addr, false, for_writing, user, jit, for_execute);
+        }
+        return Err(());
+    }
+    if pte64_has_phys_above_32(entry) {
+        if side_effects {
+            trigger_pagefault_virt(addr, true, for_writing, user, jit, for_execute);
+        }
+        return Err(());
+    }
+    Ok(())
 }
 
 unsafe fn pte64_is_nx(entry: i64) -> bool { efer_nxe() && entry as u64 & PAGE_TABLE_NX_MASK != 0 }
@@ -2666,13 +2688,15 @@ unsafe fn walk_ia32e_to_pd(
 ) -> OrPageFault<Ia32eWalk> {
     let pml4_addr = (*cr.offset(3) as u32 & 0xFFFFF000) + ((((addr >> 39) & 0x1FF) as u32) << 3);
     let pml4e = memory::read64s(pml4_addr);
-    pte64_check_phys32(pml4e);
-    if pml4e as i32 & PAGE_TABLE_PRESENT_MASK == 0 {
-        if side_effects {
-            trigger_pagefault_virt(addr, false, for_writing, user, jit, for_execute);
-        }
-        return Err(());
-    }
+    fault_present_pte64(
+        pml4e,
+        addr,
+        for_writing,
+        user,
+        jit,
+        side_effects,
+        for_execute,
+    )?;
     *allow_write &= pml4e as i32 & PAGE_TABLE_RW_MASK != 0;
     *allow_user &= pml4e as i32 & PAGE_TABLE_USER_MASK != 0;
     *allow_exec &= !pte64_is_nx(pml4e);
@@ -2685,13 +2709,15 @@ unsafe fn walk_ia32e_to_pd(
 
     let pdpt_addr = (pml4e as u32 & 0xFFFFF000) + ((((addr >> 30) & 0x1FF) as u32) << 3);
     let pdpte = memory::read64s(pdpt_addr);
-    pte64_check_phys32(pdpte);
-    if pdpte as i32 & PAGE_TABLE_PRESENT_MASK == 0 {
-        if side_effects {
-            trigger_pagefault_virt(addr, false, for_writing, user, jit, for_execute);
-        }
-        return Err(());
-    }
+    fault_present_pte64(
+        pdpte,
+        addr,
+        for_writing,
+        user,
+        jit,
+        side_effects,
+        for_execute,
+    )?;
     *allow_write &= pdpte as i32 & PAGE_TABLE_RW_MASK != 0;
     *allow_user &= pdpte as i32 & PAGE_TABLE_USER_MASK != 0;
     *allow_exec &= !pte64_is_nx(pdpte);
@@ -2796,7 +2822,14 @@ pub unsafe fn do_page_walk(
                 Ia32eWalk::Pd(page_dir_addr) => {
                     allow_write_upper = allow_write;
                     let page_dir_entry = memory::read64s(page_dir_addr);
-                    pte64_check_phys32(page_dir_entry);
+                    if pte64_has_phys_above_32(page_dir_entry)
+                        && page_dir_entry as i32 & PAGE_TABLE_PRESENT_MASK != 0
+                    {
+                        if side_effects {
+                            trigger_pagefault(addr, true, for_writing, user, jit, for_execute);
+                        }
+                        return Err(());
+                    }
                     allow_exec &= !pte64_is_nx(page_dir_entry);
                     (page_dir_addr, page_dir_entry as i32)
                 },
@@ -2815,7 +2848,14 @@ pub unsafe fn do_page_walk(
             let page_dir_addr =
                 (pdpt_entry as u32 & 0xFFFFF000) + ((((addr as u32) >> 21) & 0x1FF) << 3);
             let page_dir_entry = memory::read64s(page_dir_addr);
-            pte64_check_phys32(page_dir_entry);
+            if pte64_has_phys_above_32(page_dir_entry)
+                && page_dir_entry as i32 & PAGE_TABLE_PRESENT_MASK != 0
+            {
+                if side_effects {
+                    trigger_pagefault(addr, true, for_writing, user, jit, for_execute);
+                }
+                return Err(());
+            }
             allow_exec &= !pte64_is_nx(page_dir_entry);
 
             (page_dir_addr, page_dir_entry as i32)
@@ -2880,7 +2920,14 @@ pub unsafe fn do_page_walk(
                     let page_table_addr =
                         (page_dir_entry as u32 & 0xFFFFF000) + (((addr as u32 >> 12) & 0x1FF) << 3);
                     let page_table_entry = memory::read64s(page_table_addr);
-                    pte64_check_phys32(page_table_entry);
+                    if pte64_has_phys_above_32(page_table_entry)
+                        && page_table_entry as i32 & PAGE_TABLE_PRESENT_MASK != 0
+                    {
+                        if side_effects {
+                            trigger_pagefault(addr, true, for_writing, user, jit, for_execute);
+                        }
+                        return Err(());
+                    }
                     allow_exec &= !pte64_is_nx(page_table_entry);
 
                     (page_table_addr, page_table_entry as i32)
@@ -3042,16 +3089,17 @@ unsafe fn do_page_walk_high(
         },
         Ia32eWalk::Pd(page_dir_addr) => {
             let page_dir_entry64 = memory::read64s(page_dir_addr);
-            pte64_check_phys32(page_dir_entry64);
+            fault_present_pte64(
+                page_dir_entry64,
+                addr,
+                for_writing,
+                user,
+                jit,
+                side_effects,
+                for_execute,
+            )?;
             allow_exec &= !pte64_is_nx(page_dir_entry64);
             let page_dir_entry = page_dir_entry64 as i32;
-
-            if page_dir_entry & PAGE_TABLE_PRESENT_MASK == 0 {
-                if side_effects {
-                    trigger_pagefault_virt(addr, false, for_writing, user, jit, for_execute);
-                }
-                return Err(());
-            }
 
             let kernel_write_override = !user && 0 == cr0 & CR0_WP;
             allow_write = allow_write && page_dir_entry & PAGE_TABLE_RW_MASK != 0;
@@ -3082,7 +3130,14 @@ unsafe fn do_page_walk_high(
                 let page_table_addr =
                     (page_dir_entry as u32 & 0xFFFFF000) + (((addr as u32 >> 12) & 0x1FF) << 3);
                 let page_table_entry64 = memory::read64s(page_table_addr);
-                pte64_check_phys32(page_table_entry64);
+                if page_table_entry64 as i32 & PAGE_TABLE_PRESENT_MASK != 0
+                    && pte64_has_phys_above_32(page_table_entry64)
+                {
+                    if side_effects {
+                        trigger_pagefault_virt(addr, true, for_writing, user, jit, for_execute);
+                    }
+                    return Err(());
+                }
                 allow_exec &= !pte64_is_nx(page_table_entry64);
                 let page_table_entry = page_table_entry64 as i32;
                 let present = page_table_entry & PAGE_TABLE_PRESENT_MASK != 0;
@@ -4163,7 +4218,9 @@ pub unsafe fn load_pdpte(cr3: i32) {
             }
             else {
                 // Bit 63 is NX/XD, not a physical address. Match walk_ia32e_to_pd.
-                pte64_check_phys32(pdpt_entry as i64);
+                if pte64_has_phys_above_32(pdpt_entry as i64) {
+                    pdpt_entry = 0;
+                }
             }
         }
         entries[i as usize] = pdpt_entry;

@@ -373,7 +373,12 @@ pd:
     dq 0x00000000000001E7
     times 7 dq 0
     dq 0x00000000010001E7
-    times 503 dq 0
+    times 119 dq 0
+    ; PDE[128] is VA 0xffffffff90000000. Not-present with bits 32–47 set
+    ; (prototype-style software fields). Checking phys>32 before Present
+    ; used to panic the debug wasm instead of delivering #PF.
+    dq 0x0000FFFF00000000
+    times 383 dq 0
 
 align 16
     times 4096 db 0
