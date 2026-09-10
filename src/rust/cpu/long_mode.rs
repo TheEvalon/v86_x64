@@ -1280,9 +1280,31 @@ unsafe fn dispatch_forced64(opcode: i32) {
                 return;
             }
             if modrm < 0xC0 {
-                let addr = return_on_pagefault!(modrm_resolve(modrm));
-                let value = return_on_pagefault!(pop64());
-                return_on_pagefault!(safe_write64(addr, value));
+                // Intel: RSP is incremented before the memory operand is
+                // evaluated (`pop [rsp]` uses the new RSP). Restore RSP if
+                // the store faults so the instruction is restartable.
+                // Re-stash `pending_linear64` on the dest: pop64 would leave
+                // it on the stack, and a dest whose low 32 bits are 4K+ from
+                // RSP would truncate to a low canonical VA.
+                let old_rsp = read_reg64(ESP);
+                let new_rsp = old_rsp.wrapping_add(8);
+                if gp_if_noncanonical(new_rsp) {
+                    return;
+                }
+                write_reg64(ESP, new_rsp);
+                let addr64 = match resolve_modrm64(modrm) {
+                    Err(()) => {
+                        write_reg64(ESP, old_rsp);
+                        return;
+                    },
+                    Ok(a) => a,
+                };
+                write_reg64(ESP, old_rsp);
+                *pending_linear64 = old_rsp;
+                let value = return_on_pagefault!(safe_read64s(old_rsp as i32));
+                *pending_linear64 = addr64;
+                return_on_pagefault!(safe_write64(addr64 as i32, value));
+                write_reg64(ESP, new_rsp);
             }
             else {
                 let value = return_on_pagefault!(pop64());

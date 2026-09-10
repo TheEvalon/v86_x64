@@ -183,6 +183,31 @@ high_entry:
     test ebx, ebx
     jz fail_1g
 
+    ; POP m64 into a higher-half page whose low 32 bits are >4K from RSP
+    ; (stack is in 0xffffffff8100xxxx). A leftover pending_linear64 from the
+    ; stack read used to truncate the store to VA 0x80001000 (unmapped).
+    mov rax, 0xFFFFFFFF80001000
+    mov rbx, 0x1122334455667788
+    mov qword [rax], 0
+    push rbx
+    pop qword [rax]
+    cmp qword [rax], rbx
+    jne fail_popm
+
+    ; 32-bit BTS with a bit offset one page away. bt_mem used i32
+    ; arithmetic and the 4K pending window, so the bit landed at a
+    ; truncated low VA instead of bitmap+0x1000.
+    lea rax, [bitmap]
+    xor ecx, ecx
+    mov [rax], ecx
+    mov [rax + 0x1000], ecx
+    mov ecx, 0x8000
+    bts dword [rax], ecx
+    test byte [rax + 0x1000], 1
+    jz fail_bts32
+    cmp byte [rax], 0
+    jne fail_bts32
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -239,6 +264,14 @@ fail_1g:
     mov al, 9
     out 0xF4, al
     jmp hang64
+fail_popm:
+    mov al, 10
+    out 0xF4, al
+    jmp hang64
+fail_bts32:
+    mov al, 11
+    out 0xF4, al
+    jmp hang64
 hang64:
     hlt
     jmp hang64
@@ -278,6 +311,10 @@ saved_cr2:
 align 16
     times 4096 db 0
 stack_high:
+
+align 4096
+bitmap:
+    times 8192 db 0
 
 high_end:
 

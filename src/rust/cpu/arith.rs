@@ -1015,14 +1015,31 @@ pub unsafe fn btr_reg(bit_base: i32, bit_offset: i32) -> i32 {
     return bit_base & !(1 << bit_offset);
 }
 
+/// Byte address of `BT/BTS/BTR/BTC m, r`. Memory form does not reduce the bit
+/// offset modulo operand size; the selected byte can be many pages from `base`.
+/// In 64-bit CS that displacement must be applied to the full canonical VA
+/// (`pending_linear64`), not the truncated i32 used by the 32-bit helpers.
+unsafe fn bit_mem_addr(virt_addr: i32, bit_offset: i32) -> i32 {
+    if *is_64 {
+        let base = virt64_from_i32(virt_addr);
+        let addr = base.wrapping_add((bit_offset as i64 >> 3) as u64);
+        *pending_linear64 = addr;
+        addr as i32
+    }
+    else {
+        virt_addr + (bit_offset >> 3)
+    }
+}
+
 pub unsafe fn bt_mem(virt_addr: i32, mut bit_offset: i32) {
-    let bit_base = return_on_pagefault!(safe_read8(virt_addr + (bit_offset >> 3)));
+    let bit_base = return_on_pagefault!(safe_read8(bit_mem_addr(virt_addr, bit_offset)));
     bit_offset &= 7;
     *flags = *flags & !1 | bit_base >> bit_offset & 1;
     *flags_changed &= !1;
 }
 pub unsafe fn btc_mem(virt_addr: i32, mut bit_offset: i32) {
-    let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
+    let phys_addr =
+        return_on_pagefault!(translate_address_write(bit_mem_addr(virt_addr, bit_offset)));
     let bit_base = memory::read8(phys_addr);
     bit_offset &= 7;
     *flags = *flags & !1 | bit_base >> bit_offset & 1;
@@ -1030,7 +1047,8 @@ pub unsafe fn btc_mem(virt_addr: i32, mut bit_offset: i32) {
     memory::write8(phys_addr, bit_base ^ 1 << bit_offset);
 }
 pub unsafe fn btr_mem(virt_addr: i32, mut bit_offset: i32) {
-    let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
+    let phys_addr =
+        return_on_pagefault!(translate_address_write(bit_mem_addr(virt_addr, bit_offset)));
     let bit_base = memory::read8(phys_addr);
     bit_offset &= 7;
     *flags = *flags & !1 | bit_base >> bit_offset & 1;
@@ -1038,7 +1056,8 @@ pub unsafe fn btr_mem(virt_addr: i32, mut bit_offset: i32) {
     memory::write8(phys_addr, bit_base & !(1 << bit_offset));
 }
 pub unsafe fn bts_mem(virt_addr: i32, mut bit_offset: i32) {
-    let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
+    let phys_addr =
+        return_on_pagefault!(translate_address_write(bit_mem_addr(virt_addr, bit_offset)));
     let bit_base = memory::read8(phys_addr);
     bit_offset &= 7;
     *flags = *flags & !1 | bit_base >> bit_offset & 1;

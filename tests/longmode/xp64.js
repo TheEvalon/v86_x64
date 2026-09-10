@@ -167,6 +167,7 @@ let saw_lma = false;
 let saw_is_64 = false;
 let hold_timer = null;
 let logged_fa80_pf = false;
+let logged_rsp_drop = false;
 let pf_count = 0;
 let last_screenshot_score = -1;
 
@@ -229,6 +230,12 @@ function phys_of_virt(cpu, virt)
         return null;
     }
     return Number((pte & 0xFFFFF000n) + (v & 0xFFFn));
+}
+
+function pte_selfmap_va(virt)
+{
+    // Windows IA-32e self-map: PML4[0x1ED] recursively maps the tables.
+    return 0xFFFFF68000000000n + ((as_u64(virt) >> 12n) << 3n);
 }
 
 function walk_virt(cpu, virt)
@@ -932,7 +939,7 @@ function dump_stuck(cpu)
         ["rdi", rdi],
         ["fa80:2000", 0xFFFFFA8000002000n],
         ["fa80:0c20", 0xFFFFFA8000000C20n],
-        ["selfmap-pte", 0xFFFFF687D4000010n],
+        ["selfmap-pte", pte_selfmap_va(0xFFFFFA8000002000n)],
         ["ntoskrnl", 0xFFFFF80001000000n],
         ["gdt", 0xFFFFF80000300000n],
         ["pcr-stack", 0xFFFFF80000308000n],
@@ -1022,6 +1029,15 @@ emulator.add_listener("emulator-loaded", function()
         {
             saw_lma = true;
             console.error("xp64: EFER.LMA " + dump_regs(cpu0));
+        }
+        if(cpu0.is_64[0] && !logged_rsp_drop)
+        {
+            const rsp = BigInt(cpu0.reg32[4] >>> 0) + (BigInt(cpu0.reg_high32[4] >>> 0) << 32n);
+            if(rsp >= 0xFFFFF80000300000n && rsp < 0xFFFFF80000304000n)
+            {
+                logged_rsp_drop = true;
+                console.error("xp64: PCR stack entered GDT pages\n" + dump_stuck(cpu0));
+            }
         }
         if(cpu0.is_64[0] && !saw_is_64)
         {

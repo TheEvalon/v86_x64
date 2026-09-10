@@ -2525,6 +2525,12 @@ pub unsafe fn translate_address_system_write(address: i32) -> OrPageFault<u32> {
 #[inline(always)]
 /// Rebuild a 64-bit linear address from the truncated i32 used by legacy
 /// memory helpers. Higher-half operands stash the full VA in `pending_linear64`.
+///
+/// The 4K window only covers split accesses of *that* VA (page-crossing
+/// `safe_read64`, FXSAVE, IRET). Each distinct linear address in an
+/// instruction must refresh `pending_linear64` first: `POP m64` after the
+/// stack read, `BT m,r` after applying the bit offset, and so on. A leftover
+/// pending from a far VA would otherwise translate as the low 32 bits.
 pub unsafe fn virt64_from_i32(address: i32) -> u64 {
     let pending = *pending_linear64;
     if pending <= 0xFFFF_FFFF {
