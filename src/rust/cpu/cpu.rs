@@ -2758,7 +2758,9 @@ pub unsafe fn do_page_walk(
         let mut allow_write = allow_write_upper && page_dir_entry & PAGE_TABLE_RW_MASK != 0;
         allow_user &= page_dir_entry & PAGE_TABLE_USER_MASK != 0;
 
-        if 0 != page_dir_entry & PAGE_TABLE_PSE_MASK && (lma || 0 != cr4 & CR4_PSE) {
+        // PAE 2MB pages use PDE.PS; CR4.PSE is ignored (Intel SDM). Legacy
+        // 4MB pages still need CR4.PSE. `pae` is also true when LMA is set.
+        if 0 != page_dir_entry & PAGE_TABLE_PSE_MASK && (pae || 0 != cr4 & CR4_PSE) {
             // size bit is set
 
             if for_execute && !allow_exec
