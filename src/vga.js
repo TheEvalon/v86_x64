@@ -1183,7 +1183,15 @@ VGAScreen.prototype.set_size_graphical = function(width, height, virtual_width, 
         }
         else
         {
-            // TODO: nodejs
+            const size = virtual_width * virtual_height;
+            const offset = this.cpu.svga_allocate_dest_buffer(size) >>> 0;
+            this.dest_buffet_offset = offset;
+            this.image_data = {
+                data: new Uint8ClampedArray(this.cpu.wasm_memory.buffer, offset, 4 * size),
+                width: virtual_width,
+                height: virtual_height,
+            };
+            this.cpu.svga_mark_dirty();
         }
 
         this.screen.set_size_graphical(width, height, virtual_width, virtual_height);
@@ -2521,7 +2529,9 @@ VGAScreen.prototype.screen_fill_buffer = function()
     {
         // wasm memory resized
         const buffer = new Uint8ClampedArray(this.cpu.wasm_memory.buffer, this.dest_buffet_offset, 4 * this.virtual_width * this.virtual_height);
-        this.image_data = new ImageData(buffer, this.virtual_width, this.virtual_height);
+        this.image_data = typeof ImageData !== "undefined" ?
+            new ImageData(buffer, this.virtual_width, this.virtual_height) :
+            { data: buffer, width: this.virtual_width, height: this.virtual_height };
         this.update_layers();
     }
 

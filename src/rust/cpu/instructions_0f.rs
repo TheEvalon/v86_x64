@@ -878,7 +878,7 @@ pub unsafe fn instr_0F20(r: i32, creg: i32) {
         },
         8 => {
             if *is_64 {
-                write_reg64(r, cr8);
+                write_reg64(r, crate::cpu::apic::read_cr8());
             }
             else {
                 undefined_instruction();
@@ -976,7 +976,7 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
         },
         8 => {
             if *is_64 {
-                cr8 = read_reg64(r) & 0xF;
+                crate::cpu::apic::set_cr8(read_reg64(r) & 0xF);
             }
             else {
                 undefined_instruction();
@@ -3604,11 +3604,11 @@ pub unsafe fn instr_0FA2() {
         },
 
         0x80000001 => {
-            // AMD64 feature flags: SYSCALL, NX, long mode.
+            // AMD64 feature flags: SYSCALL, NX, 1GB pages, long mode.
             eax = 0;
             ebx = 0;
             ecx = 1 << 0 | 1 << 8; // lahf_lm, prefetchw
-            edx = 1 << 11 | 1 << 20 | 1 << 27 | 1 << 29; // SCE, NX, RDTSCP, LM
+            edx = 1 << 11 | 1 << 20 | 1 << 26 | 1 << 27 | 1 << 29; // SCE, NX, PDPE1GB, RDTSCP, LM
         },
 
         0x80000008 => {

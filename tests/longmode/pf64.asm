@@ -174,6 +174,15 @@ high_entry:
     cmp rax, rcx
     jne fail_invlpg_cr2
 
+    ; 1GB page at VA 0x40000000 identity-maps phys 0. The relocated
+    ; payload at 16MB starts with `cld`.
+    mov rax, 0x41000000
+    cmp byte [rax], 0xFC
+    jne fail_1g
+    mov ebx, [rax]
+    test ebx, ebx
+    jz fail_1g
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -224,6 +233,10 @@ fail_invlpg_pf:
 
 fail_invlpg_cr2:
     mov al, 8
+    out 0xF4, al
+    jmp hang64
+fail_1g:
+    mov al, 9
     out 0xF4, al
     jmp hang64
 hang64:
@@ -288,7 +301,8 @@ pml4:
 align 4096
 pdpt:
     dq pd + 0x07
-    times 511 dq 0
+    dq 0x0000000000000183
+    times 510 dq 0
 
 align 4096
 pdpt_high:

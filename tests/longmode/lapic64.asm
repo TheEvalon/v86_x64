@@ -105,6 +105,22 @@ en_ok:
     cmp eax, 0x50014
     jne fail_mmio
 
+    ; CR8 aliases local APIC TPR[7:4].
+    mov rax, 2
+    mov cr8, rax
+    mov rbx, cr8
+    cmp rbx, 2
+    jne fail_cr8
+    mov rsi, 0xFEE00080
+    mov eax, [rsi]
+    cmp eax, 0x20
+    jne fail_cr8
+    xor eax, eax
+    mov cr8, rax
+    mov eax, [rsi]
+    test eax, eax
+    jnz fail_cr8
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -131,6 +147,11 @@ fail_en:
 
 fail_mmio:
     mov al, 6
+    out 0xF4, al
+    jmp hang64
+
+fail_cr8:
+    mov al, 7
     out 0xF4, al
     jmp hang64
 
