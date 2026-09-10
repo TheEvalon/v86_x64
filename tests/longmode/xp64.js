@@ -167,6 +167,8 @@ let saw_lma = false;
 let saw_is_64 = false;
 let hold_timer = null;
 let logged_fa80_pf = false;
+let pf_count = 0;
+let last_screenshot_score = -1;
 
 function u64_from_pair(view)
 {
@@ -792,6 +794,17 @@ function dump_vga(cpu)
     }
 }
 
+function dump_stack_ptes(cpu)
+{
+    const parts = [];
+    for(let off = 0; off <= 0x8000; off += 0x1000)
+    {
+        const va = 0xFFFFF80000300000n + BigInt(off);
+        parts.push(hex64(va) + " " + walk_virt(cpu, va));
+    }
+    return parts.join("\n");
+}
+
 function scan_irq_frames(cpu)
 {
     const top = 0xFFFFF80000308000n;
@@ -936,6 +949,8 @@ function dump_stuck(cpu)
         "\nioapic=" + dump_ioapic(cpu) +
         "\npic=" + dump_pic(cpu) +
         "\n" + scan_irq_frames(cpu) +
+        "\npf_count=" + pf_count +
+        "\nstack_ptes:\n" + dump_stack_ptes(cpu) +
         "\nvga=" + dump_vga(cpu) +
         "\ngdt_mem=" + dump_stack_words(cpu, 0xFFFFF80000300000n, 8) +
         "\nrsp_mem=" + dump_stack_words(cpu, BigInt(cpu.reg32[4] >>> 0) + (BigInt(cpu.reg_high32[4] >>> 0) << 32n), 8);
@@ -1024,11 +1039,24 @@ emulator.add_listener("emulator-loaded", function()
             }, HOLD_MS);
         }
         const now = Date.now();
-        if(now - last_log >= 5000)
+        if(now - last_log >= 2000)
         {
             last_log = now;
             const text = screen_text().split("\n").filter(Boolean).slice(-6).join(" | ");
-            console.error("xp64: " + dump_regs(cpu0) + (text ? " screen=[" + text + "]" : ""));
+            console.error("xp64: " + dump_regs(cpu0) +
+                " pf=" + pf_count + (text ? " screen=[" + text + "]" : ""));
+            try
+            {
+                const info = dump_vga(cpu0);
+                const score = (info.match(/printable=([0-9]+)/) || [0, "0"])[1] | 0;
+                if(score > last_screenshot_score)
+                {
+                    last_screenshot_score = score;
+                    save_boot_screenshot("live");
+                }
+            }
+            catch(_e)
+            {}
         }
         return orig_main_loop();
     };
@@ -1036,14 +1064,18 @@ emulator.add_listener("emulator-loaded", function()
     emulator.cpu_exception_hook = function(n)
     {
         const cpu = emulator.v86.cpu;
-        if(n === 14 && !logged_fa80_pf)
+        if(n === 14)
         {
-            const cr2 = u64_from_pair(cpu.cr2_64);
-            if((cr2 >> 32n) === 0xFFFFFA80n)
+            pf_count++;
+            if(n === 14 && !logged_fa80_pf)
             {
-                logged_fa80_pf = true;
-                console.error("xp64: first session-pool #PF cr2=" + hex64(cr2) +
-                    "\n" + dump_stuck(cpu));
+                const cr2 = u64_from_pair(cpu.cr2_64);
+                if((cr2 >> 32n) === 0xFFFFFA80n)
+                {
+                    logged_fa80_pf = true;
+                    console.error("xp64: first session-pool #PF #" + pf_count +
+                        " cr2=" + hex64(cr2) + "\n" + dump_stuck(cpu));
+                }
             }
             return false;
         }
