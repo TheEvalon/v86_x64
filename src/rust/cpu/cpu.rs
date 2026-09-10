@@ -6004,10 +6004,10 @@ pub unsafe fn store_current_tsc() { *current_tsc = read_tsc(); }
 #[no_mangle]
 pub unsafe fn handle_irqs() {
     if *flags & FLAG_INTERRUPT != 0 {
-        // Long mode always uses the local APIC. The 8259 is still wired here,
-        // so acknowledging it first would bypass CR8/TPR and nest IRQ8 on the
-        // 32KB PCR stack until it overwrote the GDT.
-        if !efer_lma() {
+        // With ACPI/IOAPIC, skip the 8259 after LMA: acknowledging PIC first
+        // bypasses CR8/TPR and nested IRQ8 on XP's PCR stack into the GDT.
+        // Without ACPI (linux64 `acpi=off`) the PIT is PIC-only, so keep 8259.
+        if !(efer_lma() && *acpi_enabled) {
             if let Some(irq) = pic::pic_acknowledge_irq() {
                 pic_call_irq(irq);
                 return;
