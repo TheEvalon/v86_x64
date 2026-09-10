@@ -279,6 +279,14 @@ after_call_target:
     cmp rax, rbx
     jne fail_andimm
 
+    ; REX.W overrides 66h: 66 48 B8 + imm64 is MOV r64, not MOV AX,imm16.
+    xor eax, eax
+    db 0x66
+    mov rax, 0x0123456789ABCDEF
+    mov rbx, 0x0123456789ABCDEF
+    cmp rax, rbx
+    jne fail_66rexw
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -340,6 +348,13 @@ fail_andimm:
 .hang_andimm:
     hlt
     jmp .hang_andimm
+
+fail_66rexw:
+    mov al, 9
+    out 0xF4, al
+.hang_66rexw:
+    hlt
+    jmp .hang_66rexw
 
 align 8
 scratch:

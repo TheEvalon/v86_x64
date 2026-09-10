@@ -2006,6 +2006,44 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
     finish_instruction();
 }
 
+/// 16-bit operand size in 64-bit CS for opcodes that encode a GPR in the
+/// opcode byte. The 16-bit interpreter hardcodes AX..DI, so `66 41 BC 20 00`
+/// (`mov r12w, 0x20`) used to run `mov sp, 0x20` and drop RSP into the GDT.
+unsafe fn dispatch_osize16_64(opcode: i32) -> bool {
+    match opcode {
+        0xB0..=0xB7 => {
+            // Byte MOV ignores 66h; still honor REX.B (`66 41 B0` is r8b).
+            let imm = match read_imm8() {
+                Ok(o) => o,
+                Err(()) => return true,
+            };
+            write_reg8(gpr_opcode(opcode), imm);
+            finish_instruction();
+            true
+        },
+        0xB8..=0xBF => {
+            let imm = match read_imm16() {
+                Ok(o) => o,
+                Err(()) => return true,
+            };
+            write_reg16(gpr_opcode(opcode), imm);
+            finish_instruction();
+            true
+        },
+        0x90..=0x97 => {
+            let r = gpr_opcode(opcode);
+            if r != EAX {
+                let a = read_reg16(EAX);
+                write_reg16(EAX, read_reg16(r));
+                write_reg16(r, a);
+            }
+            finish_instruction();
+            true
+        },
+        _ => false,
+    }
+}
+
 unsafe fn dispatch_opcode(opcode: i32) {
     current_interp_opcode = opcode as u32 | 0x100;
     current_interp_0f = false;
@@ -2039,12 +2077,16 @@ unsafe fn dispatch_opcode(opcode: i32) {
         finish_instruction();
         return;
     }
-    if !is_osize_32() {
-        run_legacy_opcode(opcode);
-        return;
-    }
+    // REX.W wins over 66h (`66 48 B8` is MOV r64, imm64, not MOV AX, imm16).
     if rex_w() && !opcode_ignores_rex_w(opcode) {
         dispatch_rex_w(opcode);
+        return;
+    }
+    if !is_osize_32() {
+        if dispatch_osize16_64(opcode) {
+            return;
+        }
+        run_legacy_opcode(opcode);
         return;
     }
     if *rex_prefix != 0 && dispatch_rex_legacy(opcode) {
@@ -2245,6 +2287,9 @@ mod tests {
         assert!(!opcode_is_forced64(0x83));
         assert!(opcode_is_forced64(0x9C));
         assert!(opcode_is_forced64(0x68));
+        // B8+r keeps 66h operand size (16-bit) but must honor REX.B.
+        assert!(!opcode_is_forced64(0xB8));
+        assert!(!opcode_is_forced64(0xBC));
     }
 
     #[test]

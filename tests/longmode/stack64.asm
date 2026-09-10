@@ -129,6 +129,39 @@ start64:
     cmp rsp, r8
     jne fail66
 
+    ; 66h + REX.B MOV r16,imm16 must honor REX.B. Opcode BC is SP in the
+    ; 16-bit table, so `66 41 BC 20 00` used to write SP=0x20 and drop RSP
+    ; into the GDT (XP INIT at fffff8000141302f).
+    mov r12, 0x1111111111111111
+    mov r13, 0x2222222222222222
+    mov r8, rsp
+    mov r12w, 0x20
+    cmp rsp, r8
+    jne fail66
+    mov rax, 0x1111111111110020
+    cmp r12, rax
+    jne fail66
+    mov r13w, 0x10
+    cmp rsp, r8
+    jne fail66
+    mov rax, 0x2222222222220010
+    cmp r13, rax
+    jne fail66
+
+    ; 66h without REX is still MOV SP,imm16 (low 16 of RSP only).
+    mov r8, rsp
+    mov r9, rsp
+    and r9, 0xFFFFFFFFFFFF0000
+    or r9, 0x73B0
+    mov rsp, r9
+    mov sp, 0x20
+    mov rax, r9
+    and rax, 0xFFFFFFFFFFFF0000
+    or rax, 0x20
+    cmp rsp, rax
+    jne fail66
+    mov rsp, r8
+
     xor eax, eax
     out 0xF4, al
 .ok:
