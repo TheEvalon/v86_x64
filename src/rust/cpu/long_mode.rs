@@ -373,6 +373,32 @@ unsafe fn dispatch_hint_nop() {
     }
 }
 
+/// Two-byte escape after prefixes (and optional REX) have been consumed.
+///
+/// 66h is operand-size for integer 0F ops. Always using the 32-bit table made
+/// `66 0F B1` (CMPXCHG r/m16) compare EAX against a dword and write 32 bits.
+/// XP's MMPFN ReferenceCount is a word next to flags; that clobber (or a
+/// failed compare that skips the decrement) corrupts the PFN database.
+/// Jcc (`0F 80–8F`) ignores 66h in 64-bit CS and keeps a 32-bit displacement.
+unsafe fn dispatch_two_byte(opcode: i32) {
+    if is_hint_nop(opcode) {
+        dispatch_hint_nop();
+        finish_instruction();
+        return;
+    }
+    if rex_w() {
+        dispatch_rex_w_0f(opcode);
+        return;
+    }
+    if !is_osize_32() && !matches!(opcode, 0x80..=0x8F) {
+        run_instruction0f_16(opcode);
+    }
+    else {
+        run_instruction0f_32(opcode);
+    }
+    finish_instruction();
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum String64 {
     Movs,
@@ -2135,17 +2161,7 @@ pub unsafe fn run_one() {
                 let opcode = return_on_pagefault!(read_imm8());
                 if opcode == 0x0F {
                     let opcode = return_on_pagefault!(read_imm8());
-                    if is_hint_nop(opcode) {
-                        dispatch_hint_nop();
-                        finish_instruction();
-                    }
-                    else if rex_w() {
-                        dispatch_rex_w_0f(opcode);
-                    }
-                    else {
-                        run_instruction0f_32(opcode);
-                        finish_instruction();
-                    }
+                    dispatch_two_byte(opcode);
                     return;
                 }
                 dispatch_opcode(opcode);
@@ -2153,17 +2169,7 @@ pub unsafe fn run_one() {
             },
             0x0F => {
                 let opcode = return_on_pagefault!(read_imm8());
-                if is_hint_nop(opcode) {
-                    dispatch_hint_nop();
-                    finish_instruction();
-                }
-                else if rex_w() {
-                    dispatch_rex_w_0f(opcode);
-                }
-                else {
-                    run_instruction0f_32(opcode);
-                    finish_instruction();
-                }
+                dispatch_two_byte(opcode);
                 return;
             },
             _ => {

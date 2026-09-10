@@ -1,4 +1,4 @@
-; Multiboot payload: CMPXCHG8B, CMPXCHG16B, CMPXCHG r64, XCHG r64, CMP r64, and CPUID.1 CX16 in long mode.
+; Multiboot payload: CMPXCHG8B, CMPXCHG16B, CMPXCHG r64/r16, XCHG r64, CMP r64, and CPUID.1 CX16 in long mode.
 ; Exit code is written to port 0xF4 (0 = pass).
 
 BITS 32
@@ -160,6 +160,31 @@ start64:
     cmp rax, rbx
     jne fail_cx_match
 
+    ; 66 0F B1 CMPXCHG r/m16. Must not run as 32-bit: XP MMPFN ReferenceCount
+    ; is a word at +0x18 with flags in the next word. A dword compare of
+    ; EAX=refcount vs [m]=refcount|flags<<16 fails, or a dword store zeros flags.
+    mov dword [m16], 0xAABB0002
+    mov eax, 2
+    mov ecx, 1
+    cmpxchg word [m16], cx
+    jnz fail_cx16w
+    cmp word [m16], 1
+    jne fail_cx16w
+    cmp word [m16 + 2], 0xAABB
+    jne fail_cx16w
+    cmp eax, 2
+    jne fail_cx16w
+
+    mov dword [m16], 0xAABB0005
+    mov eax, 2
+    mov ecx, 9
+    cmpxchg word [m16], cx
+    jz fail_cx16w_miss
+    cmp eax, 5
+    jne fail_cx16w_miss
+    cmp dword [m16], 0xAABB0005
+    jne fail_cx16w_miss
+
     ; XCHG r64 swaps the full 64-bit registers. 32-bit XCHG would leave
     ; the high halves in place (both sources are 0 below 2^32).
     mov rax, 0x100000000
@@ -257,6 +282,16 @@ fail_cmp:
     out 0xF4, al
     jmp hang64
 
+fail_cx16w:
+    mov al, 13
+    out 0xF4, al
+    jmp hang64
+
+fail_cx16w_miss:
+    mov al, 14
+    out 0xF4, al
+    jmp hang64
+
 hang64:
     hlt
     jmp hang64
@@ -293,6 +328,10 @@ align 8
 m64:
     dd 0xA1A2A3A4
     dd 0xB1B2B3B4
+
+align 4
+m16:
+    dd 0
 
 align 16
 m128:
