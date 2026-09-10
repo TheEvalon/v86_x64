@@ -776,6 +776,26 @@ function dump_bytes_va(cpu, virt, n)
     return hex64(virt) + " [" + bytes.join(" ") + "]";
 }
 
+function dump_cstr(cpu, va, n)
+{
+    const phys = phys_of_virt(cpu, va);
+    if(phys === null)
+    {
+        return hex64(va) + " unmapped";
+    }
+    const chars = [];
+    for(let i = 0; i < n; i++)
+    {
+        const c = cpu.mem8[phys + i];
+        if(c === 0)
+        {
+            break;
+        }
+        chars.push(c >= 32 && c < 127 ? String.fromCharCode(c) : ".");
+    }
+    return hex64(va) + " \"" + chars.join("") + "\"";
+}
+
 function dump_ustr(cpu, va)
 {
     const phys = phys_of_virt(cpu, va);
@@ -814,9 +834,10 @@ function dump_bugcheck(cpu)
         words.push(v === null ? "unmapped" : hex64(v));
         if(looks_kernel_ptr(v))
         {
-            extra.push("p" + i + "_raw=" + dump_bytes_va(cpu, v, 16));
+            extra.push("p" + i + "_raw=" + dump_bytes_va(cpu, v, 32));
+            extra.push("p" + i + "_cstr=" + dump_cstr(cpu, v, 64));
             extra.push("p" + i + "_ustr=" + dump_ustr(cpu, v));
-            extra.push("p" + i + "_utf16=" + JSON.stringify(utf16_at(cpu, v, 64)));
+            extra.push("p" + i + "_utf16=" + JSON.stringify(utf16_at(cpu, v, 80)));
         }
     }
     const gs = u64_from_pair(cpu.msr_gs_base);
@@ -831,7 +852,9 @@ function dump_bugcheck(cpu)
             " +1a8=" + (p1 === null ? "unmapped" : hex64(p1));
     }
     return "KiBugCheckData=" + words.join(" ") + " " + prcb +
-        (extra.length ? "\n" + extra.join("\n") : "");
+        (extra.length ? "\n" + extra.join("\n") : "") +
+        "\nNtSystemRoot+30=" + JSON.stringify(utf16_at(cpu, 0xFFFFF78000000030n, 80)) +
+        "\nNtSystemRoot+260=" + JSON.stringify(utf16_at(cpu, 0xFFFFF78000000260n, 80));
 }
 
 function dump_reboot(cpu)
