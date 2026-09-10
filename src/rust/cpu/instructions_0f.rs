@@ -3521,7 +3521,11 @@ pub unsafe fn instr_0FA2() {
         },
 
         1 => {
-            eax = 3 | 7 << 4 | 6 << 8; // pentium3
+            // Pentium 4 / Nocona (family 15, model 4, stepping 3). Family 6
+            // model 7 is a Pentium III: XP x64's KiInitializeKernel treats that
+            // as impossible with EFER.LMA and DbgBreakPoint's into KeBugCheck
+            // 0x1E (KMODE_EXCEPTION_NOT_HANDLED).
+            eax = 3 | 4 << 4 | 0xF << 8;
             ebx = 1 << 16 | 8 << 8; // cpu count, clflush size
             ecx = 1 << 0 | 1 << 13 | 1 << 23 | 1 << 30; // sse3, cx16, popcnt, rdrand
             let vme = 0 << 1;
