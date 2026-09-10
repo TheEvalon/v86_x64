@@ -647,8 +647,18 @@ function save_boot_screenshot(label)
         fs.mkdirSync(path.dirname(dest), { recursive: true });
         try
         {
-            emulator.v86.cpu.devices.vga.complete_redraw();
-            emulator.v86.cpu.devices.vga.screen_fill_buffer();
+            const vga = emulator.v86.cpu.devices.vga;
+            // complete_redraw only dirties the pixel cache. Planar VGA still
+            // needs a replot from plane0–3 or dest_buffer stays black.
+            if(typeof vga.complete_replot === "function")
+            {
+                vga.complete_replot();
+            }
+            else
+            {
+                vga.complete_redraw();
+            }
+            vga.screen_fill_buffer();
         }
         catch(_e)
         {}
@@ -798,8 +808,43 @@ function dump_vga(cpu)
         {
             hex0.push(("0" + mem[i].toString(16)).slice(-2));
         }
+        function plane_nz(arr)
+        {
+            if(!arr)
+            {
+                return 0;
+            }
+            let n = 0;
+            for(let i = 0; i < arr.length; i++)
+            {
+                if(arr[i])
+                {
+                    n++;
+                }
+            }
+            return n;
+        }
+        const p0 = plane_nz(vga.plane0);
+        const p1 = plane_nz(vga.plane1);
+        const p2 = plane_nz(vga.plane2);
+        const p3 = plane_nz(vga.plane3);
+        let svga_nz = 0;
+        const svga_mem = vga.svga_memory;
+        if(svga_mem)
+        {
+            const n = Math.min(svga_mem.length, 1024 * 1024);
+            for(let i = 0; i < n; i++)
+            {
+                if(svga_mem[i])
+                {
+                    svga_nz++;
+                }
+            }
+        }
         return "graphical=" + (+vga.graphical_mode) +
             " svga=" + (+vga.svga_enabled) +
+            " bpp=" + (vga.svga_bpp || 0) +
+            " size=" + (vga.screen_width || 0) + "x" + (vga.screen_height || 0) +
             " attr=" + hex64(vga.attribute_mode >>> 0) +
             " crtc=" + hex64(vga.crtc_mode >>> 0) +
             " cols=" + (vga.max_cols || 0) +
@@ -808,6 +853,8 @@ function dump_vga(cpu)
             " text_nz=" + nonzero +
             " printable=" + printable +
             " font_nz=" + font_nz +
+            " plane_nz=" + p0 + "," + p1 + "," + p2 + "," + p3 +
+            " svga_nz=" + svga_nz +
             " mem0=" + hex0.join(" ") +
             "\nvga_text:\n" + rows.filter(Boolean).join("\n");
     }
