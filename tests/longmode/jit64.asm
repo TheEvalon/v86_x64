@@ -80,14 +80,43 @@ start64:
     cmp eax, ITERATIONS
     jne fail64
 
+    ; Non-REX `mov r32, [r/m]` must use 64-bit RAX, not truncated EAX.
+    ; Map linear 4GiB+low_buf to phys 2MiB+low_buf (distinct from identity).
+    lea rbx, [low_buf]
+    mov dword [rbx], 0x11111111
+    mov rax, rbx
+    mov rcx, 0x0000000100000000
+    or rax, rcx
+    ; REX.W store: interpreter writes the high mapping, not the low sentinel.
+    mov qword [rax], 0x22222222
+    cmp dword [rbx], 0x11111111
+    jne fail_clobber
+    mov rcx, [rax]
+    cmp rcx, 0x22222222
+    jne fail_map
+    ; 8B 18: mov ebx, [rax] -- no REX. Must read the high sentinel.
+    mov ebx, [rax]
+    cmp ebx, 0x22222222
+    jne fail_trunc
+
     xor eax, eax
     out 0xF4, al
 .ok:
     hlt
     jmp .ok
 
+fail_map:
+    mov al, 2
+    jmp fail_out
+fail_clobber:
+    mov al, 3
+    jmp fail_out
+fail_trunc:
+    mov al, 4
+    jmp fail_out
 fail64:
     mov al, 1
+fail_out:
     out 0xF4, al
 .bad:
     hlt
@@ -112,12 +141,24 @@ pml4:
 align 4096
 pdpt:
     dq pd + 0x07
-    times 511 dq 0
+    times 3 dq 0
+    dq pd_4g + 0x07
+    times 507 dq 0
 
 align 4096
 pd:
     dq 0x00000000000001E7
     times 511 dq 0
+
+align 4096
+pd_4g:
+    dq 0x00000000002001E7
+    times 511 dq 0
+
+align 16
+low_buf:
+    dd 0
+    dd 0
 
 align 16
     times 4096 db 0

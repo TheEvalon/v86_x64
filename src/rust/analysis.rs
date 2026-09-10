@@ -131,7 +131,13 @@ pub fn opcode_needs_long_trampoline(
         // 64-bit string/LOOP use RSI/RDI/RCX; the 32-bit JIT helpers do not.
         return true;
     }
-    !addrsize_override && opcode_has_modrm(opcode) && next & 0xC7 == 0x05
+    // Non-REX memory operands still use 64-bit addressing in 64-bit CS
+    // (`mov ebx, [rax]` with RAX above 4GiB). The 32-bit JIT helpers
+    // read EAX and truncate. 67h keeps 32-bit asize, so those stay JIT.
+    if !addrsize_override && opcode_has_modrm(opcode) && next < 0xC0 {
+        return true;
+    }
+    false
 }
 
 fn peek_imm8(cpu: &CpuContext) -> u8 {
@@ -258,11 +264,14 @@ mod tests {
     }
 
     #[test]
-    fn trampoline_rip_rel_modrm_and_forced64() {
+    fn trampoline_memory_modrm_in_long_cs() {
         assert!(opcode_has_modrm(0x8B));
         assert!(!opcode_has_modrm(0x75));
         assert!(opcode_needs_long_trampoline(0, 0x8B, 0x05, false));
+        assert!(opcode_needs_long_trampoline(0, 0x8B, 0x18, false));
+        assert!(opcode_needs_long_trampoline(0, 0xC7, 0x44, false));
         assert!(!opcode_needs_long_trampoline(0, 0x8B, 0x05, true));
+        assert!(!opcode_needs_long_trampoline(0, 0x8B, 0x18, true));
         assert!(!opcode_needs_long_trampoline(0, 0x8B, 0xC3, false));
         assert!(opcode_needs_long_trampoline(0, 0xE8, 0, false));
         assert!(opcode_needs_long_trampoline(0, 0xA4, 0, false));
