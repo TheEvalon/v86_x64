@@ -1976,7 +1976,17 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
             }
         }
 
-        dbg_assert!((eip as u32) <= info.effective_limit(), "todo: #gp");
+        // IA-32e CS.L does not use the segment limit.
+        if !(efer_lma() && info.is_long()) && (eip as u32) > info.effective_limit() {
+            dbg_log!(
+                "#gp far jump eip={:x} > limit={:x} sel={:x}",
+                eip as u32,
+                info.effective_limit(),
+                selector
+            );
+            trigger_gp(selector & !3);
+            return;
+        }
 
         update_cs_from_descriptor(info);
 
@@ -2758,7 +2768,9 @@ pub unsafe fn do_page_walk(
         let mut allow_write = allow_write_upper && page_dir_entry & PAGE_TABLE_RW_MASK != 0;
         allow_user &= page_dir_entry & PAGE_TABLE_USER_MASK != 0;
 
-        if 0 != page_dir_entry & PAGE_TABLE_PSE_MASK && (lma || 0 != cr4 & CR4_PSE) {
+        // PAE 2MB pages use PDE.PS; CR4.PSE is ignored (Intel SDM). Legacy
+        // 4MB pages still need CR4.PSE. `pae` is also true when LMA is set.
+        if 0 != page_dir_entry & PAGE_TABLE_PSE_MASK && (pae || 0 != cr4 & CR4_PSE) {
             // size bit is set
 
             if for_execute && !allow_exec
@@ -3981,7 +3993,7 @@ pub unsafe fn set_cr0(cr0: i32) {
         && *cr.offset(4) & CR4_PAE != 0
         && old_cr0 & (CR0_CD | CR0_NW | CR0_PG) != cr0 & (CR0_CD | CR0_NW | CR0_PG)
     {
-        load_pdpte(*cr.offset(3))
+        load_pdpte(*cr.offset(3));
     }
 
     *protected_mode = (*cr & CR0_PE) == CR0_PE;
@@ -4015,21 +4027,27 @@ pub unsafe fn set_cr3(mut cr3: i32) {
 
 pub unsafe fn load_pdpte(cr3: i32) {
     dbg_assert!(cr3 & 0b1111 == 0);
+    let mut entries = [0u64; 4];
     for i in 0..4 {
         let mut pdpt_entry = memory::read64s(cr3 as u32 + 8 * i as u32) as u64;
         pdpt_entry &= !0b1110_0000_0000;
-        dbg_assert!(pdpt_entry & 0b11000 == 0, "TODO");
-        dbg_assert!(
-            pdpt_entry as u64 & 0xFFFF_FFFF_0000_0000 == 0,
-            "Unsupported: PDPT entry larger than 32 bits"
-        );
         if pdpt_entry as i32 & PAGE_TABLE_PRESENT_MASK != 0 {
-            dbg_assert!(
-                pdpt_entry & 0b1_1110_0110 == 0,
-                "TODO: #gp reserved bit in pdpte"
-            );
+            // Bits 1–2 and 5–8 are reserved in a PAE PDPTE. SeaBIOS with ACPI
+            // can MOV CR3 to a 32-bit page directory after setting PAE; those
+            // 64-bit reads look like reserved bits. Treat them as not-present
+            // instead of #GP (real-mode / early firmware has no #GP handler).
+            if pdpt_entry & 0b1_1110_0110 != 0 {
+                pdpt_entry = 0;
+            }
+            else {
+                // Bit 63 is NX/XD, not a physical address. Match walk_ia32e_to_pd.
+                pte64_check_phys32(pdpt_entry as i64);
+            }
         }
-        *reg_pdpte.offset(i) = pdpt_entry;
+        entries[i as usize] = pdpt_entry;
+    }
+    for i in 0..4 {
+        *reg_pdpte.offset(i) = entries[i as usize];
     }
 }
 

@@ -1,6 +1,6 @@
-; Multiboot payload: EFER.NXE instruction-fetch #PF on an NX 4K page.
-; Data reads of that page must succeed. Exit code is written to port 0xF4
-; (0 = pass).
+; Multiboot payload: load a legacy PAE PDPTE with NX (bit 63) while LME is
+; still clear — XP x64 NTLDR does this — then enter long mode and #PF on an
+; NX 4K fetch. Data reads of that page must succeed. Port 0xF4 (0 = pass).
 
 BITS 32
 ORG 0x100000
@@ -40,6 +40,17 @@ _start:
     mov eax, cr4
     or eax, 1 << 5
     mov cr4, eax
+
+    ; Legacy PAE + NX in the PDPTE, paging on, LME still 0.
+    mov eax, pae_pdpt
+    mov cr3, eax
+    mov eax, cr0
+    or eax, 1 | (1 << 31)
+    mov cr0, eax
+    mov eax, [0x100000]
+    mov eax, cr0
+    and eax, 0x7FFFFFFF
+    mov cr0, eax
 
     mov eax, pml4
     mov cr3, eax
@@ -160,6 +171,19 @@ idt_end:
 idt_desc:
     dw idt_end - idt - 1
     dq idt
+
+; 4-entry PAE PDPT (not the 512-entry IA-32e PDPT). Bit 63 = NX.
+align 32
+pae_pdpt:
+    dq pae_pd + 0x8000000000000001
+    dq 0
+    dq 0
+    dq 0
+
+align 4096
+pae_pd:
+    dq 0x00000000000001E7
+    times 511 dq 0
 
 align 4096
 pml4:
