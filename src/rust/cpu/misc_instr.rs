@@ -425,6 +425,10 @@ pub unsafe fn setcc_mem(condition: bool, addr: i32) {
     return_on_pagefault!(safe_write8(addr, condition as i32));
 }
 
+/// FXSAVE64 / FXRSTOR64 (`REX.W 0F AE /0` and `/1`). Legacy `0F AE` in
+/// 64-bit CS still uses the 32-bit image (XMM0–7, 32-bit FIP/FDP).
+unsafe fn is_fxsave64() -> bool { *is_64 && *rex_prefix & crate::cpu::long_mode::REX_W != 0 }
+
 pub unsafe fn fxsave(addr: i32) {
     if addr & 0xF != 0 {
         if *is_64 {
@@ -434,6 +438,9 @@ pub unsafe fn fxsave(addr: i32) {
         dbg_assert!(false, "TODO: #gp");
     }
 
+    let fxsave64 = is_fxsave64();
+    // 64-bit CS: the architectural operand is 512 bytes even without REX.W.
+    // Reserved bytes are not written (see below).
     let nbytes = if *is_64 { 512 } else { 288 };
     return_on_pagefault!(writable_or_pagefault(addr, nbytes));
 
@@ -441,7 +448,7 @@ pub unsafe fn fxsave(addr: i32) {
     safe_write16(addr + 2, fpu_load_status_word().into()).unwrap();
     safe_write8(addr + 4, !*fpu_stack_empty as i32 & 0xFF).unwrap();
     safe_write16(addr + 6, *fpu_opcode).unwrap();
-    if *is_64 {
+    if fxsave64 {
         // FXSAVE64: 64-bit FIP/FDP, no FCS/FDS. Stored FIP/FDP are still 32-bit.
         safe_write64(addr + 8, *fpu_ip as u32 as u64).unwrap();
         safe_write64(addr + 16, *fpu_dp as u32 as u64).unwrap();
@@ -468,16 +475,16 @@ pub unsafe fn fxsave(addr: i32) {
         safe_write128(addr + 160 + (i << 4), *reg_xmm.offset(i as isize)).unwrap();
     }
 
-    if *is_64 {
+    if fxsave64 {
         for i in 0..8 {
             safe_write128(addr + 288 + (i << 4), *xmm_ptr(8 + i)).unwrap();
         }
-        // Reserved +416..511 stay zeros (6 more 16-byte slots).
-        let zero = reg128 { u64: [0, 0] };
-        for i in 0..6 {
-            safe_write128(addr + 416 + (i << 4), zero).unwrap();
-        }
     }
+    // Do not write reserved bytes. Legacy FXSAVE in 64-bit CS leaves 288–511
+    // untouched; FXSAVE64 leaves 416–511. XP x64 KiSwapContext does
+    // `fxsave [InitialStack]` (no REX.W) and stores KERNEL_STACK_CONTROL at
+    // +0x1B0 in that tail. Zeroing it made IoGetStackLimits see StackBase=0
+    // and KeBugCheckEx(0xC4, 0x91).
 }
 pub unsafe fn fxrstor(addr: i32) {
     if addr & 0xF != 0 {
@@ -488,6 +495,7 @@ pub unsafe fn fxrstor(addr: i32) {
         dbg_assert!(false, "TODO: #gp");
     }
 
+    let fxsave64 = is_fxsave64();
     let nbytes = if *is_64 { 512 } else { 288 };
     return_on_pagefault!(readable_or_pagefault(addr, nbytes));
 
@@ -503,7 +511,7 @@ pub unsafe fn fxrstor(addr: i32) {
     fpu_set_status_word(safe_read16(addr + 2).unwrap() as u16);
     *fpu_stack_empty = !safe_read8(addr + 4).unwrap() as u8;
     *fpu_opcode = safe_read16(addr + 6).unwrap();
-    if *is_64 {
+    if fxsave64 {
         *fpu_ip = safe_read64s(addr + 8).unwrap() as i32;
         *fpu_dp = safe_read64s(addr + 16).unwrap() as i32;
     }
@@ -525,7 +533,7 @@ pub unsafe fn fxrstor(addr: i32) {
         *reg_xmm.offset(i as isize) = safe_read128s(addr + 160 + (i << 4)).unwrap();
     }
 
-    if *is_64 {
+    if fxsave64 {
         for i in 0..8 {
             *xmm_ptr(8 + i) = safe_read128s(addr + 288 + (i << 4)).unwrap();
         }
