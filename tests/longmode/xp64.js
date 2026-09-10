@@ -174,12 +174,20 @@ let last_reboot_dump = "";
 let lma_generation = 0;
 let saw_hw_reset = false;
 let saw_bugcheck_data = false;
+let logged_hard_error = false;
+let syscall_log_count = 0;
+const MAX_SYSCALL_LOGS = 48;
 let pf_count = 0;
 let last_screenshot_score = -1;
 let saved_boot_menu = false;
 const NTOS_BUGCHECK = 0xFFFFF80001041690n;
 const KI_BUGCHECK_DATA = 0xFFFFF800011A2880n;
+const NTOS_SYSCALL = 0xFFFFF80001040F40n;
+const KUSER = 0xFFFFF78000000000n;
 const MAX_LMA_GENERATIONS = 3;
+const SYSCALL_NT_OPEN_FILE = 0x30;
+const SYSCALL_NT_CREATE_FILE = 0x52;
+const SYSCALL_NT_OPEN_SECTION = 0x34;
 const LOGON_RE = /Log On to Windows|Welcome to Windows|Ctrl\+Alt\+Del|Press Ctrl.*Alt.*Delete|to log on/i;
 
 function u64_from_pair(view)
@@ -811,6 +819,90 @@ function dump_ustr(cpu, va)
         " buf=" + hex64(buf) + " \"" + (s === null ? "unmapped" : s) + "\"";
 }
 
+function read_gpr64(cpu, n)
+{
+    if(n < 8)
+    {
+        return BigInt(cpu.reg32[n] >>> 0) + (BigInt(cpu.reg_high32[n] >>> 0) << 32n);
+    }
+    const i = n - 8;
+    return BigInt(cpu.reg_r8[i * 2] >>> 0) + (BigInt(cpu.reg_r8[i * 2 + 1] >>> 0) << 32n);
+}
+
+function dump_object_name(cpu, oa)
+{
+    if(!oa)
+    {
+        return "oa=0";
+    }
+    const root = rd64_virt(cpu, oa + 8n);
+    const name = rd64_virt(cpu, oa + 16n);
+    return "oa=" + hex64(oa) +
+        " root=" + (root === null ? "unmapped" : hex64(root)) +
+        " " + (name === null ? "name=unmapped" : dump_ustr(cpu, name));
+}
+
+function guest_ram(cpu)
+{
+    const n = cpu.memory_size[0] >>> 0;
+    return Buffer.from(cpu.mem8.buffer, cpu.mem8.byteOffset, n);
+}
+
+function find_ram(cpu, needle, max_hits)
+{
+    const buf = guest_ram(cpu);
+    const hits = [];
+    let idx = 0;
+    while(hits.length < max_hits)
+    {
+        idx = buf.indexOf(needle, idx);
+        if(idx < 0)
+        {
+            break;
+        }
+        hits.push(idx);
+        idx += 1;
+    }
+    return hits;
+}
+
+function dump_ram_ascii(cpu, phys, n)
+{
+    const mem = cpu.mem8;
+    const chars = [];
+    for(let i = 0; i < n; i++)
+    {
+        const c = mem[phys + i];
+        chars.push(c >= 32 && c < 127 ? String.fromCharCode(c) : ".");
+    }
+    return hex64(phys) + " \"" + chars.join("") + "\"";
+}
+
+function dump_loader_paths(cpu)
+{
+    const parts = [];
+    const kuser = utf16_at(cpu, KUSER + 0x30n, 520);
+    parts.push("NtSystemRoot=\"" + (kuser === null ? "unmapped" : kuser) + "\"");
+    parts.push("KUSER+30=" + dump_bytes_va(cpu, KUSER + 0x30n, 32));
+    const needles = [
+        ["csrss.exe", "csrss.exe"],
+        ["basesrv", "basesrv"],
+        ["winsrv.dll", "winsrv.dll"],
+        ["KnownDlls", Buffer.from([0x4B, 0, 0x6E, 0, 0x6F, 0, 0x77, 0, 0x6E, 0, 0x44, 0, 0x6C, 0, 0x6C, 0, 0x73, 0])],
+    ];
+    for(const [label, needle] of needles)
+    {
+        const hits = find_ram(cpu, needle, 4);
+        parts.push(label + "_phys=" + (hits.length ? hits.map(h => dump_ram_ascii(cpu, h, 48)).join(" ; ") : "none"));
+    }
+    return parts.join("\n");
+}
+
+function interesting_path(s)
+{
+    return /winsrv|basesrv|csrsrv|csrss|user32|win32k|knowndll|system32\\w|system32\/w/i.test(s);
+}
+
 function looks_kernel_ptr(v)
 {
     if(v === null || v < 0xFFFF800000000000n)
@@ -853,8 +945,8 @@ function dump_bugcheck(cpu)
     }
     return "KiBugCheckData=" + words.join(" ") + " " + prcb +
         (extra.length ? "\n" + extra.join("\n") : "") +
-        "\nNtSystemRoot+30=" + JSON.stringify(utf16_at(cpu, 0xFFFFF78000000030n, 80)) +
-        "\nNtSystemRoot+260=" + JSON.stringify(utf16_at(cpu, 0xFFFFF78000000260n, 80));
+        "\nNtSystemRoot+30=" + JSON.stringify(utf16_at(cpu, KUSER + 0x30n, 80)) +
+        "\nNtSystemRoot+260=" + JSON.stringify(utf16_at(cpu, KUSER + 0x260n, 80));
 }
 
 function dump_reboot(cpu)
@@ -864,6 +956,7 @@ function dump_reboot(cpu)
     return dump_regs(cpu) +
         "\nrip_bytes=" + dump_at(cpu, rip, 32) +
         "\n" + dump_bugcheck(cpu) +
+        "\n" + dump_loader_paths(cpu) +
         "\nrsp_mem=" + dump_stack_words(cpu, rsp, 16) +
         "\n" + dump_stuck(cpu);
 }
@@ -1341,6 +1434,7 @@ emulator.add_listener("emulator-loaded", function()
             saw_is_64 = false;
             logged_bugcheck = false;
             logged_rsp_drop = false;
+            logged_hard_error = false;
             if(saw_bugcheck_data || !saw_hw_reset || lma_generation >= MAX_LMA_GENERATIONS)
             {
                 finish(1, why);
@@ -1349,6 +1443,41 @@ emulator.add_listener("emulator-loaded", function()
             console.error(why + "\nxp64: continuing into next firmware boot");
             saw_hw_reset = false;
             last_reboot_dump = "";
+        }
+        if(cpu0.is_64[0] && saw_lma)
+        {
+            const rip = u64_from_pair(cpu0.rip64);
+            if(rip === NTOS_SYSCALL)
+            {
+                const eax = cpu0.reg32[0] >>> 0;
+                if(eax === SYSCALL_NT_OPEN_FILE ||
+                    eax === SYSCALL_NT_CREATE_FILE ||
+                    eax === SYSCALL_NT_OPEN_SECTION)
+                {
+                    try
+                    {
+                        const desc = dump_object_name(cpu0, read_gpr64(cpu0, 8));
+                        const insns = cpu0.instruction_counter[0] >>> 0;
+                        const hot = /winsrv|basesrv/i.test(desc);
+                        if((hot || syscall_log_count < MAX_SYSCALL_LOGS) &&
+                            (hot || interesting_path(desc) ||
+                                (insns > 2400000000 && /\.dll/i.test(desc))))
+                        {
+                            syscall_log_count++;
+                            const names = {
+                                0x30: "NtOpenFile",
+                                0x52: "NtCreateFile",
+                                0x34: "NtOpenSection",
+                            };
+                            console.error("xp64: syscall " + (names[eax] || hex64(eax)) +
+                                " insns=" + insns + " cr3=" + hex64(cpu0.cr[3] >>> 0) +
+                                " " + desc);
+                        }
+                    }
+                    catch(_e)
+                    {}
+                }
+            }
         }
         if(cpu0.is_64[0] && !logged_bugcheck)
         {
@@ -1415,6 +1544,23 @@ emulator.add_listener("emulator-loaded", function()
             catch(_e)
             {}
             console.error("xp64: " + last_lma_line + (text ? " screen=[" + text + "]" : ""));
+            if(!logged_hard_error && cpu0.is_64[0])
+            {
+                try
+                {
+                    const gs = u64_from_pair(cpu0.msr_gs_base);
+                    const pcr20 = rd64_virt(cpu0, gs + 0x20n);
+                    const code = pcr20 === null ? 0n : rd64_virt(cpu0, pcr20 + 0x1A0n);
+                    if(code && code !== 0n)
+                    {
+                        logged_hard_error = true;
+                        console.error("xp64: first hard-error pcr+1a0=" + hex64(code) +
+                            "\n" + dump_loader_paths(cpu0));
+                    }
+                }
+                catch(_e)
+                {}
+            }
             if(LOGON_RE.test(screen_text()))
             {
                 finish(0, "xp64: pass (logon text) gen=" + lma_generation +
