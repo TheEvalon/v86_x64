@@ -758,10 +758,13 @@ pub unsafe fn iretq() {
         after_block_boundary();
     }
 
+    // Restore RSP before SS. switch_seg may write the accessed bit through a
+    // higher-half GDT VA; a fault there used to resume the interrupted RIP
+    // still on the exception handler's stack (XP PCR/GDT smash).
+    write_reg64(ESP, new_rsp);
     if !switch_seg(SS, new_ss) {
         return;
     }
-    write_reg64(ESP, new_rsp);
 
     if privilege_change {
         for reg in [ES, DS, FS, GS] {
@@ -1117,6 +1120,8 @@ unsafe fn deliver_interrupt_vector_lma(
     is_software_int: bool,
     error_code: Option<i32>,
 ) {
+    *dbg_lma_ints = (*dbg_lma_ints).wrapping_add(1);
+    *dbg_lma_last_int = interrupt_nr as u32 as u64;
     if interrupt_nr << 4 | 15 > *idtr_size {
         dbg_log!(
             "long-mode IDT limit interrupt_nr={:x} idtr_size={:x}",
@@ -3591,7 +3596,7 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
     }
 
     let selector = SegmentSelector::of_u16(selector_raw as u16);
-    let (mut descriptor, descriptor_address) =
+    let (mut descriptor, _) =
         match return_on_pagefault!(lookup_segment_selector(selector), false) {
             Ok(desc) => desc,
             Err(SelectorNullOrInvalid::IsNull) => {
@@ -3686,11 +3691,25 @@ pub unsafe fn switch_seg(reg: i32, selector_raw: i32) -> bool {
 
     if !descriptor.accessed() {
         descriptor = descriptor.set_accessed();
-
-        memory::write8(
-            translate_address_system_write(descriptor_address + 5).unwrap(),
-            descriptor.access_byte() as i32,
-        );
+        // `descriptor_address` is truncated to i32. Rebuild the canonical GDT/LDT
+        // VA so the accessed-bit write does not land at 0x300005 after a leftover
+        // `pending_linear64` from the IRETQ stack.
+        let table_base = if selector.is_gdt() {
+            gdtr_base()
+        }
+        else {
+            *segment_offsets.offset(LDTR as isize) as u32 as u64
+        };
+        let vis = table_base.wrapping_add(selector.descriptor_offset() as u64).wrapping_add(5);
+        if gp_if_noncanonical(vis) {
+            return false;
+        }
+        *pending_linear64 = vis;
+        let phys = match translate_address_system_write(vis as i32) {
+            Ok(p) => p,
+            Err(()) => return false,
+        };
+        memory::write8(phys, descriptor.access_byte() as i32);
     }
 
     *segment_is_null.offset(reg as isize) = false;
@@ -4628,21 +4647,31 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
     *instruction_counter += i;
 }
 
-/// Record the first large RSP drop on the Windows XP x64 PCR stack
-/// (`0xfffff80000300000`..`0xfffff80000308000`). Sampled after each
-/// interpreted 64-bit instruction so the XP probe can name the smasher.
+/// Record the instruction that first takes the XP x64 PCR stack into the GDT
+/// pages (`0xfffff80000300000`..`0xfffff80000304000`), or a single-instruction
+/// drop of a page or more. The early KiSystemStartup `sub rsp, 0x3c0` used to
+/// consume the slot and hide the later smash.
 unsafe fn note_kernel_stack_drop(start_rip: u64) {
     let rsp = read_reg64(ESP);
     let prev = *dbg_rsp_last;
     *dbg_rsp_last = rsp;
-    if prev == 0 || *dbg_rsp_drop_rip != 0 {
+    if prev == 0 {
         return;
     }
     let drop = prev.wrapping_sub(rsp);
-    if drop < 0x200 || drop >= 0x0010_0000 {
+    if drop >= 0x0010_0000 {
         return;
     }
-    if prev < 0xFFFF_F800_0030_0000 || prev >= 0xFFFF_F800_0030_8000 {
+    let prev_pcr = (0xFFFF_F800_0030_0000..0xFFFF_F800_0030_8000).contains(&prev);
+    if !prev_pcr {
+        return;
+    }
+    let entered_gdt = rsp < 0xFFFF_F800_0030_4000 && prev >= 0xFFFF_F800_0030_4000;
+    let big = drop >= 0x1000;
+    if !entered_gdt && !big {
+        return;
+    }
+    if *dbg_rsp_drop_rip != 0 && !entered_gdt {
         return;
     }
     *dbg_rsp_drop_rip = start_rip;
@@ -6133,6 +6162,8 @@ pub unsafe fn reset_cpu() {
     *dbg_rsp_drop_from = 0;
     *dbg_rsp_drop_to = 0;
     *dbg_rsp_drop_prev = 0;
+    *dbg_lma_ints = 0;
+    *dbg_lma_last_int = 0;
 
     *cr = 1 << 30 | 1 << 29 | 1 << 4;
     *cr.offset(2) = 0;

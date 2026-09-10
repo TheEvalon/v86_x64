@@ -121,8 +121,11 @@ high_entry:
     mov [rdi + 8], eax
 
     xor ebx, ebx
+    mov r13, rsp
     mov rax, 0xFFFFFFFF90000000
     mov rbx, [rax]
+    cmp rsp, r13
+    jne fail_iret_rsp
     mov ecx, 0xAABBCCDD
     cmp rax, rcx
     jne fail_pf
@@ -284,6 +287,10 @@ fail_bts32:
     jmp hang64
 fail_xlat:
     mov al, 12
+    out 0xF4, al
+    jmp hang64
+fail_iret_rsp:
+    mov al, 13
     out 0xF4, al
     jmp hang64
 hang64:

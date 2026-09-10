@@ -196,7 +196,7 @@ export function CPU(bus, wm, stop_idling)
     this.tr_base64 = view(Uint32Array, memory, 2288, 2);
     this.msr_tsc_aux = view(Uint32Array, memory, 2296, 2);
     this.reg_xmm8_32s = view(Int32Array, memory, 2304, 8 * 4);
-    this.dbg_rsp_drop = view(Uint32Array, memory, 2432, 10);
+    this.dbg_rsp_drop = view(Uint32Array, memory, 2432, 14);
 
     this.fpu_st = view(Int32Array, memory, 1152, 4 * 8);
 

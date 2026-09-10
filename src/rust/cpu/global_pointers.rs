@@ -108,6 +108,8 @@ pub const dbg_rsp_drop_rip: *mut u64 = 2440 as *mut u64;
 pub const dbg_rsp_drop_from: *mut u64 = 2448 as *mut u64;
 pub const dbg_rsp_drop_to: *mut u64 = 2456 as *mut u64;
 pub const dbg_rsp_drop_prev: *mut u64 = 2464 as *mut u64;
+pub const dbg_lma_ints: *mut u64 = 2472 as *mut u64;
+pub const dbg_lma_last_int: *mut u64 = 2480 as *mut u64;
 
 pub unsafe fn xmm_ptr(r: i32) -> *mut reg128 {
     dbg_assert!(r >= 0 && r < 16);

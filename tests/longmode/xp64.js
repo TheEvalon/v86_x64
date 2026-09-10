@@ -340,24 +340,37 @@ function dump_tss(cpu)
     }
 }
 
+function idt_offset64(cpu, vec)
+{
+    const base = u64_from_pair(cpu.idtr_offset64);
+    const phys = phys_of_virt(cpu, base + BigInt(vec * 16));
+    if(phys === null)
+    {
+        return null;
+    }
+    const b = cpu.mem8;
+    const p = phys;
+    return BigInt(b[p] | b[p + 1] << 8 | b[p + 6] << 16 | b[p + 7] << 24) +
+        (BigInt(b[p + 8]) << 32n) + (BigInt(b[p + 9]) << 40n) +
+        (BigInt(b[p + 10]) << 48n) + (BigInt(b[p + 11]) << 56n);
+}
+
 function dump_idt_vec(cpu, vec)
 {
     try
     {
-        const base = u64_from_pair(cpu.idtr_offset64);
-        const phys = phys_of_virt(cpu, base + BigInt(vec * 16));
-        if(phys === null)
+        const offset = idt_offset64(cpu, vec);
+        if(offset === null)
         {
             return "idt[" + vec.toString(16) + "] unmapped";
         }
+        const base = u64_from_pair(cpu.idtr_offset64);
+        const phys = phys_of_virt(cpu, base + BigInt(vec * 16));
         const b = cpu.mem8;
         const p = phys;
         const selector = b[p + 2] | b[p + 3] << 8;
         const ist = b[p + 4] & 7;
         const type = b[p + 5];
-        const offset = BigInt(b[p] | b[p + 1] << 8 | b[p + 6] << 16 | b[p + 7] << 24) +
-            (BigInt(b[p + 8]) << 32n) + (BigInt(b[p + 9]) << 40n) +
-            (BigInt(b[p + 10]) << 48n) + (BigInt(b[p + 11]) << 56n);
         return "idt[" + vec.toString(16) + "] sel=" + hex64(selector) +
             " type=" + hex64(type) + " ist=" + ist + " offset=" + hex64(offset);
     }
@@ -829,7 +842,7 @@ function scan_irq_frames(cpu)
         }
         const cs = rd64_phys(cpu, phys + 8);
         const ss = rd64_phys(cpu, phys + 32);
-        if(cs === 0x10n && ss === 0x18n)
+        if(cs === 0x10n && (ss === 0x18n || ss === 0n))
         {
             frames++;
             if(sample.length < 6)
@@ -851,7 +864,13 @@ function dump_apic(cpu)
             " svr=" + hex64(apic[40] >>> 0) +
             " lvt_timer=" + hex64(apic[8] >>> 0) +
             " lint0=" + hex64(apic[10] >>> 0) +
-            " init=" + hex64(apic[3] >>> 0);
+            " init=" + hex64(apic[3] >>> 0) +
+            " cur=" + hex64(apic[4] >>> 0) +
+            " div=" + hex64(apic[1] >>> 0) +
+            " irr7=" + hex64(apic[23] >>> 0) +
+            " isr7=" + hex64(apic[31] >>> 0) +
+            " irr4=" + hex64(apic[20] >>> 0) +
+            " isr4=" + hex64(apic[28] >>> 0);
     }
     catch(e)
     {
@@ -942,7 +961,9 @@ function dump_rsp_drop(cpu)
             " rip=" + hex64(u64(1)) +
             " from=" + hex64(u64(2)) +
             " to=" + hex64(u64(3)) +
-            " prev=" + hex64(u64(4));
+            " prev=" + hex64(u64(4)) +
+            " lma_ints=" + hex64(u64(5)) +
+            " last_int=" + hex64(u64(6));
     }
     catch(e)
     {
@@ -974,6 +995,8 @@ function dump_stuck(cpu)
         "\n" + dump_tss(cpu) +
         "\n" + dump_idt_vec(cpu, 14) +
         "\n" + dump_idt_vec(cpu, 0xD1) +
+        "\n" + dump_idt_vec(cpu, 0xFD) +
+        "\nhandler14=" + dump_at(cpu, idt_offset64(cpu, 14) || 0n) +
         "\n" + dump_pml4(cpu) +
         "\n" + walks +
         "\napic=" + dump_apic(cpu) +

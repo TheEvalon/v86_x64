@@ -1214,13 +1214,13 @@ unsafe fn retf64(stack_adjust: i32) {
         set_rip(new_rip.wrapping_add(get_seg_cs() as u32 as u64));
     }
 
+    write_reg64(ESP, new_rsp.wrapping_add(stack_adjust as i64 as u64));
     if privilege_change {
         if !switch_seg(SS, new_ss) {
             return;
         }
         null_data_segs_below_cpl();
     }
-    write_reg64(ESP, new_rsp.wrapping_add(stack_adjust as i64 as u64));
     update_state_flags();
 }
 
