@@ -390,6 +390,7 @@ pub static mut tsc_speed: u64 = 1;
 pub static mut tsc_offset: u64 = 0;
 pub static mut cr8: u64 = 0;
 static mut in_lma_int_delivery: bool = false;
+static mut in_lma_df_delivery: bool = false;
 
 pub struct Code {
     pub wasm_table_index: jit::WasmTableIndex,
@@ -1067,6 +1068,16 @@ pub unsafe fn iret(is_16: bool) {
     handle_irqs();
 }
 
+unsafe fn lma_triple_fault() {
+    dbg_log!("long-mode triple fault");
+    if DEBUG {
+        let _ = js::cpu_exception_hook(CPU_EXCEPTION_DF);
+    }
+    *in_hlt = true;
+    in_lma_int_delivery = false;
+    in_lma_df_delivery = false;
+}
+
 unsafe fn call_interrupt_vector_lma(
     interrupt_nr: i32,
     is_software_int: bool,
@@ -1074,22 +1085,25 @@ unsafe fn call_interrupt_vector_lma(
 ) {
     dbg_assert!(efer_lma());
 
+    // A fault while delivering #DF is a triple fault. Do not clear
+    // in_lma_int_delivery before #DF: a #GP during that delivery used to look
+    // like a fresh nested #GP and recurse until the JS stack overflowed.
+    if in_lma_df_delivery {
+        lma_triple_fault();
+        return;
+    }
     if in_lma_int_delivery {
         dbg_log!(
             "nested fault during long-mode IDT delivery int={}",
             interrupt_nr
         );
         if interrupt_nr == CPU_EXCEPTION_DF {
-            if DEBUG {
-                let _ = js::cpu_exception_hook(CPU_EXCEPTION_DF);
-            }
-            *in_hlt = true;
+            lma_triple_fault();
             return;
         }
-        // Contributory nested exception → #DF (IST1 on Linux). Do not abort
-        // the emulator; Linux should panic on the DF stack.
-        in_lma_int_delivery = false;
-        call_interrupt_vector_lma(CPU_EXCEPTION_DF, false, Some(0));
+        in_lma_df_delivery = true;
+        deliver_interrupt_vector_lma(CPU_EXCEPTION_DF, false, Some(0));
+        in_lma_df_delivery = false;
         return;
     }
     in_lma_int_delivery = true;
@@ -6003,6 +6017,7 @@ pub unsafe fn reset_cpu() {
     *cr.offset(4) = 0;
     cr8 = 0;
     in_lma_int_delivery = false;
+    in_lma_df_delivery = false;
     *dreg.offset(6) = 0xFFFF0FF0u32 as i32;
     *dreg.offset(7) = 0x400;
     *cpl = 0;

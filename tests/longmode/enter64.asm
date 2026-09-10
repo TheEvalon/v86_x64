@@ -30,6 +30,30 @@ _start:
     cpuid
     test edx, (1 << 29)
     jz fail32
+    test edx, (1 << 11)
+    jz fail32
+
+    mov eax, 1
+    cpuid
+    mov esi, eax
+    and eax, 0x0F00
+    cmp eax, 0x0F00
+    je .intel64_family
+    cmp eax, 0x0600
+    jne fail32
+    mov eax, esi
+    and eax, 0x00F0
+    cmp eax, 0x00F0
+    jb fail32
+.intel64_family:
+    ; XP x64 KiInitializePcr: (EDX & 0x0789F3FD) == 0x0789F3FD.
+    ; APIC (bit 9) is ACPI/LAPIC-gated; OR it in so this ACPI-less
+    ; multiboot guest still checks the rest of the mask.
+    or edx, (1 << 9)
+    mov eax, edx
+    and eax, 0x0789F3FD
+    cmp eax, 0x0789F3FD
+    jne fail32
 
     lgdt [gdt_desc]
 

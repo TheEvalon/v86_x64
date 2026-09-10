@@ -171,10 +171,123 @@ function u64_from_pair(view)
     return BigInt(view[0] >>> 0) + (BigInt(view[1] >>> 0) << 32n);
 }
 
+function as_u64(n)
+{
+    return typeof n === "bigint" ? n : BigInt(n);
+}
+
 function hex64(n)
 {
-    const v = typeof n === "bigint" ? n : BigInt(n);
-    return "0x" + v.toString(16);
+    return "0x" + as_u64(n).toString(16);
+}
+
+function rd64_phys(cpu, phys)
+{
+    let lo = 0, hi = 0;
+    for(let i = 0; i < 4; i++)
+    {
+        lo |= cpu.mem8[phys + i] << (8 * i);
+        hi |= cpu.mem8[phys + 4 + i] << (8 * i);
+    }
+    return BigInt(lo >>> 0) + (BigInt(hi >>> 0) << 32n);
+}
+
+function phys_of_virt(cpu, virt)
+{
+    const v = as_u64(virt);
+    const cr3 = cpu.cr[3] >>> 0;
+    const pml4e = rd64_phys(cpu, cr3 + Number((v >> 39n) & 0x1FFn) * 8);
+    if(!(pml4e & 1n))
+    {
+        return null;
+    }
+    const pdpte = rd64_phys(cpu, Number(pml4e & 0xFFFFF000n) + Number((v >> 30n) & 0x1FFn) * 8);
+    if(!(pdpte & 1n))
+    {
+        return null;
+    }
+    if(pdpte & 0x80n)
+    {
+        return Number((pdpte & 0xFFFFC0000000n) + (v & 0x3FFFFFFFn));
+    }
+    const pde = rd64_phys(cpu, Number(pdpte & 0xFFFFF000n) + Number((v >> 21n) & 0x1FFn) * 8);
+    if(!(pde & 1n))
+    {
+        return null;
+    }
+    if(pde & 0x80n)
+    {
+        return Number((pde & 0xFFE00000n) + (v & 0x1FFFFFn));
+    }
+    const pte = rd64_phys(cpu, Number(pde & 0xFFFFF000n) + Number((v >> 12n) & 0x1FFn) * 8);
+    if(!(pte & 1n))
+    {
+        return null;
+    }
+    return Number((pte & 0xFFFFF000n) + (v & 0xFFFn));
+}
+
+function dump_at(cpu, virt)
+{
+    try
+    {
+        const phys = phys_of_virt(cpu, virt);
+        if(phys === null)
+        {
+            return "(unreadable)";
+        }
+        const bytes = [];
+        for(let i = 0; i < 16; i++)
+        {
+            bytes.push(("0" + cpu.mem8[phys + i].toString(16)).slice(-2));
+        }
+        return "phys=" + hex64(phys) + " [" + bytes.join(" ") + "]";
+    }
+    catch(_e)
+    {
+        return "(unreadable)";
+    }
+}
+
+function dump_apic(cpu)
+{
+    try
+    {
+        const apic = new Int32Array(cpu.wasm_memory.buffer, cpu.get_apic_addr(), 46);
+        return "tpr=" + hex64(apic[13] >>> 0) +
+            " svr=" + hex64(apic[40] >>> 0) +
+            " lvt_timer=" + hex64(apic[8] >>> 0) +
+            " lint0=" + hex64(apic[10] >>> 0) +
+            " init=" + hex64(apic[3] >>> 0);
+    }
+    catch(e)
+    {
+        return "(apic " + e + ")";
+    }
+}
+
+function dump_ioapic(cpu)
+{
+    try
+    {
+        const io = new Int32Array(cpu.wasm_memory.buffer, cpu.get_ioapic_addr(), 52);
+        const redtbl = [];
+        for(let i = 0; i < 24; i++)
+        {
+            if((io[i] >>> 0) & 0x10000)
+            {
+                continue;
+            }
+            redtbl.push("irq" + i + "=" + hex64(io[i] >>> 0));
+        }
+        return "irr=" + hex64(io[50] >>> 0) +
+            " irq_value=" + hex64(io[51] >>> 0) +
+            " unmasked=[" + redtbl.join(" ") + "]";
+    }
+    catch(e)
+    {
+        return "(ioapic " + e + ")";
+    }
 }
 
 function screen_text()
@@ -198,15 +311,36 @@ function dump_regs(cpu)
         const full = BigInt(cpu.reg32[i] >>> 0) + (BigInt(cpu.reg_high32[i] >>> 0) << 32n);
         parts.push(names[i] + "=" + hex64(full));
     }
+    const rnames = ["r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
+    for(let i = 0; i < 8; i++)
+    {
+        const full = BigInt(cpu.reg_r8[i * 2] >>> 0) + (BigInt(cpu.reg_r8[i * 2 + 1] >>> 0) << 32n);
+        parts.push(rnames[i] + "=" + hex64(full));
+    }
     parts.push("cs=" + hex64(cpu.sreg[1]));
+    parts.push("ss=" + hex64(cpu.sreg[2]));
     parts.push("is_64=" + (cpu.is_64[0] | 0));
-    parts.push("is_32=" + (cpu.is_32[0] | 0));
+    parts.push("in_hlt=" + (cpu.in_hlt[0] | 0));
+    parts.push("if=" + ((cpu.flags[0] >>> 9) & 1));
+    parts.push("flags=" + hex64(cpu.flags[0] >>> 0));
     parts.push("efer=" + hex64(u64_from_pair(cpu.efer)));
     parts.push("cr0=" + hex64(cpu.cr[0] >>> 0));
     parts.push("cr3=" + hex64(cpu.cr[3] >>> 0));
     parts.push("cr4=" + hex64(cpu.cr[4] >>> 0));
+    parts.push("gs_base=" + hex64(u64_from_pair(cpu.msr_gs_base)));
     parts.push("rip=" + hex64(u64_from_pair(cpu.rip64)));
+    parts.push("insns=" + (cpu.instruction_counter[0] >>> 0));
+    parts.push("apic_en=" + (cpu.apic_enabled[0] | 0));
     return parts.join(" ");
+}
+
+function dump_stuck(cpu)
+{
+    const rip = u64_from_pair(cpu.rip64);
+    return dump_regs(cpu) +
+        "\nrip_bytes=" + dump_at(cpu, rip) +
+        "\napic=" + dump_apic(cpu) +
+        "\nioapic=" + dump_ioapic(cpu);
 }
 
 function finish(code, message)
@@ -223,6 +357,14 @@ function finish(code, message)
     if(message)
     {
         console.error(message);
+    }
+    try
+    {
+        console.error("xp64 dump:\n" + dump_stuck(emulator.v86.cpu));
+    }
+    catch(e)
+    {
+        console.error("xp64 dump failed: " + e);
     }
     const text = screen_text();
     if(text)
