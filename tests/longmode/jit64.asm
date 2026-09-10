@@ -99,6 +99,23 @@ start64:
     cmp ebx, 0x22222222
     jne fail_trunc
 
+    ; JIT 32-bit ALU writes must zero-extend RAX–RDI (write_reg32 already
+    ; does; xor/add on wasm locals did not). Stale high halves turn a NULL
+    ; pointer into 0x7FF00000000 (XP x64 SxS isolation 7th arg).
+    mov rax, 0x000007FF00000001
+    xor eax, eax
+    test rax, rax
+    jnz fail_zext
+    mov rbp, 0x000007FF12345678
+    xor ebp, ebp
+    test rbp, rbp
+    jnz fail_zext
+    mov rsi, 0x000007FFABCDEF00
+    add esi, 0
+    mov rax, 0xABCDEF00
+    cmp rsi, rax
+    jne fail_zext
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -113,6 +130,9 @@ fail_clobber:
     jmp fail_out
 fail_trunc:
     mov al, 4
+    jmp fail_out
+fail_zext:
+    mov al, 5
     jmp fail_out
 fail64:
     mov al, 1
