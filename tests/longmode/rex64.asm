@@ -237,6 +237,19 @@ after_call_target:
     cmp rax, rbx
     jne fail_bswap32
 
+    ; 41 0F CC is BSWAP r12d. Opcode-encoded BSWAP used to ignore REX.B and
+    ; byte-swap ESP (XP SHA-1 `bswap r12d` left the kernel on a truncated stack).
+    mov r13, rsp
+    mov rsp, 0xFFFFF80001234567
+    mov r12, 0x0123456789ABCDEF
+    bswap r12d
+    cmp r12, rbx
+    jne fail_bswap32
+    mov rax, 0xFFFFF80001234567
+    cmp rsp, rax
+    jne fail_bswap32
+    mov rsp, r13
+
     ; XADD r64, r64: src <- dest, dest <- dest+src.
     mov rax, 0x1000
     mov rbx, 0x0234

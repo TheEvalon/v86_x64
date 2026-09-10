@@ -10,8 +10,8 @@ use crate::cpu::cpu::*;
 use crate::cpu::global_pointers::*;
 use crate::cpu::memory;
 use crate::cpu::misc_instr::{
-    adjust_stack_reg, get_stack_pointer, getcf, getzf, pop64, push64, test_b, test_be, test_l,
-    test_le, test_o, test_p, test_s, test_z,
+    adjust_stack_reg, bswap, get_stack_pointer, getcf, getzf, pop64, push64, test_b, test_be,
+    test_l, test_le, test_o, test_p, test_s, test_z,
 };
 use crate::cpu::modrm::{linear_from_ea64, resolve_lea64, resolve_modrm64};
 use crate::jit;
@@ -388,6 +388,13 @@ unsafe fn dispatch_two_byte(opcode: i32) {
     }
     if rex_w() {
         dispatch_rex_w_0f(opcode);
+        return;
+    }
+    // 0F C8+r BSWAP r32. The 32-bit interpreter hardcodes EAX..EDI, so
+    // `41 0F CC` (bswap r12d) used to run `bswap esp` and byte-swap RSP.
+    if matches!(opcode, 0xC8..=0xCF) {
+        bswap(gpr_opcode(opcode));
+        finish_instruction();
         return;
     }
     if !is_osize_32() && !matches!(opcode, 0x80..=0x8F) {
