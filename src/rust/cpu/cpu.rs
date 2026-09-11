@@ -227,6 +227,8 @@ pub const TSR_LDT: i32 = 0x60;
 pub const IA32_TIME_STAMP_COUNTER: i32 = 0x10;
 pub const IA32_PLATFORM_ID: i32 = 0x17;
 pub const IA32_APIC_BASE: i32 = 0x1B;
+/// Pentium 4 / family 15 bus frequency (intelppm `rdmsr` at RVA 0x112F).
+pub const MSR_EBC_FREQUENCY_ID: i32 = 0x2C;
 pub const MSR_TEST_CTRL: i32 = 0x33;
 pub const MSR_SMI_COUNT: i32 = 0x34;
 pub const IA32_FEAT_CTL: i32 = 0x3A;
@@ -250,6 +252,7 @@ pub const IA32_MCG_CAP: i32 = 0x179;
 pub const IA32_MCG_STATUS: i32 = 0x17A;
 pub const IA32_PERFEVTSEL0: i32 = 0x186;
 pub const IA32_PERFEVTSEL1: i32 = 0x187;
+pub const IA32_PERF_CTL: i32 = 0x199;
 pub const IA32_MISC_ENABLE: i32 = 0x1A0;
 pub const IA32_ENERGY_PERF_BIAS: i32 = 0x1B0;
 pub const IA32_MTRR_PHYSBASE0: i32 = 0x200;
@@ -287,6 +290,11 @@ pub const MSR_AMD64_DE_CFG: i32 = 0xC0011029u32 as i32;
 /// - The whole 0x200-0x2FF block: that would swallow IA32_PAT (0x277).
 pub fn msr_is_noop_allowlisted(index: i32) -> bool {
     match index {
+        // P4 EBC frequency. CPUID family 15 makes intelppm RDMSR this;
+        // #GP is STATUS_PRIVILEGED_INSTRUCTION and bugcheck 0x7E.
+        MSR_EBC_FREQUENCY_ID => true,
+        // intelppm RDMSR/WRMSR P-state control after the 0x2C probe.
+        IA32_PERF_CTL => true,
         // 0 variable ranges, no WC, no fixed MTRRs (we do not emulate MTRRs).
         IA32_MTRRCAP => true,
         // IA32_MTRR_PHYSBASE0/PHYSMASK0 ... PHYSBASE7/PHYSMASK7 (8 pairs).
@@ -6305,6 +6313,8 @@ mod msr_allowlist_tests {
         assert!(msr_is_noop_allowlisted(IA32_MCG_STATUS));
         assert!(msr_is_noop_allowlisted(IA32_ENERGY_PERF_BIAS));
         assert!(msr_is_noop_allowlisted(MSR_AMD64_SYSCFG));
+        assert!(msr_is_noop_allowlisted(MSR_EBC_FREQUENCY_ID));
+        assert!(msr_is_noop_allowlisted(IA32_PERF_CTL));
     }
 
     #[test]
