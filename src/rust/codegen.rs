@@ -293,14 +293,31 @@ pub fn gen_set_reg16_local(builder: &mut WasmBuilder, local: &WasmLocal) {
     builder.set_local(local);
 }
 
+pub fn gen_zero_reg_high32(builder: &mut WasmBuilder, r: u32) {
+    dbg_assert!(r < 8);
+    builder.const_i32(global_pointers::get_reg_high32_offset(r) as i32);
+    builder.const_i32(0);
+    builder.store_aligned_i32(0);
+}
+
+/// If `local` is a RAX–RDI JIT local, zero the matching `reg_high32` word.
+/// 32-bit ALU helpers write only the wasm local; without this, a later REX.W
+/// read sees a stale high half (`xor eax, eax` leaving `0x7FF_00000000`).
+pub fn gen_zero_extend_reg32_local(
+    builder: &mut WasmBuilder,
+    register_locals: &[WasmLocal],
+    local: &WasmLocal,
+) {
+    if let Some(r) = register_locals.iter().position(|l| l == local) {
+        gen_zero_reg_high32(builder, r as u32);
+    }
+}
+
 pub fn gen_set_reg32(ctx: &mut JitContext, r: u32) {
     ctx.builder.set_local(&ctx.register_locals[r as usize]);
     // IA-32e zero-extends 32-bit GPR writes in both 64-bit and compatibility
     // mode. Match write_reg32 even when this block was compiled with CS.L=0.
-    ctx.builder
-        .const_i32(global_pointers::get_reg_high32_offset(r) as i32);
-    ctx.builder.const_i32(0);
-    ctx.builder.store_aligned_i32(0);
+    gen_zero_reg_high32(ctx.builder, r);
 }
 
 pub fn decr_exc_asize(ctx: &mut JitContext) {

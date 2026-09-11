@@ -10,10 +10,10 @@ use crate::cpu::cpu::*;
 use crate::cpu::global_pointers::*;
 use crate::cpu::memory;
 use crate::cpu::misc_instr::{
-    adjust_stack_reg, get_stack_pointer, getcf, getzf, pop64, push64, test_b, test_be, test_l,
-    test_le, test_o, test_p, test_s, test_z,
+    adjust_stack_reg, bswap, get_stack_pointer, getcf, getzf, pop64, push64, test_b, test_be,
+    test_l, test_le, test_o, test_p, test_s, test_z,
 };
-use crate::cpu::modrm::{resolve_lea64, resolve_modrm64};
+use crate::cpu::modrm::{linear_from_ea64, resolve_lea64, resolve_modrm64};
 use crate::jit;
 use crate::page::Page;
 use crate::paging::OrPageFault;
@@ -371,6 +371,39 @@ unsafe fn dispatch_hint_nop() {
     if modrm < 0xC0 {
         let _ = return_on_pagefault!(resolve_lea64(modrm));
     }
+}
+
+/// Two-byte escape after prefixes (and optional REX) have been consumed.
+///
+/// 66h is operand-size for integer 0F ops. Always using the 32-bit table made
+/// `66 0F B1` (CMPXCHG r/m16) compare EAX against a dword and write 32 bits.
+/// XP's MMPFN ReferenceCount is a word next to flags; that clobber (or a
+/// failed compare that skips the decrement) corrupts the PFN database.
+/// Jcc (`0F 80–8F`) ignores 66h in 64-bit CS and keeps a 32-bit displacement.
+unsafe fn dispatch_two_byte(opcode: i32) {
+    if is_hint_nop(opcode) {
+        dispatch_hint_nop();
+        finish_instruction();
+        return;
+    }
+    if rex_w() {
+        dispatch_rex_w_0f(opcode);
+        return;
+    }
+    // 0F C8+r BSWAP r32. The 32-bit interpreter hardcodes EAX..EDI, so
+    // `41 0F CC` (bswap r12d) used to run `bswap esp` and byte-swap RSP.
+    if matches!(opcode, 0xC8..=0xCF) {
+        bswap(gpr_opcode(opcode));
+        finish_instruction();
+        return;
+    }
+    if !is_osize_32() && !matches!(opcode, 0x80..=0x8F) {
+        run_instruction0f_16(opcode);
+    }
+    else {
+        run_instruction0f_32(opcode);
+    }
+    finish_instruction();
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -731,6 +764,71 @@ unsafe fn run_legacy_opcode(opcode: i32) {
     finish_instruction();
 }
 
+/// XLAT/XLATB: DS:RBX+AL (or EBX+AL with 67h). `is_asize_32()` is sticky-true
+/// in 64-bit CS, so the 32-bit helper would truncate RBX.
+unsafe fn dispatch_xlat64() {
+    let asize32 = *prefixes & prefix::PREFIX_MASK_ADDRSIZE != 0;
+    let rbx = if asize32 { read_reg32(EBX) as u32 as u64 } else { read_reg64(EBX) };
+    let ea = rbx.wrapping_add(read_reg8(AL) as u32 as u64);
+    let ea = if asize32 { ea as u32 as u64 } else { ea };
+    let addr = return_on_pagefault!(linear_from_ea64(DS, ea, false));
+    *pending_linear64 = addr;
+    let v = return_on_pagefault!(safe_read8(addr as i32));
+    write_reg8(AL, v);
+}
+
+/// Absolute moffs (A0–A3). 64-bit CS uses a 64-bit offset, or 32-bit with 67h.
+/// FS/GS bases still apply: MSVC encodes `mov rax, gs:[0x30]` (TEB→PEB) as
+/// `67 65 48 A1 30 00 00 00`. The 32-bit helpers add a truncated `get_seg`,
+/// and the REX.W path used to skip the segment entirely (linear = 0x30).
+unsafe fn moffs_linear64() -> OrPageFault<u64> {
+    let offset = if *prefixes & prefix::PREFIX_MASK_ADDRSIZE != 0 {
+        read_imm32s()? as u32 as u64
+    }
+    else {
+        read_imm64()?
+    };
+    let addr = linear_from_ea64(DS, offset, false)?;
+    *pending_linear64 = addr;
+    Ok(addr)
+}
+
+unsafe fn dispatch_moffs64(opcode: i32) {
+    let addr = return_on_pagefault!(moffs_linear64());
+    match opcode {
+        0xA0 => {
+            let v = return_on_pagefault!(safe_read8(addr as i32));
+            write_reg8(AL, v);
+        },
+        0xA2 => {
+            return_on_pagefault!(safe_write8(addr as i32, read_reg8(AL)));
+        },
+        0xA1 => {
+            if rex_w() {
+                write_reg64(EAX, return_on_pagefault!(safe_read64s(addr as i32)));
+            }
+            else if is_osize_32() {
+                write_reg32(EAX, return_on_pagefault!(safe_read32s(addr as i32)));
+            }
+            else {
+                write_reg16(AX, return_on_pagefault!(safe_read16(addr as i32)));
+            }
+        },
+        0xA3 => {
+            if rex_w() {
+                return_on_pagefault!(safe_write64(addr as i32, read_reg64(EAX)));
+            }
+            else if is_osize_32() {
+                return_on_pagefault!(safe_write32(addr as i32, read_reg32(EAX)));
+            }
+            else {
+                return_on_pagefault!(safe_write16(addr as i32, read_reg16(AX)));
+            }
+        },
+        _ => {},
+    }
+}
+
 unsafe fn dispatch_rex_w(opcode: i32) {
     current_interp_opcode = opcode as u32 | 0x100;
     current_interp_0f = false;
@@ -941,14 +1039,6 @@ unsafe fn dispatch_rex_w(opcode: i32) {
         0xAB => string64(String64::Stos, 8),
         0xAD => string64(String64::Lods, 8),
         0xAF => string64(String64::Scas, 8),
-        0xA1 => {
-            let addr = return_on_pagefault!(read_moffs());
-            write_reg64(EAX, return_on_pagefault!(safe_read64s(addr)));
-        },
-        0xA3 => {
-            let addr = return_on_pagefault!(read_moffs());
-            return_on_pagefault!(safe_write64(addr, read_reg64(EAX)));
-        },
         0xA9 => {
             let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
             test64(read_reg64(EAX), imm);
@@ -1201,13 +1291,13 @@ unsafe fn retf64(stack_adjust: i32) {
         set_rip(new_rip.wrapping_add(get_seg_cs() as u32 as u64));
     }
 
+    write_reg64(ESP, new_rsp.wrapping_add(stack_adjust as i64 as u64));
     if privilege_change {
         if !switch_seg(SS, new_ss) {
             return;
         }
         null_data_segs_below_cpl();
     }
-    write_reg64(ESP, new_rsp.wrapping_add(stack_adjust as i64 as u64));
     update_state_flags();
 }
 
@@ -1266,12 +1356,24 @@ unsafe fn dispatch_forced64(opcode: i32) {
             write_reg64(r, value);
         },
         0x68 => {
-            let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
-            return_on_pagefault!(push64(imm));
+            if !is_osize_32() {
+                // 66h PUSH imm16: 16-bit operand, 64-bit RSP.
+                let imm = return_on_pagefault!(read_imm16());
+                return_on_pagefault!(crate::cpu::misc_instr::push16(imm));
+            }
+            else {
+                let imm = return_on_pagefault!(read_imm32s()) as i64 as u64;
+                return_on_pagefault!(push64(imm));
+            }
         },
         0x6A => {
-            let imm = return_on_pagefault!(read_imm8s()) as i64 as u64;
-            return_on_pagefault!(push64(imm));
+            let imm = return_on_pagefault!(read_imm8s());
+            if !is_osize_32() {
+                return_on_pagefault!(crate::cpu::misc_instr::push16(imm));
+            }
+            else {
+                return_on_pagefault!(push64(imm as i64 as u64));
+            }
         },
         0x8F => {
             let modrm = return_on_pagefault!(read_imm8());
@@ -1279,10 +1381,60 @@ unsafe fn dispatch_forced64(opcode: i32) {
                 trigger_ud();
                 return;
             }
+            if !is_osize_32() {
+                if modrm < 0xC0 {
+                    let old_rsp = read_reg64(ESP);
+                    let new_rsp = old_rsp.wrapping_add(2);
+                    if gp_if_noncanonical(new_rsp) {
+                        return;
+                    }
+                    write_reg64(ESP, new_rsp);
+                    let addr64 = match resolve_modrm64(modrm) {
+                        Err(()) => {
+                            write_reg64(ESP, old_rsp);
+                            return;
+                        },
+                        Ok(a) => a,
+                    };
+                    write_reg64(ESP, old_rsp);
+                    *pending_linear64 = old_rsp;
+                    let value = return_on_pagefault!(safe_read16(old_rsp as i32));
+                    *pending_linear64 = addr64;
+                    return_on_pagefault!(safe_write16(addr64 as i32, value));
+                    write_reg64(ESP, new_rsp);
+                }
+                else {
+                    let value = return_on_pagefault!(crate::cpu::misc_instr::pop16());
+                    write_reg16(gpr_rm(modrm), value);
+                }
+                return;
+            }
             if modrm < 0xC0 {
-                let addr = return_on_pagefault!(modrm_resolve(modrm));
-                let value = return_on_pagefault!(pop64());
-                return_on_pagefault!(safe_write64(addr, value));
+                // Intel: RSP is incremented before the memory operand is
+                // evaluated (`pop [rsp]` uses the new RSP). Restore RSP if
+                // the store faults so the instruction is restartable.
+                // Re-stash `pending_linear64` on the dest: pop64 would leave
+                // it on the stack, and a dest whose low 32 bits are 4K+ from
+                // RSP would truncate to a low canonical VA.
+                let old_rsp = read_reg64(ESP);
+                let new_rsp = old_rsp.wrapping_add(8);
+                if gp_if_noncanonical(new_rsp) {
+                    return;
+                }
+                write_reg64(ESP, new_rsp);
+                let addr64 = match resolve_modrm64(modrm) {
+                    Err(()) => {
+                        write_reg64(ESP, old_rsp);
+                        return;
+                    },
+                    Ok(a) => a,
+                };
+                write_reg64(ESP, old_rsp);
+                *pending_linear64 = old_rsp;
+                let value = return_on_pagefault!(safe_read64s(old_rsp as i32));
+                *pending_linear64 = addr64;
+                return_on_pagefault!(safe_write64(addr64 as i32, value));
+                write_reg64(ESP, new_rsp);
             }
             else {
                 let value = return_on_pagefault!(pop64());
@@ -1294,7 +1446,12 @@ unsafe fn dispatch_forced64(opcode: i32) {
                 trigger_gp(0);
                 return;
             }
-            return_on_pagefault!(push64((get_eflags() & 0xFCFFFF) as u32 as u64));
+            if !is_osize_32() {
+                return_on_pagefault!(crate::cpu::misc_instr::push16(get_eflags() & 0xFCFF));
+            }
+            else {
+                return_on_pagefault!(push64((get_eflags() & 0xFCFFFF) as u32 as u64));
+            }
         },
         0x9D => {
             if *flags & FLAG_VM != 0 && getiopl() < 3 {
@@ -1302,7 +1459,13 @@ unsafe fn dispatch_forced64(opcode: i32) {
                 return;
             }
             let old_eflags = *flags;
-            update_eflags(return_on_pagefault!(pop64()) as i32);
+            let new_flags = if !is_osize_32() {
+                return_on_pagefault!(crate::cpu::misc_instr::pop16())
+            }
+            else {
+                return_on_pagefault!(pop64()) as i32
+            };
+            update_eflags(new_flags);
             if old_eflags & FLAG_INTERRUPT == 0 && *flags & FLAG_INTERRUPT != 0 {
                 handle_irqs();
             }
@@ -1337,7 +1500,14 @@ unsafe fn dispatch_forced64(opcode: i32) {
             retf64(imm16);
         },
         0xCB => retf64(0),
-        0xCF => iretq(),
+        0xCF => {
+            if !is_osize_32() {
+                iret16();
+            }
+            else {
+                iretq();
+            }
+        },
         0xE8 => {
             let rel = return_on_pagefault!(read_imm32s());
             return_on_pagefault!(push64(get_rip()));
@@ -1381,8 +1551,20 @@ unsafe fn dispatch_forced64(opcode: i32) {
                     jump_near64(target);
                 },
                 6 => {
-                    let value = return_on_pagefault!(load_rm64(modrm));
-                    return_on_pagefault!(push64(value));
+                    if !is_osize_32() {
+                        let value = if modrm < 0xC0 {
+                            let addr = return_on_pagefault!(modrm_resolve(modrm));
+                            return_on_pagefault!(safe_read16(addr))
+                        }
+                        else {
+                            read_reg16(gpr_rm(modrm))
+                        };
+                        return_on_pagefault!(crate::cpu::misc_instr::push16(value));
+                    }
+                    else {
+                        let value = return_on_pagefault!(load_rm64(modrm));
+                        return_on_pagefault!(push64(value));
+                    }
                 },
                 3 | 5 => {
                     if modrm >= 0xC0 {
@@ -1901,6 +2083,44 @@ unsafe fn dispatch_rex_w_0f(opcode: i32) {
     finish_instruction();
 }
 
+/// 16-bit operand size in 64-bit CS for opcodes that encode a GPR in the
+/// opcode byte. The 16-bit interpreter hardcodes AX..DI, so `66 41 BC 20 00`
+/// (`mov r12w, 0x20`) used to run `mov sp, 0x20` and drop RSP into the GDT.
+unsafe fn dispatch_osize16_64(opcode: i32) -> bool {
+    match opcode {
+        0xB0..=0xB7 => {
+            // Byte MOV ignores 66h; still honor REX.B (`66 41 B0` is r8b).
+            let imm = match read_imm8() {
+                Ok(o) => o,
+                Err(()) => return true,
+            };
+            write_reg8(gpr_opcode(opcode), imm);
+            finish_instruction();
+            true
+        },
+        0xB8..=0xBF => {
+            let imm = match read_imm16() {
+                Ok(o) => o,
+                Err(()) => return true,
+            };
+            write_reg16(gpr_opcode(opcode), imm);
+            finish_instruction();
+            true
+        },
+        0x90..=0x97 => {
+            let r = gpr_opcode(opcode);
+            if r != EAX {
+                let a = read_reg16(EAX);
+                write_reg16(EAX, read_reg16(r));
+                write_reg16(r, a);
+            }
+            finish_instruction();
+            true
+        },
+        _ => false,
+    }
+}
+
 unsafe fn dispatch_opcode(opcode: i32) {
     current_interp_opcode = opcode as u32 | 0x100;
     current_interp_0f = false;
@@ -1910,6 +2130,11 @@ unsafe fn dispatch_opcode(opcode: i32) {
     }
     if opcode == 0x63 {
         dispatch_movsxd();
+        return;
+    }
+    if opcode == 0xD7 {
+        dispatch_xlat64();
+        finish_instruction();
         return;
     }
     if matches!(opcode, 0x6C..=0x6F | 0xA4..=0xA7 | 0xAA..=0xAF) {
@@ -1922,17 +2147,30 @@ unsafe fn dispatch_opcode(opcode: i32) {
         finish_instruction();
         return;
     }
-    if !is_osize_32() {
-        run_legacy_opcode(opcode);
-        return;
-    }
+    // Near CALL/RET/PUSH r ignore 66h (always 64-bit). Must run before the
+    // 16-bit interpreter: `66 C3` used to pop a 16-bit IP and truncate RSP.
     if opcode_is_forced64(opcode) {
         dispatch_forced64(opcode);
         finish_instruction();
         return;
     }
+    // A0–A3 moffs: 64-bit offset (32-bit with 67h) plus FS/GS. Must run
+    // before REX.W / 16-bit fallbacks so `67 65 48 A1` is not a raw 0x30.
+    if matches!(opcode, 0xA0..=0xA3) {
+        dispatch_moffs64(opcode);
+        finish_instruction();
+        return;
+    }
+    // REX.W wins over 66h (`66 48 B8` is MOV r64, imm64, not MOV AX, imm16).
     if rex_w() && !opcode_ignores_rex_w(opcode) {
         dispatch_rex_w(opcode);
+        return;
+    }
+    if !is_osize_32() {
+        if dispatch_osize16_64(opcode) {
+            return;
+        }
+        run_legacy_opcode(opcode);
         return;
     }
     if *rex_prefix != 0 && dispatch_rex_legacy(opcode) {
@@ -1981,17 +2219,7 @@ pub unsafe fn run_one() {
                 let opcode = return_on_pagefault!(read_imm8());
                 if opcode == 0x0F {
                     let opcode = return_on_pagefault!(read_imm8());
-                    if is_hint_nop(opcode) {
-                        dispatch_hint_nop();
-                        finish_instruction();
-                    }
-                    else if rex_w() {
-                        dispatch_rex_w_0f(opcode);
-                    }
-                    else {
-                        run_instruction0f_32(opcode);
-                        finish_instruction();
-                    }
+                    dispatch_two_byte(opcode);
                     return;
                 }
                 dispatch_opcode(opcode);
@@ -1999,17 +2227,7 @@ pub unsafe fn run_one() {
             },
             0x0F => {
                 let opcode = return_on_pagefault!(read_imm8());
-                if is_hint_nop(opcode) {
-                    dispatch_hint_nop();
-                    finish_instruction();
-                }
-                else if rex_w() {
-                    dispatch_rex_w_0f(opcode);
-                }
-                else {
-                    run_instruction0f_32(opcode);
-                    finish_instruction();
-                }
+                dispatch_two_byte(opcode);
                 return;
             },
             _ => {
@@ -2131,6 +2349,16 @@ mod tests {
         assert!(!opcode_is_forced64(0x01));
         assert!(!opcode_is_forced64(0x75));
         assert!(!opcode_is_forced64(0x83));
+        assert!(opcode_is_forced64(0x9C));
+        assert!(opcode_is_forced64(0x68));
+        // B8+r keeps 66h operand size (16-bit) but must honor REX.B.
+        assert!(!opcode_is_forced64(0xB8));
+        assert!(!opcode_is_forced64(0xBC));
+    }
+
+    #[test]
+    fn xlat_is_not_invalid_in_64() {
+        assert!(!opcode_invalid_in_64(0xD7));
     }
 
     #[test]
@@ -2141,6 +2369,10 @@ mod tests {
         assert!(opcode_ignores_rex_w(0x9E));
         assert!(opcode_ignores_rex_w(0xB0));
         assert!(opcode_ignores_rex_w(0xFE));
+        assert!(opcode_ignores_rex_w(0xA0));
+        assert!(opcode_ignores_rex_w(0xA2));
+        assert!(!opcode_ignores_rex_w(0xA1));
+        assert!(!opcode_ignores_rex_w(0xA3));
         assert!(!opcode_ignores_rex_w(0x89));
         assert!(!opcode_ignores_rex_w(0x05));
         assert!(!opcode_ignores_rex_w(0x90));

@@ -74,6 +74,23 @@ fn local_to_instruction_operand(ctx: &mut JitContext, local: &WasmLocal) -> Inst
     }
 }
 
+fn gpr32_index(register_locals: &[WasmLocal], local: &WasmLocal) -> Option<u32> {
+    register_locals
+        .iter()
+        .position(|l| l == local)
+        .map(|r| r as u32)
+}
+
+fn zero_extend_if_gpr32(ctx: &mut JitContext, local: &WasmLocal) {
+    codegen::gen_zero_extend_reg32_local(ctx.builder, ctx.register_locals, local);
+}
+
+fn zero_extend_gpr32_index(builder: &mut WasmBuilder, dest_r: Option<u32>) {
+    if let Some(r) = dest_r {
+        codegen::gen_zero_reg_high32(builder, r);
+    }
+}
+
 pub fn jit_instruction(ctx: &mut JitContext, instr_flags: &mut u32) {
     ctx.cpu.prefixes = 0;
     ctx.cpu.rex_prefix = 0;
@@ -1038,6 +1055,7 @@ fn gen_add32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     source_operand.gen_get(ctx.builder);
     ctx.builder.add_i32();
     ctx.builder.set_local(dest_operand);
+    zero_extend_if_gpr32(ctx, dest_operand);
 
     codegen::gen_set_last_result(ctx.builder, &dest_operand);
     codegen::gen_set_last_op_size_and_flags_changed(ctx.builder, OPSIZE_32, FLAGS_ALL);
@@ -1094,6 +1112,7 @@ fn gen_sub32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     source_operand.gen_get(ctx.builder);
     ctx.builder.sub_i32();
     ctx.builder.set_local(dest_operand);
+    zero_extend_if_gpr32(ctx, dest_operand);
 
     codegen::gen_set_last_result(ctx.builder, &dest_operand);
     codegen::gen_set_last_op_size_and_flags_changed(ctx.builder, OPSIZE_32, FLAGS_ALL | FLAG_SUB);
@@ -1233,6 +1252,7 @@ fn gen_adc32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     ctx.builder.get_local(&res);
     ctx.builder.set_local(dest_operand);
     ctx.builder.free_local(res);
+    zero_extend_if_gpr32(ctx, dest_operand);
 
     ctx.current_instruction = Instruction::AdcSbb {
         opsize: OPSIZE_32,
@@ -1332,6 +1352,7 @@ fn gen_sbb32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     ctx.builder.get_local(&res);
     ctx.builder.set_local(dest_operand);
     ctx.builder.free_local(res);
+    zero_extend_if_gpr32(ctx, dest_operand);
 
     ctx.current_instruction = Instruction::AdcSbb {
         opsize: OPSIZE_32,
@@ -1377,6 +1398,7 @@ fn gen_and32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     source_operand.gen_get(ctx.builder);
     ctx.builder.and_i32();
     ctx.builder.set_local(dest_operand);
+    zero_extend_if_gpr32(ctx, dest_operand);
 
     codegen::gen_set_last_result(ctx.builder, &dest_operand);
     codegen::gen_set_last_op_size_and_flags_changed(
@@ -1464,6 +1486,7 @@ fn gen_or32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Loc
     source_operand.gen_get(ctx.builder);
     ctx.builder.or_i32();
     ctx.builder.set_local(dest_operand);
+    zero_extend_if_gpr32(ctx, dest_operand);
 
     codegen::gen_set_last_result(ctx.builder, &dest_operand);
     codegen::gen_set_last_op_size_and_flags_changed(
@@ -1515,6 +1538,7 @@ fn gen_xor32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
         ctx.builder.xor_i32();
         ctx.builder.set_local(dest_operand);
     }
+    zero_extend_if_gpr32(ctx, dest_operand);
 
     codegen::gen_set_last_result(ctx.builder, &dest_operand);
     codegen::gen_set_last_op_size_and_flags_changed(
@@ -1526,6 +1550,7 @@ fn gen_xor32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
 }
 
 fn gen_rol32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &LocalOrImmediate) {
+    let dest_r = gpr32_index(ctx.register_locals, dest_operand);
     let builder = &mut ctx.builder;
     builder.get_local(dest_operand);
     match source_operand {
@@ -1542,8 +1567,10 @@ fn gen_rol32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     builder.and_i32();
     builder.call_fn2_ret("rol32");
     builder.set_local(dest_operand);
+    zero_extend_gpr32_index(builder, dest_r);
 }
 fn gen_ror32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &LocalOrImmediate) {
+    let dest_r = gpr32_index(ctx.register_locals, dest_operand);
     let builder = &mut ctx.builder;
     builder.get_local(dest_operand);
     match source_operand {
@@ -1560,9 +1587,11 @@ fn gen_ror32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     builder.and_i32();
     builder.call_fn2_ret("ror32");
     builder.set_local(dest_operand);
+    zero_extend_gpr32_index(builder, dest_r);
 }
 
 fn gen_rcl32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &LocalOrImmediate) {
+    let dest_r = gpr32_index(ctx.register_locals, dest_operand);
     let builder = &mut ctx.builder;
     builder.get_local(dest_operand);
     match source_operand {
@@ -1579,8 +1608,10 @@ fn gen_rcl32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     builder.and_i32();
     builder.call_fn2_ret("rcl32");
     builder.set_local(dest_operand);
+    zero_extend_gpr32_index(builder, dest_r);
 }
 fn gen_rcr32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &LocalOrImmediate) {
+    let dest_r = gpr32_index(ctx.register_locals, dest_operand);
     let builder = &mut ctx.builder;
     builder.get_local(dest_operand);
     match source_operand {
@@ -1597,6 +1628,7 @@ fn gen_rcr32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     builder.and_i32();
     builder.call_fn2_ret("rcr32");
     builder.set_local(dest_operand);
+    zero_extend_gpr32_index(builder, dest_r);
 }
 
 enum ShiftCount {
@@ -1639,6 +1671,7 @@ fn gen_shl32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
             opsize: OPSIZE_32,
         };
     }
+    let dest_r = gpr32_index(ctx.register_locals, dest_operand);
     let builder = &mut ctx.builder;
     let count = match source_operand {
         LocalOrImmediate::WasmLocal(l) => {
@@ -1670,6 +1703,7 @@ fn gen_shl32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     ShiftCount::gen_get(builder, &count);
     builder.shl_i32();
     builder.set_local(dest_operand);
+    zero_extend_gpr32_index(builder, dest_r);
 
     codegen::gen_set_last_result(builder, dest_operand);
     codegen::gen_set_last_op_size_and_flags_changed(
@@ -1712,6 +1746,7 @@ fn gen_shr32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
             opsize: OPSIZE_32,
         };
     }
+    let dest_r = gpr32_index(ctx.register_locals, dest_operand);
     let builder = &mut ctx.builder;
     let count = match source_operand {
         LocalOrImmediate::WasmLocal(l) => {
@@ -1758,6 +1793,7 @@ fn gen_shr32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     ShiftCount::gen_get(builder, &count);
     builder.shr_u_i32();
     builder.set_local(dest_operand);
+    zero_extend_gpr32_index(builder, dest_r);
 
     codegen::gen_set_last_result(builder, dest_operand);
     codegen::gen_set_last_op_size_and_flags_changed(
@@ -1778,6 +1814,7 @@ fn gen_sar32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
             opsize: OPSIZE_32,
         };
     }
+    let dest_r = gpr32_index(ctx.register_locals, dest_operand);
     let builder = &mut ctx.builder;
     let count = match source_operand {
         LocalOrImmediate::WasmLocal(l) => {
@@ -1816,6 +1853,7 @@ fn gen_sar32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     ShiftCount::gen_get(builder, &count);
     builder.shr_s_i32();
     builder.set_local(dest_operand);
+    zero_extend_gpr32_index(builder, dest_r);
 
     codegen::gen_set_last_result(builder, dest_operand);
     codegen::gen_set_last_op_size_and_flags_changed(
@@ -1945,15 +1983,17 @@ fn gen_imul_reg32(
     dest_operand: &WasmLocal,
     source_operand: &LocalOrImmediate,
 ) {
-    gen_imul3_reg32(ctx.builder, dest_operand, dest_operand, source_operand);
+    gen_imul3_reg32(ctx, dest_operand, dest_operand, source_operand);
 }
 
 fn gen_imul3_reg32(
-    builder: &mut WasmBuilder,
+    ctx: &mut JitContext,
     dest_operand: &WasmLocal,
     source_operand1: &WasmLocal,
     source_operand2: &LocalOrImmediate,
 ) {
+    let dest_r = gpr32_index(ctx.register_locals, dest_operand);
+    let builder = &mut ctx.builder;
     builder.get_local(&source_operand1);
     builder.extend_signed_i32_to_i64();
     source_operand2.gen_get(builder);
@@ -1963,6 +2003,7 @@ fn gen_imul3_reg32(
     let result = builder.tee_new_local_i64();
     builder.wrap_i64_to_i32();
     builder.set_local(&dest_operand);
+    zero_extend_gpr32_index(builder, dest_r);
 
     codegen::gen_set_last_result(builder, &dest_operand);
     codegen::gen_set_last_op_size_and_flags_changed(
@@ -2174,6 +2215,7 @@ fn gen_bsf32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     source_operand.gen_get(ctx.builder);
     ctx.builder.call_fn2_ret("bsf32");
     ctx.builder.set_local(dest_operand);
+    zero_extend_if_gpr32(ctx, dest_operand);
 }
 
 fn gen_bsr32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &LocalOrImmediate) {
@@ -2181,6 +2223,7 @@ fn gen_bsr32(ctx: &mut JitContext, dest_operand: &WasmLocal, source_operand: &Lo
     source_operand.gen_get(ctx.builder);
     ctx.builder.call_fn2_ret("bsr32");
     ctx.builder.set_local(dest_operand);
+    zero_extend_if_gpr32(ctx, dest_operand);
 }
 
 fn gen_bswap(ctx: &mut JitContext, reg: i32) {
@@ -2201,6 +2244,7 @@ fn gen_bswap(ctx: &mut JitContext, reg: i32) {
     ctx.builder.or_i32();
 
     ctx.builder.set_local(l);
+    codegen::gen_zero_reg_high32(ctx.builder, reg as u32);
 }
 
 define_instruction_read_write_mem8!(gen_add8, instr_00_mem_jit, instr_00_reg_jit, reg);
@@ -2420,6 +2464,9 @@ fn gen_inc(ctx: &mut JitContext, dest_operand: &WasmLocal, size: i32) {
     }
     else {
         ctx.builder.set_local(dest_operand);
+        if size == OPSIZE_32 {
+            zero_extend_if_gpr32(ctx, dest_operand);
+        }
     }
 
     ctx.builder.const_i32(global_pointers::last_result as i32);
@@ -2470,6 +2517,9 @@ fn gen_dec(ctx: &mut JitContext, dest_operand: &WasmLocal, size: i32) {
     }
     else {
         ctx.builder.set_local(dest_operand);
+        if size == OPSIZE_32 {
+            zero_extend_if_gpr32(ctx, dest_operand);
+        }
     }
 
     ctx.builder.const_i32(global_pointers::last_result as i32);
@@ -2507,11 +2557,13 @@ fn gen_not16(ctx: &mut JitContext, dest_operand: &WasmLocal) {
     codegen::gen_set_reg16_local(builder, dest_operand);
 }
 fn gen_not32(ctx: &mut JitContext, dest_operand: &WasmLocal) {
+    let dest_r = gpr32_index(ctx.register_locals, dest_operand);
     let builder = &mut ctx.builder;
     builder.get_local(dest_operand);
     builder.const_i32(-1);
     builder.xor_i32();
     builder.set_local(dest_operand);
+    zero_extend_gpr32_index(builder, dest_r);
 }
 
 fn gen_neg16(ctx: &mut JitContext, dest_operand: &WasmLocal) {
@@ -2521,6 +2573,7 @@ fn gen_neg16(ctx: &mut JitContext, dest_operand: &WasmLocal) {
     codegen::gen_set_reg16_local(builder, dest_operand);
 }
 fn gen_neg32(ctx: &mut JitContext, dest_operand: &WasmLocal) {
+    let dest_r = gpr32_index(ctx.register_locals, dest_operand);
     let builder = &mut ctx.builder;
     builder.const_i32(global_pointers::last_op1 as i32);
     builder.const_i32(0);
@@ -2530,6 +2583,7 @@ fn gen_neg32(ctx: &mut JitContext, dest_operand: &WasmLocal) {
     builder.get_local(&dest_operand);
     builder.sub_i32();
     builder.set_local(dest_operand);
+    zero_extend_gpr32_index(builder, dest_r);
 
     codegen::gen_set_last_result(builder, &dest_operand);
     codegen::gen_set_last_op_size_and_flags_changed(builder, OPSIZE_32, FLAGS_ALL | FLAG_SUB);
@@ -2656,21 +2710,19 @@ pub fn instr16_69_reg_jit(ctx: &mut JitContext, r1: u32, r2: u32, imm16: u32) {
 pub fn instr32_69_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte, r: u32, imm32: u32) {
     codegen::gen_modrm_resolve_safe_read32(ctx, modrm_byte);
     let value_local = ctx.builder.set_new_local();
+    let dest = ctx.reg(r);
     gen_imul3_reg32(
-        ctx.builder,
-        &ctx.register_locals[r as usize],
+        ctx,
+        &dest,
         &value_local,
         &LocalOrImmediate::Immediate(imm32 as i32),
     );
     ctx.builder.free_local(value_local);
 }
 pub fn instr32_69_reg_jit(ctx: &mut JitContext, r1: u32, r2: u32, imm32: u32) {
-    gen_imul3_reg32(
-        ctx.builder,
-        &ctx.register_locals[r2 as usize],
-        &ctx.register_locals[r1 as usize],
-        &LocalOrImmediate::Immediate(imm32 as i32),
-    );
+    let dest = ctx.reg(r2);
+    let src = ctx.reg(r1);
+    gen_imul3_reg32(ctx, &dest, &src, &LocalOrImmediate::Immediate(imm32 as i32));
 }
 
 pub fn instr16_6B_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte, r: u32, imm8s: u32) {
@@ -2689,21 +2741,19 @@ pub fn instr16_6B_reg_jit(ctx: &mut JitContext, r1: u32, r2: u32, imm8s: u32) {
 pub fn instr32_6B_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte, r: u32, imm8s: u32) {
     codegen::gen_modrm_resolve_safe_read32(ctx, modrm_byte);
     let value_local = ctx.builder.set_new_local();
+    let dest = ctx.reg(r);
     gen_imul3_reg32(
-        ctx.builder,
-        &ctx.register_locals[r as usize],
+        ctx,
+        &dest,
         &value_local,
         &LocalOrImmediate::Immediate(imm8s as i32),
     );
     ctx.builder.free_local(value_local);
 }
 pub fn instr32_6B_reg_jit(ctx: &mut JitContext, r1: u32, r2: u32, imm8s: u32) {
-    gen_imul3_reg32(
-        ctx.builder,
-        &ctx.register_locals[r2 as usize],
-        &ctx.register_locals[r1 as usize],
-        &LocalOrImmediate::Immediate(imm8s as i32),
-    );
+    let dest = ctx.reg(r2);
+    let src = ctx.reg(r1);
+    gen_imul3_reg32(ctx, &dest, &src, &LocalOrImmediate::Immediate(imm8s as i32));
 }
 
 // Code for conditional jumps is generated automatically by the basic block codegen

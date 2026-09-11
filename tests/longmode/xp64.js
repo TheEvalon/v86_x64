@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import url from "node:url";
+import zlib from "node:zlib";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 const ROOT = path.join(__dirname, "../..");
@@ -165,6 +166,29 @@ let saw_lme = false;
 let saw_lma = false;
 let saw_is_64 = false;
 let hold_timer = null;
+let logged_fa80_pf = false;
+let logged_rsp_drop = false;
+let logged_bugcheck = false;
+let last_lma_line = "";
+let last_reboot_dump = "";
+let lma_generation = 0;
+let saw_hw_reset = false;
+let saw_bugcheck_data = false;
+let logged_hard_error = false;
+let syscall_log_count = 0;
+const MAX_SYSCALL_LOGS = 48;
+let pf_count = 0;
+let last_screenshot_score = -1;
+let saved_boot_menu = false;
+const NTOS_BUGCHECK = 0xFFFFF80001041690n;
+const KI_BUGCHECK_DATA = 0xFFFFF800011A2880n;
+const NTOS_SYSCALL = 0xFFFFF80001040F40n;
+const KUSER = 0xFFFFF78000000000n;
+const MAX_LMA_GENERATIONS = 3;
+const SYSCALL_NT_OPEN_FILE = 0x30;
+const SYSCALL_NT_CREATE_FILE = 0x52;
+const SYSCALL_NT_OPEN_SECTION = 0x34;
+const LOGON_RE = /Log On to Windows|Welcome to Windows|Ctrl\+Alt\+Del|Press Ctrl.*Alt.*Delete|to log on/i;
 
 function u64_from_pair(view)
 {
@@ -227,17 +251,481 @@ function phys_of_virt(cpu, virt)
     return Number((pte & 0xFFFFF000n) + (v & 0xFFFn));
 }
 
-function dump_at(cpu, virt)
+function pte_selfmap_va(virt)
+{
+    // Windows IA-32e self-map: PML4[0x1ED] recursively maps the tables.
+    // Mask after >>9 so the canonical 1s in a higher-half VA do not overflow
+    // the 48-bit self-map window (<<3 of the unmasked VPN does).
+    return 0xFFFFF68000000000n + ((as_u64(virt) >> 9n) & 0x7FFFFFFFF8n);
+}
+
+function walk_virt(cpu, virt)
+{
+    const v = as_u64(virt);
+    const cr3 = cpu.cr[3] >>> 0;
+    const i4 = Number((v >> 39n) & 0x1FFn);
+    const i3 = Number((v >> 30n) & 0x1FFn);
+    const i2 = Number((v >> 21n) & 0x1FFn);
+    const i1 = Number((v >> 12n) & 0x1FFn);
+    const pml4e = rd64_phys(cpu, cr3 + i4 * 8);
+    if(!(pml4e & 1n))
+    {
+        return "pml4[" + i4.toString(16) + "]=" + hex64(pml4e) + " np";
+    }
+    const pdpte = rd64_phys(cpu, Number(pml4e & 0xFFFFF000n) + i3 * 8);
+    if(!(pdpte & 1n))
+    {
+        return "pml4e=" + hex64(pml4e) + " pdpt[" + i3.toString(16) + "]=" + hex64(pdpte) + " np";
+    }
+    if(pdpte & 0x80n)
+    {
+        const phys = Number((pdpte & 0xFFFFC0000000n) + (v & 0x3FFFFFFFn));
+        return "1GB pml4e=" + hex64(pml4e) + " pdpte=" + hex64(pdpte) + " phys=" + hex64(phys);
+    }
+    const pde = rd64_phys(cpu, Number(pdpte & 0xFFFFF000n) + i2 * 8);
+    if(!(pde & 1n))
+    {
+        return "pml4e=" + hex64(pml4e) + " pdpte=" + hex64(pdpte) +
+            " pd[" + i2.toString(16) + "]=" + hex64(pde) + " np";
+    }
+    if(pde & 0x80n)
+    {
+        const phys = Number((pde & 0xFFE00000n) + (v & 0x1FFFFFn));
+        return "2MB pml4e=" + hex64(pml4e) + " pdpte=" + hex64(pdpte) +
+            " pde=" + hex64(pde) + " phys=" + hex64(phys);
+    }
+    const pte = rd64_phys(cpu, Number(pde & 0xFFFFF000n) + i1 * 8);
+    const phys = (pte & 1n) ? Number((pte & 0xFFFFF000n) + (v & 0xFFFn)) : null;
+    return "4K pml4e=" + hex64(pml4e) + " pdpte=" + hex64(pdpte) +
+        " pde=" + hex64(pde) + " pte=" + hex64(pte) +
+        (phys === null ? " np" : " phys=" + hex64(phys));
+}
+
+function dump_pml4(cpu)
+{
+    const cr3 = cpu.cr[3] >>> 0;
+    const parts = [];
+    for(let i = 0; i < 512; i++)
+    {
+        const e = rd64_phys(cpu, cr3 + i * 8);
+        if(e & 1n)
+        {
+            parts.push("[" + i.toString(16) + "]=" + hex64(e) + (e & 0x80n ? "PS" : ""));
+        }
+    }
+    return "cr3=" + hex64(cr3) + " " + (parts.join(" ") || "(empty)");
+}
+
+function dump_gdt_cs(cpu)
 {
     try
     {
+        const base = u64_from_pair(cpu.gdtr_offset64);
+        const cs = cpu.sreg[1] >>> 0;
+        const phys = phys_of_virt(cpu, base + BigInt(cs & ~7));
+        if(phys === null)
+        {
+            return "gdtr=" + hex64(base) + " cs=" + hex64(cs) + " unmapped";
+        }
+        return "gdtr=" + hex64(base) + " lim=" + hex64(cpu.gdtr_size[0] >>> 0) +
+            " cs=" + hex64(cs) +
+            " desc=" + hex64(rd64_phys(cpu, phys)) +
+            " " + hex64(rd64_phys(cpu, phys + 8));
+    }
+    catch(_e)
+    {
+        return "(gdt unreadable)";
+    }
+}
+
+function dump_tss(cpu)
+{
+    try
+    {
+        const base = u64_from_pair(cpu.tr_base64);
+        const phys = phys_of_virt(cpu, base);
+        if(phys === null)
+        {
+            return "tr=" + hex64(cpu.sreg[6]) + " tr_base=" + hex64(base) + " unmapped";
+        }
+        return "tr=" + hex64(cpu.sreg[6]) +
+            " tr_base=" + hex64(base) +
+            " rsp0=" + hex64(rd64_phys(cpu, phys + 4)) +
+            " ist1=" + hex64(rd64_phys(cpu, phys + 0x24));
+    }
+    catch(_e)
+    {
+        return "(tss unreadable)";
+    }
+}
+
+function idt_offset64(cpu, vec)
+{
+    const base = u64_from_pair(cpu.idtr_offset64);
+    const phys = phys_of_virt(cpu, base + BigInt(vec * 16));
+    if(phys === null)
+    {
+        return null;
+    }
+    const b = cpu.mem8;
+    const p = phys;
+    return BigInt(b[p] | b[p + 1] << 8 | b[p + 6] << 16 | b[p + 7] << 24) +
+        (BigInt(b[p + 8]) << 32n) + (BigInt(b[p + 9]) << 40n) +
+        (BigInt(b[p + 10]) << 48n) + (BigInt(b[p + 11]) << 56n);
+}
+
+function dump_idt_vec(cpu, vec)
+{
+    try
+    {
+        const offset = idt_offset64(cpu, vec);
+        if(offset === null)
+        {
+            return "idt[" + vec.toString(16) + "] unmapped";
+        }
+        const base = u64_from_pair(cpu.idtr_offset64);
+        const phys = phys_of_virt(cpu, base + BigInt(vec * 16));
+        const b = cpu.mem8;
+        const p = phys;
+        const selector = b[p + 2] | b[p + 3] << 8;
+        const ist = b[p + 4] & 7;
+        const type = b[p + 5];
+        return "idt[" + vec.toString(16) + "] sel=" + hex64(selector) +
+            " type=" + hex64(type) + " ist=" + ist + " offset=" + hex64(offset);
+    }
+    catch(_e)
+    {
+        return "idt[" + vec.toString(16) + "] unreadable";
+    }
+}
+
+function crc32_png(buf)
+{
+    if(typeof zlib.crc32 === "function")
+    {
+        return zlib.crc32(buf) >>> 0;
+    }
+    let c = ~0;
+    for(let i = 0; i < buf.length; i++)
+    {
+        c ^= buf[i];
+        for(let j = 0; j < 8; j++)
+        {
+            c = (c >>> 1) ^ (0xEDB88320 & -(c & 1));
+        }
+    }
+    return (~c) >>> 0;
+}
+
+function encode_png(width, height, rgba)
+{
+    function chunk(tag, data)
+    {
+        const t = Buffer.from(tag);
+        const payload = Buffer.concat([t, data]);
+        const len = Buffer.alloc(4);
+        len.writeUInt32BE(data.length);
+        const crc = Buffer.alloc(4);
+        crc.writeUInt32BE(crc32_png(payload));
+        return Buffer.concat([len, payload, crc]);
+    }
+    const raw = Buffer.alloc((width * 4 + 1) * height);
+    for(let y = 0; y < height; y++)
+    {
+        raw[y * (width * 4 + 1)] = 0;
+        rgba.copy(raw, y * (width * 4 + 1) + 1, y * width * 4, (y + 1) * width * 4);
+    }
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0);
+    ihdr.writeUInt32BE(height, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    return Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+        chunk("IHDR", ihdr),
+        chunk("IDAT", zlib.deflateSync(raw, { level: 9 })),
+        chunk("IEND", Buffer.alloc(0)),
+    ]);
+}
+
+const CGA16 = [
+    [0x00, 0x00, 0x00], [0x00, 0x00, 0xAA], [0x00, 0xAA, 0x00], [0x00, 0xAA, 0xAA],
+    [0xAA, 0x00, 0x00], [0xAA, 0x00, 0xAA], [0xAA, 0x55, 0x00], [0xAA, 0xAA, 0xAA],
+    [0x55, 0x55, 0x55], [0x55, 0x55, 0xFF], [0x55, 0xFF, 0x55], [0x55, 0xFF, 0xFF],
+    [0xFF, 0x55, 0x55], [0xFF, 0x55, 0xFF], [0xFF, 0xFF, 0x55], [0xFF, 0xFF, 0xFF],
+];
+
+function palette_rgb(pal, index, fallback)
+{
+    const color = pal[index] >>> 0;
+    const rgb = [color >>> 16 & 0xFF, color >>> 8 & 0xFF, color & 0xFF];
+    if(rgb[0] | rgb[1] | rgb[2])
+    {
+        return rgb;
+    }
+    return fallback || rgb;
+}
+
+function render_vga_text_rgba()
+{
+    try
+    {
+        const vga = emulator.v86.cpu.devices.vga;
+        if(!vga || vga.graphical_mode)
+        {
+            return null;
+        }
+        const cols = vga.max_cols || 80;
+        const rows = vga.max_rows || 25;
+        const cw = 8;
+        const ch = ((vga.max_scan_line || 0x0F) & 0x1F) + 1;
+        const width = cols * cw;
+        const height = rows * ch;
+        const rgba = Buffer.alloc(width * height * 4, 0);
+        const mem = vga.vga_memory;
+        const font = vga.plane2;
+        const pal = vga.vga256_palette;
+        const dac_map = vga.dac_map;
+        const dac_mask = vga.dac_mask === undefined ? 0xFF : vga.dac_mask;
+        const row_offset = Math.max(0, ((vga.offset_register || cols / 2) * 2 - cols) * 2);
+        let addr = (vga.start_address || 0) << 1;
+        for(let row = 0; row < rows; row++)
+        {
+            for(let col = 0; col < cols; col++)
+            {
+                const chr = mem[addr] || 0;
+                const attr = mem[addr | 1] || 0;
+                const fg_i = dac_mask & dac_map[attr & 0xF];
+                const bg_i = dac_mask & dac_map[attr >> 4 & 0xF];
+                const fg = palette_rgb(pal, fg_i, CGA16[attr & 0xF]);
+                const bg = palette_rgb(pal, bg_i, CGA16[attr >> 4 & 0xF]);
+                for(let py = 0; py < ch; py++)
+                {
+                    const bits = font[(chr << 5) + py] || 0;
+                    for(let px = 0; px < cw; px++)
+                    {
+                        const on = bits & (0x80 >> px);
+                        const o = ((row * ch + py) * width + (col * cw + px)) * 4;
+                        const rgb = on ? fg : bg;
+                        rgba[o] = rgb[0];
+                        rgba[o + 1] = rgb[1];
+                        rgba[o + 2] = rgb[2];
+                        rgba[o + 3] = 255;
+                    }
+                }
+                addr += 2;
+            }
+            addr += row_offset;
+        }
+        return { width, height, rgba };
+    }
+    catch(_e)
+    {
+        return null;
+    }
+}
+
+function render_text_rgba(lines)
+{
+    const cols = Math.max(80, ...lines.map(s => s.length));
+    const rows = Math.max(25, lines.length);
+    const cw = 8, ch = 16;
+    const width = cols * cw;
+    const height = rows * ch;
+    const rgba = Buffer.alloc(width * height * 4, 0);
+    for(let i = 0; i < rgba.length; i += 4)
+    {
+        rgba[i + 3] = 255;
+    }
+    for(let y = 0; y < rows; y++)
+    {
+        const line = lines[y] || "";
+        for(let x = 0; x < cols; x++)
+        {
+            const code = (line.charCodeAt(x) || 32) & 0xFF;
+            if(code === 32)
+            {
+                continue;
+            }
+            for(let py = 1; py < ch - 1; py++)
+            {
+                const rowbit = glyph_row(code, py);
+                for(let px = 1; px < cw - 1; px++)
+                {
+                    if((rowbit >> (7 - px)) & 1)
+                    {
+                        const o = ((y * ch + py) * width + (x * cw + px)) * 4;
+                        rgba[o] = rgba[o + 1] = rgba[o + 2] = 0xC0;
+                        rgba[o + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
+    return { width, height, rgba };
+}
+
+function glyph_row(code, py)
+{
+    const gy = py >> 1;
+    if(code >= 48 && code <= 57)
+    {
+        const bits = [0x3E, 0x06, 0x3C, 0x3C, 0x12, 0x3E, 0x3E, 0x20, 0x3E, 0x3E];
+        const n = bits[code - 48];
+        if(gy === 0 || gy === 6)
+        {
+            return n;
+        }
+        if(gy === 3 && (code === 50 || code === 51 || code === 52 || code === 53 || code === 56 || code === 57))
+        {
+            return 0x3E;
+        }
+        return (code & 1 ? 0x22 : 0x20) | ((code & 2) ? 0x02 : 0);
+    }
+    if((code >= 65 && code <= 90) || (code >= 97 && code <= 122))
+    {
+        const u = code & ~32;
+        if(gy === 0)
+        {
+            return 0x3E;
+        }
+        if(gy === 3 && u !== 73 && u !== 84)
+        {
+            return 0x3E;
+        }
+        if(gy === 6 && u !== 73)
+        {
+            return 0x22;
+        }
+        return 0x22;
+    }
+    if(code === 46)
+    {
+        return gy === 6 ? 0x08 : 0;
+    }
+    if(code === 58)
+    {
+        return gy === 2 || gy === 5 ? 0x08 : 0;
+    }
+    if(code === 45)
+    {
+        return gy === 3 ? 0x3E : 0;
+    }
+    return gy & 1 ? 0x2A : 0x14;
+}
+
+function grab_vga_rgba()
+{
+    try
+    {
+        const vga = emulator.v86.cpu.devices.vga;
+        if(!vga || !vga.graphical_mode)
+        {
+            return null;
+        }
+        vga.screen_fill_buffer();
+        const w = vga.screen_width || vga.svga_width;
+        const h = vga.screen_height || vga.svga_height;
+        if(!w || !h || vga.dest_buffet_offset === undefined)
+        {
+            return null;
+        }
+        const src = new Uint8ClampedArray(
+            emulator.v86.cpu.wasm_memory.buffer,
+            vga.dest_buffet_offset,
+            4 * w * h
+        );
+        let nonzero = 0;
+        for(let i = 0; i < src.length; i += 16)
+        {
+            if(src[i] || src[i + 1] || src[i + 2])
+            {
+                nonzero++;
+            }
+        }
+        if(!nonzero)
+        {
+            return null;
+        }
+        return { width: w, height: h, rgba: Buffer.from(src) };
+    }
+    catch(_e)
+    {
+        return null;
+    }
+}
+
+function save_boot_screenshot(label)
+{
+    const out = process.env.XP64_SCREENSHOT ||
+        path.join("/opt/cursor/artifacts", "xp64_boot_screen.png");
+    const dest = label ? out.replace(/\.png$/i, "_" + label + ".png") : out;
+    try
+    {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        try
+        {
+            const vga = emulator.v86.cpu.devices.vga;
+            // complete_redraw only dirties the pixel cache. Planar VGA still
+            // needs a replot from plane0–3 or dest_buffer stays black.
+            if(typeof vga.complete_replot === "function")
+            {
+                vga.complete_replot();
+            }
+            else
+            {
+                vga.complete_redraw();
+            }
+            vga.screen_fill_buffer();
+        }
+        catch(_e)
+        {}
+        const gfx = grab_vga_rgba();
+        const vga_font = render_vga_text_rgba();
+        const vga_info = dump_vga(emulator.v86.cpu);
+        const text = screen_text() || (vga_info.split("vga_text:\n")[1] || "");
+        let font_ok = false;
+        try
+        {
+            const font = emulator.v86.cpu.devices.vga.plane2;
+            for(let i = 32 * 32; i < 127 * 32 && font; i++)
+            {
+                if(font[i])
+                {
+                    font_ok = true;
+                    break;
+                }
+            }
+        }
+        catch(_e)
+        {}
+        const img = gfx || (font_ok && vga_font) || render_text_rgba(text ? text.split("\n") : [""]);
+        fs.writeFileSync(dest, encode_png(img.width, img.height, img.rgba));
+        const txt_out = dest.replace(/\.png$/i, ".txt");
+        fs.writeFileSync(txt_out, (text || "(blank text screen)") + "\n" + vga_info + "\n");
+        console.error("xp64 screenshot: " + dest + " " + img.width + "x" + img.height +
+            (gfx ? " graphical" : " text"));
+        return dest;
+    }
+    catch(e)
+    {
+        console.error("xp64 screenshot failed: " + e);
+        return null;
+    }
+}
+
+function dump_at(cpu, virt, count)
+{
+    try
+    {
+        const n = count || 16;
         const phys = phys_of_virt(cpu, virt);
         if(phys === null)
         {
             return "(unreadable)";
         }
         const bytes = [];
-        for(let i = 0; i < 16; i++)
+        for(let i = 0; i < n; i++)
         {
             bytes.push(("0" + cpu.mem8[phys + i].toString(16)).slice(-2));
         }
@@ -249,6 +737,483 @@ function dump_at(cpu, virt)
     }
 }
 
+function rd64_virt(cpu, virt)
+{
+    const phys = phys_of_virt(cpu, virt);
+    if(phys === null)
+    {
+        return null;
+    }
+    return rd64_phys(cpu, phys);
+}
+
+function utf16_at(cpu, virt, nbytes)
+{
+    const phys = phys_of_virt(cpu, virt);
+    if(phys === null)
+    {
+        return null;
+    }
+    const chars = [];
+    const n = Math.max(0, Math.min(nbytes || 0, 240));
+    for(let i = 0; i + 1 < n; i += 2)
+    {
+        const c = cpu.mem8[phys + i] | cpu.mem8[phys + i + 1] << 8;
+        if(c === 0)
+        {
+            break;
+        }
+        chars.push(c >= 32 && c < 127 ? String.fromCharCode(c) : "\\u" +
+            ("000" + c.toString(16)).slice(-4));
+    }
+    return chars.join("");
+}
+
+function dump_bytes_va(cpu, virt, n)
+{
+    const phys = phys_of_virt(cpu, virt);
+    if(phys === null)
+    {
+        return hex64(virt) + " unmapped";
+    }
+    const bytes = [];
+    for(let i = 0; i < n; i++)
+    {
+        bytes.push(("0" + cpu.mem8[phys + i].toString(16)).slice(-2));
+    }
+    return hex64(virt) + " [" + bytes.join(" ") + "]";
+}
+
+function dump_cstr(cpu, va, n)
+{
+    const phys = phys_of_virt(cpu, va);
+    if(phys === null)
+    {
+        return hex64(va) + " unmapped";
+    }
+    const chars = [];
+    for(let i = 0; i < n; i++)
+    {
+        const c = cpu.mem8[phys + i];
+        if(c === 0)
+        {
+            break;
+        }
+        chars.push(c >= 32 && c < 127 ? String.fromCharCode(c) : ".");
+    }
+    return hex64(va) + " \"" + chars.join("") + "\"";
+}
+
+function dump_ustr(cpu, va)
+{
+    const phys = phys_of_virt(cpu, va);
+    if(phys === null)
+    {
+        return hex64(va) + " unmapped";
+    }
+    const len = cpu.mem8[phys] | cpu.mem8[phys + 1] << 8;
+    const maxlen = cpu.mem8[phys + 2] | cpu.mem8[phys + 3] << 8;
+    const buf = rd64_phys(cpu, phys + 8);
+    const s = utf16_at(cpu, buf, Math.min(len, 200));
+    return hex64(va) + " ustr len=" + len + "/" + maxlen +
+        " buf=" + hex64(buf) + " \"" + (s === null ? "unmapped" : s) + "\"";
+}
+
+function read_gpr64(cpu, n)
+{
+    if(n < 8)
+    {
+        return BigInt(cpu.reg32[n] >>> 0) + (BigInt(cpu.reg_high32[n] >>> 0) << 32n);
+    }
+    const i = n - 8;
+    return BigInt(cpu.reg_r8[i * 2] >>> 0) + (BigInt(cpu.reg_r8[i * 2 + 1] >>> 0) << 32n);
+}
+
+function dump_object_name(cpu, oa)
+{
+    if(!oa)
+    {
+        return "oa=0";
+    }
+    const root = rd64_virt(cpu, oa + 8n);
+    const name = rd64_virt(cpu, oa + 16n);
+    return "oa=" + hex64(oa) +
+        " root=" + (root === null ? "unmapped" : hex64(root)) +
+        " " + (name === null ? "name=unmapped" : dump_ustr(cpu, name));
+}
+
+function guest_ram(cpu)
+{
+    const n = cpu.memory_size[0] >>> 0;
+    return Buffer.from(cpu.mem8.buffer, cpu.mem8.byteOffset, n);
+}
+
+function find_ram(cpu, needle, max_hits)
+{
+    const buf = guest_ram(cpu);
+    const hits = [];
+    let idx = 0;
+    while(hits.length < max_hits)
+    {
+        idx = buf.indexOf(needle, idx);
+        if(idx < 0)
+        {
+            break;
+        }
+        hits.push(idx);
+        idx += 1;
+    }
+    return hits;
+}
+
+function dump_ram_ascii(cpu, phys, n)
+{
+    const mem = cpu.mem8;
+    const chars = [];
+    for(let i = 0; i < n; i++)
+    {
+        const c = mem[phys + i];
+        chars.push(c >= 32 && c < 127 ? String.fromCharCode(c) : ".");
+    }
+    return hex64(phys) + " \"" + chars.join("") + "\"";
+}
+
+function dump_ram_hex(cpu, phys, n)
+{
+    const mem = cpu.mem8;
+    const bytes = [];
+    for(let i = 0; i < n; i++)
+    {
+        bytes.push(("0" + mem[phys + i].toString(16)).slice(-2));
+    }
+    return hex64(phys) + " [" + bytes.join(" ") + "]";
+}
+
+function utf16_cstr_phys(cpu, phys, max_chars)
+{
+    const mem = cpu.mem8;
+    const chars = [];
+    for(let i = 0; i < max_chars; i++)
+    {
+        const lo = mem[phys + i * 2];
+        const hi = mem[phys + i * 2 + 1];
+        const c = lo | hi << 8;
+        if(c === 0)
+        {
+            break;
+        }
+        chars.push(c >= 32 && c < 127 ? String.fromCharCode(c) : ".");
+    }
+    return chars.join("");
+}
+
+function utf16_expand_phys(cpu, phys)
+{
+    let start = phys;
+    let steps = 0;
+    while(start >= 2 && steps < 160)
+    {
+        const c = cpu.mem8[start - 2] | cpu.mem8[start - 1] << 8;
+        if(c < 32 || c > 126)
+        {
+            break;
+        }
+        start -= 2;
+        steps++;
+    }
+    return hex64(start) + " \"" + utf16_cstr_phys(cpu, start, 180) + "\"";
+}
+
+function dump_loader_paths(cpu)
+{
+    const parts = [];
+    const kuser = utf16_at(cpu, KUSER + 0x30n, 520);
+    parts.push("NtSystemRoot=\"" + (kuser === null ? "unmapped" : kuser) + "\"");
+    parts.push("KUSER+30=" + dump_bytes_va(cpu, KUSER + 0x30n, 32));
+    const needles = [
+        ["csrss.exe", "csrss.exe"],
+        ["basesrv", "basesrv"],
+        ["winsrv.dll", "winsrv.dll"],
+        ["KnownDlls", Buffer.from([0x4B, 0, 0x6E, 0, 0x6F, 0, 0x77, 0, 0x6E, 0, 0x44, 0, 0x6C, 0, 0x6C, 0, 0x73, 0])],
+        ["u16_winsrv", Buffer.from("w\0i\0n\0s\0r\0v\0")],
+        ["u16_sys32", Buffer.from("C\0:\0\\\0W\0I\0N\0D\0O\0W\0S\0\\\0s\0y\0s\0t\0e\0m\0")],
+        ["Default Load Path", "Default Load Path"],
+    ];
+    for(const [label, needle] of needles)
+    {
+        const hits = find_ram(cpu, needle, 6);
+        if(!hits.length)
+        {
+            parts.push(label + "_phys=none");
+            continue;
+        }
+        const shown = hits.map(function(h)
+        {
+            if(label.indexOf("u16_") === 0)
+            {
+                return utf16_expand_phys(cpu, h);
+            }
+            if(label === "winsrv.dll")
+            {
+                const before = Math.max(0, h - 64);
+                return dump_ram_ascii(cpu, h, 48) + " before=" + dump_ram_hex(cpu, before, 16) +
+                    " ascii_before=" + dump_ram_ascii(cpu, before, 64);
+            }
+            return dump_ram_ascii(cpu, h, 64);
+        });
+        parts.push(label + "_phys=" + shown.join(" ; "));
+    }
+    return parts.join("\n");
+}
+
+function interesting_path(s)
+{
+    return /winsrv|basesrv|csrsrv|csrss|user32|win32k|knowndll|system32\\w|system32\/w/i.test(s);
+}
+
+function looks_kernel_ptr(v)
+{
+    if(v === null || v < 0xFFFF800000000000n)
+    {
+        return false;
+    }
+    return true;
+}
+
+function dump_bugcheck(cpu)
+{
+    const words = [];
+    const extra = [];
+    for(let i = 0; i < 5; i++)
+    {
+        const v = rd64_virt(cpu, KI_BUGCHECK_DATA + BigInt(i * 8));
+        if(v && v !== 0n)
+        {
+            saw_bugcheck_data = true;
+        }
+        words.push(v === null ? "unmapped" : hex64(v));
+        if(looks_kernel_ptr(v))
+        {
+            extra.push("p" + i + "_raw=" + dump_bytes_va(cpu, v, 32));
+            extra.push("p" + i + "_cstr=" + dump_cstr(cpu, v, 64));
+            extra.push("p" + i + "_ustr=" + dump_ustr(cpu, v));
+            extra.push("p" + i + "_utf16=" + JSON.stringify(utf16_at(cpu, v, 80)));
+        }
+    }
+    const gs = u64_from_pair(cpu.msr_gs_base);
+    const pcr20 = rd64_virt(cpu, gs + 0x20n);
+    let prcb = "(unmapped)";
+    if(pcr20 !== null)
+    {
+        const code = rd64_virt(cpu, pcr20 + 0x1A0n);
+        const p1 = rd64_virt(cpu, pcr20 + 0x1A8n);
+        prcb = "pcr20=" + hex64(pcr20) +
+            " +1a0=" + (code === null ? "unmapped" : hex64(code)) +
+            " +1a8=" + (p1 === null ? "unmapped" : hex64(p1));
+    }
+    return "KiBugCheckData=" + words.join(" ") + " " + prcb +
+        (extra.length ? "\n" + extra.join("\n") : "") +
+        "\nNtSystemRoot+30=" + JSON.stringify(utf16_at(cpu, KUSER + 0x30n, 80)) +
+        "\nNtSystemRoot+260=" + JSON.stringify(utf16_at(cpu, KUSER + 0x260n, 80));
+}
+
+function dump_reboot(cpu)
+{
+    const rip = u64_from_pair(cpu.rip64);
+    const rsp = BigInt(cpu.reg32[4] >>> 0) + (BigInt(cpu.reg_high32[4] >>> 0) << 32n);
+    return dump_regs(cpu) +
+        "\nrip_bytes=" + dump_at(cpu, rip, 32) +
+        "\n" + dump_bugcheck(cpu) +
+        "\n" + dump_loader_paths(cpu) +
+        "\nrsp_mem=" + dump_stack_words(cpu, rsp, 16) +
+        "\n" + dump_stuck(cpu);
+}
+
+function dump_pic(cpu)
+{
+    try
+    {
+        const m = new Uint8Array(cpu.wasm_memory.buffer, cpu.get_pic_addr_master(), 16);
+        const s = new Uint8Array(cpu.wasm_memory.buffer, cpu.get_pic_addr_slave(), 16);
+        return "master mask=" + hex64(m[0]) + " map=" + hex64(m[1]) +
+            " isr=" + hex64(m[2]) + " irr=" + hex64(m[3]) +
+            " slave mask=" + hex64(s[0]) + " map=" + hex64(s[1]) +
+            " isr=" + hex64(s[2]) + " irr=" + hex64(s[3]);
+    }
+    catch(e)
+    {
+        return "(pic " + e + ")";
+    }
+}
+
+function dump_stack_words(cpu, virt, count)
+{
+    const parts = [];
+    for(let i = 0; i < count; i++)
+    {
+        const va = as_u64(virt) + BigInt(i * 8);
+        const phys = phys_of_virt(cpu, va);
+        if(phys === null)
+        {
+            parts.push(hex64(va) + "=unmapped");
+            continue;
+        }
+        parts.push(hex64(va) + "=" + hex64(rd64_phys(cpu, phys)));
+    }
+    return parts.join(" ");
+}
+
+function dump_vga(cpu)
+{
+    try
+    {
+        const vga = cpu.devices.vga;
+        const mem = vga.vga_memory;
+        let nonzero = 0;
+        let printable = 0;
+        const cols = vga.max_cols || 80;
+        const rows = [];
+        let addr = (vga.start_address || 0) << 1;
+        for(let r = 0; r < (vga.max_rows || 25); r++)
+        {
+            let line = "";
+            for(let c = 0; c < cols; c++)
+            {
+                const chr = mem[addr] || 0;
+                const attr = mem[addr | 1] || 0;
+                if(chr)
+                {
+                    nonzero++;
+                }
+                if(attr)
+                {
+                    nonzero++;
+                }
+                if(chr >= 32 && chr < 127)
+                {
+                    printable++;
+                    line += String.fromCharCode(chr);
+                }
+                else
+                {
+                    line += chr ? "." : " ";
+                }
+                addr += 2;
+            }
+            rows.push(line.replace(/\s+$/g, ""));
+        }
+        let font_nz = 0;
+        const font = vga.plane2;
+        if(font)
+        {
+            for(let i = 0; i < 256 * 32; i++)
+            {
+                if(font[i])
+                {
+                    font_nz++;
+                }
+            }
+        }
+        const hex0 = [];
+        for(let i = 0; i < 32; i++)
+        {
+            hex0.push(("0" + mem[i].toString(16)).slice(-2));
+        }
+        function plane_nz(arr)
+        {
+            if(!arr)
+            {
+                return 0;
+            }
+            let n = 0;
+            for(let i = 0; i < arr.length; i++)
+            {
+                if(arr[i])
+                {
+                    n++;
+                }
+            }
+            return n;
+        }
+        const p0 = plane_nz(vga.plane0);
+        const p1 = plane_nz(vga.plane1);
+        const p2 = plane_nz(vga.plane2);
+        const p3 = plane_nz(vga.plane3);
+        let svga_nz = 0;
+        const svga_mem = vga.svga_memory;
+        if(svga_mem)
+        {
+            const n = Math.min(svga_mem.length, 1024 * 1024);
+            for(let i = 0; i < n; i++)
+            {
+                if(svga_mem[i])
+                {
+                    svga_nz++;
+                }
+            }
+        }
+        return "graphical=" + (+vga.graphical_mode) +
+            " svga=" + (+vga.svga_enabled) +
+            " bpp=" + (vga.svga_bpp || 0) +
+            " size=" + (vga.screen_width || 0) + "x" + (vga.screen_height || 0) +
+            " attr=" + hex64(vga.attribute_mode >>> 0) +
+            " crtc=" + hex64(vga.crtc_mode >>> 0) +
+            " cols=" + (vga.max_cols || 0) +
+            " rows=" + (vga.max_rows || 0) +
+            " start=" + hex64(vga.start_address >>> 0) +
+            " text_nz=" + nonzero +
+            " printable=" + printable +
+            " font_nz=" + font_nz +
+            " plane_nz=" + p0 + "," + p1 + "," + p2 + "," + p3 +
+            " svga_nz=" + svga_nz +
+            " mem0=" + hex0.join(" ") +
+            "\nvga_text:\n" + rows.filter(Boolean).join("\n");
+    }
+    catch(e)
+    {
+        return "(vga " + e + ")";
+    }
+}
+
+function dump_stack_ptes(cpu)
+{
+    const parts = [];
+    for(let off = 0; off <= 0x8000; off += 0x1000)
+    {
+        const va = 0xFFFFF80000300000n + BigInt(off);
+        parts.push(hex64(va) + " " + walk_virt(cpu, va));
+    }
+    return parts.join("\n");
+}
+
+function scan_irq_frames(cpu)
+{
+    const top = 0xFFFFF80000308000n;
+    const bot = 0xFFFFF80000300000n;
+    let frames = 0;
+    let sample = [];
+    for(let va = top - 40n; va >= bot; va -= 8n)
+    {
+        const phys = phys_of_virt(cpu, va);
+        if(phys === null)
+        {
+            continue;
+        }
+        const cs = rd64_phys(cpu, phys + 8);
+        const ss = rd64_phys(cpu, phys + 32);
+        if(cs === 0x10n && (ss === 0x18n || ss === 0n))
+        {
+            frames++;
+            if(sample.length < 6)
+            {
+                sample.push(hex64(va) + " rip=" + hex64(rd64_phys(cpu, phys)) +
+                    " rsp=" + hex64(rd64_phys(cpu, phys + 24)));
+            }
+        }
+    }
+    return "irq_frames=" + frames + (sample.length ? " " + sample.join(" ; ") : "");
+}
+
 function dump_apic(cpu)
 {
     try
@@ -258,7 +1223,13 @@ function dump_apic(cpu)
             " svr=" + hex64(apic[40] >>> 0) +
             " lvt_timer=" + hex64(apic[8] >>> 0) +
             " lint0=" + hex64(apic[10] >>> 0) +
-            " init=" + hex64(apic[3] >>> 0);
+            " init=" + hex64(apic[3] >>> 0) +
+            " cur=" + hex64(apic[4] >>> 0) +
+            " div=" + hex64(apic[1] >>> 0) +
+            " irr7=" + hex64(apic[23] >>> 0) +
+            " isr7=" + hex64(apic[31] >>> 0) +
+            " irr4=" + hex64(apic[20] >>> 0) +
+            " isr4=" + hex64(apic[28] >>> 0);
     }
     catch(e)
     {
@@ -325,6 +1296,7 @@ function dump_regs(cpu)
     parts.push("flags=" + hex64(cpu.flags[0] >>> 0));
     parts.push("efer=" + hex64(u64_from_pair(cpu.efer)));
     parts.push("cr0=" + hex64(cpu.cr[0] >>> 0));
+    parts.push("cr2=" + hex64(u64_from_pair(cpu.cr2_64)));
     parts.push("cr3=" + hex64(cpu.cr[3] >>> 0));
     parts.push("cr4=" + hex64(cpu.cr[4] >>> 0));
     parts.push("gs_base=" + hex64(u64_from_pair(cpu.msr_gs_base)));
@@ -334,13 +1306,68 @@ function dump_regs(cpu)
     return parts.join(" ");
 }
 
+function dump_rsp_drop(cpu)
+{
+    try
+    {
+        const v = cpu.dbg_rsp_drop;
+        if(!v)
+        {
+            return "(no view)";
+        }
+        const u64 = i => BigInt(v[i * 2] >>> 0) + (BigInt(v[i * 2 + 1] >>> 0) << 32n);
+        return "last=" + hex64(u64(0)) +
+            " rip=" + hex64(u64(1)) +
+            " from=" + hex64(u64(2)) +
+            " to=" + hex64(u64(3)) +
+            " prev=" + hex64(u64(4)) +
+            " lma_ints=" + hex64(u64(5)) +
+            " last_int=" + hex64(u64(6));
+    }
+    catch(e)
+    {
+        return "(" + e + ")";
+    }
+}
+
 function dump_stuck(cpu)
 {
     const rip = u64_from_pair(cpu.rip64);
+    const cr2 = u64_from_pair(cpu.cr2_64);
+    const rax = BigInt(cpu.reg32[0] >>> 0) + (BigInt(cpu.reg_high32[0] >>> 0) << 32n);
+    const rdi = BigInt(cpu.reg32[7] >>> 0) + (BigInt(cpu.reg_high32[7] >>> 0) << 32n);
+    const walks = [
+        ["rip", rip],
+        ["cr2", cr2],
+        ["rax", rax],
+        ["rdi", rdi],
+        ["fa80:2000", 0xFFFFFA8000002000n],
+        ["fa80:0c20", 0xFFFFFA8000000C20n],
+        ["selfmap-pte", pte_selfmap_va(0xFFFFFA8000002000n)],
+        ["ntoskrnl", 0xFFFFF80001000000n],
+        ["gdt", 0xFFFFF80000300000n],
+        ["pcr-stack", 0xFFFFF80000308000n],
+    ].map(([name, va]) => name + " " + walk_virt(cpu, va)).join("\n");
     return dump_regs(cpu) +
         "\nrip_bytes=" + dump_at(cpu, rip) +
+        "\n" + dump_gdt_cs(cpu) +
+        "\n" + dump_tss(cpu) +
+        "\n" + dump_idt_vec(cpu, 14) +
+        "\n" + dump_idt_vec(cpu, 0xD1) +
+        "\n" + dump_idt_vec(cpu, 0xFD) +
+        "\nhandler14=" + dump_at(cpu, idt_offset64(cpu, 14) || 0n) +
+        "\n" + dump_pml4(cpu) +
+        "\n" + walks +
         "\napic=" + dump_apic(cpu) +
-        "\nioapic=" + dump_ioapic(cpu);
+        "\nioapic=" + dump_ioapic(cpu) +
+        "\npic=" + dump_pic(cpu) +
+        "\n" + scan_irq_frames(cpu) +
+        "\npf_count=" + pf_count +
+        "\nrsp_drop=" + dump_rsp_drop(cpu) +
+        "\nstack_ptes:\n" + dump_stack_ptes(cpu) +
+        "\nvga=" + dump_vga(cpu) +
+        "\ngdt_mem=" + dump_stack_words(cpu, 0xFFFFF80000300000n, 8) +
+        "\nrsp_mem=" + dump_stack_words(cpu, BigInt(cpu.reg32[4] >>> 0) + (BigInt(cpu.reg_high32[4] >>> 0) << 32n), 8);
 }
 
 function finish(code, message)
@@ -377,6 +1404,14 @@ function finish(code, message)
     }
     try
     {
+        save_boot_screenshot();
+    }
+    catch(e)
+    {
+        console.error("xp64 screenshot failed: " + e);
+    }
+    try
+    {
         emulator.destroy();
     }
     catch(_e)
@@ -387,6 +1422,55 @@ function finish(code, message)
 emulator.add_listener("emulator-loaded", function()
 {
     const cpu0 = emulator.v86.cpu;
+    const orig_reboot = cpu0.reboot_internal.bind(cpu0);
+    cpu0.reboot_internal = function()
+    {
+        if(!finished && (saw_lma || cpu0.is_64[0]))
+        {
+            saw_hw_reset = true;
+            try
+            {
+                last_reboot_dump = dump_reboot(cpu0);
+                console.error("xp64: reboot_internal gen=" + lma_generation +
+                    "\n" + last_reboot_dump);
+            }
+            catch(e)
+            {
+                console.error("xp64: reboot_internal dump failed: " + e);
+            }
+            try
+            {
+                save_boot_screenshot("hwreset");
+            }
+            catch(_e)
+            {}
+            if(saw_bugcheck_data || logged_bugcheck)
+            {
+                finish(1, "xp64: firmware reboot after bugcheck\nlast_lma=" +
+                    last_lma_line);
+                return;
+            }
+        }
+        return orig_reboot();
+    };
+    try
+    {
+        const ps2 = cpu0.devices.ps2;
+        if(ps2 && typeof ps2.port64_write === "function")
+        {
+            const orig_p64 = ps2.port64_write.bind(ps2);
+            ps2.port64_write = function(write_byte)
+            {
+                if(write_byte === 0xFE && (saw_lma || cpu0.is_64[0]))
+                {
+                    console.error("xp64: KBC reset command (port 64, 0xFE)");
+                }
+                return orig_p64(write_byte);
+            };
+        }
+    }
+    catch(_e)
+    {}
     const orig_main_loop = cpu0.main_loop.bind(cpu0);
     let last_log = Date.now();
     cpu0.main_loop = function()
@@ -400,34 +1484,204 @@ emulator.add_listener("emulator-loaded", function()
         if(efer & EFER_LMA && !saw_lma)
         {
             saw_lma = true;
-            console.error("xp64: EFER.LMA " + dump_regs(cpu0));
+            lma_generation++;
+            console.error("xp64: EFER.LMA gen=" + lma_generation + " " + dump_regs(cpu0));
+        }
+        if(saw_lma && !(efer & EFER_LMA))
+        {
+            if(hold_timer)
+            {
+                clearTimeout(hold_timer);
+                hold_timer = null;
+            }
+            const why = "xp64: LMA dropped gen=" + lma_generation +
+                (saw_hw_reset ? " (hardware reset)" : " (not via reboot_internal)") +
+                "\nlast_lma=" + last_lma_line +
+                (last_reboot_dump ? "\nlast_reboot=" + last_reboot_dump.slice(0, 2000) : "");
+            saw_lma = false;
+            saw_is_64 = false;
+            logged_bugcheck = false;
+            logged_rsp_drop = false;
+            logged_hard_error = false;
+            if(saw_bugcheck_data || !saw_hw_reset || lma_generation >= MAX_LMA_GENERATIONS)
+            {
+                finish(1, why);
+                return;
+            }
+            console.error(why + "\nxp64: continuing into next firmware boot");
+            saw_hw_reset = false;
+            last_reboot_dump = "";
+        }
+        if(cpu0.is_64[0] && saw_lma)
+        {
+            const rip = u64_from_pair(cpu0.rip64);
+            if(rip === NTOS_SYSCALL)
+            {
+                const eax = cpu0.reg32[0] >>> 0;
+                if(eax === SYSCALL_NT_OPEN_FILE ||
+                    eax === SYSCALL_NT_CREATE_FILE ||
+                    eax === SYSCALL_NT_OPEN_SECTION)
+                {
+                    try
+                    {
+                        const desc = dump_object_name(cpu0, read_gpr64(cpu0, 8));
+                        const insns = cpu0.instruction_counter[0] >>> 0;
+                        const hot = /winsrv|basesrv/i.test(desc);
+                        if((hot || syscall_log_count < MAX_SYSCALL_LOGS) &&
+                            (hot || interesting_path(desc) ||
+                                (insns > 2400000000 && /\.dll/i.test(desc))))
+                        {
+                            syscall_log_count++;
+                            const names = {
+                                0x30: "NtOpenFile",
+                                0x52: "NtCreateFile",
+                                0x34: "NtOpenSection",
+                            };
+                            console.error("xp64: syscall " + (names[eax] || hex64(eax)) +
+                                " insns=" + insns + " cr3=" + hex64(cpu0.cr[3] >>> 0) +
+                                " " + desc);
+                        }
+                    }
+                    catch(_e)
+                    {}
+                }
+            }
+        }
+        if(cpu0.is_64[0] && !logged_bugcheck)
+        {
+            const rip = u64_from_pair(cpu0.rip64);
+            if(rip === NTOS_BUGCHECK)
+            {
+                logged_bugcheck = true;
+                try
+                {
+                    dump_bugcheck(cpu0);
+                }
+                catch(_e)
+                {}
+                console.error("xp64: KeBugCheckEx " + dump_regs(cpu0) +
+                    "\n" + dump_stuck(cpu0));
+            }
+        }
+        if(cpu0.is_64[0] && !logged_rsp_drop)
+        {
+            const rsp = BigInt(cpu0.reg32[4] >>> 0) + (BigInt(cpu0.reg_high32[4] >>> 0) << 32n);
+            if(rsp >= 0xFFFFF80000300000n && rsp < 0xFFFFF80000304000n)
+            {
+                logged_rsp_drop = true;
+                console.error("xp64: PCR stack entered GDT pages\n" + dump_stuck(cpu0));
+            }
         }
         if(cpu0.is_64[0] && !saw_is_64)
         {
             saw_is_64 = true;
-            console.error("xp64: CS.L " + dump_regs(cpu0));
+            console.error("xp64: CS.L gen=" + lma_generation + " " + dump_regs(cpu0));
             console.log("xp64: entered long mode");
+            try
+            {
+                save_boot_screenshot("lma");
+            }
+            catch(_e)
+            {}
+            if(hold_timer)
+            {
+                clearTimeout(hold_timer);
+            }
             hold_timer = setTimeout(() => {
-                finish(0, "xp64: pass (long mode held " + HOLD_MS + "ms)");
+                const efer_now = emulator.v86.cpu.efer[0] >>> 0;
+                if(!(efer_now & EFER_LMA))
+                {
+                    return;
+                }
+                finish(0, "xp64: pass (long mode held " + HOLD_MS +
+                    "ms gen=" + lma_generation + ")");
             }, HOLD_MS);
         }
         const now = Date.now();
-        if(now - last_log >= 5000)
+        if(now - last_log >= 2000)
         {
             last_log = now;
             const text = screen_text().split("\n").filter(Boolean).slice(-6).join(" | ");
-            console.error("xp64: " + dump_regs(cpu0) + (text ? " screen=[" + text + "]" : ""));
+            const rip = u64_from_pair(cpu0.rip64);
+            last_lma_line = dump_regs(cpu0) + " pf=" + pf_count +
+                " rip_bytes=" + dump_at(cpu0, rip, 32);
+            try
+            {
+                last_lma_line += " " + dump_bugcheck(cpu0);
+            }
+            catch(_e)
+            {}
+            console.error("xp64: " + last_lma_line + (text ? " screen=[" + text + "]" : ""));
+            if(!logged_hard_error && cpu0.is_64[0])
+            {
+                try
+                {
+                    const gs = u64_from_pair(cpu0.msr_gs_base);
+                    const pcr20 = rd64_virt(cpu0, gs + 0x20n);
+                    const code = pcr20 === null ? 0n : rd64_virt(cpu0, pcr20 + 0x1A0n);
+                    if(code && code !== 0n)
+                    {
+                        logged_hard_error = true;
+                        console.error("xp64: first hard-error pcr+1a0=" + hex64(code) +
+                            "\n" + dump_loader_paths(cpu0));
+                    }
+                }
+                catch(_e)
+                {}
+            }
+            if(LOGON_RE.test(screen_text()))
+            {
+                finish(0, "xp64: pass (logon text) gen=" + lma_generation +
+                    "\n" + last_lma_line);
+                return orig_main_loop();
+            }
+            try
+            {
+                const info = dump_vga(cpu0);
+                const score = (info.match(/printable=([0-9]+)/) || [0, "0"])[1] | 0;
+                if(score > last_screenshot_score)
+                {
+                    last_screenshot_score = score;
+                    save_boot_screenshot("live");
+                }
+                // SeaBIOS fills every cell (printable=2000), so a later NTLDR
+                // recovery menu never raises the score. Snapshot it while VGA
+                // is still in text mode so the hardware font is used.
+                const full = screen_text();
+                if(!saved_boot_menu && /Start Windows Normally|Safe Mode/.test(full))
+                {
+                    saved_boot_menu = true;
+                    save_boot_screenshot("menu");
+                }
+            }
+            catch(_e)
+            {}
         }
         return orig_main_loop();
     };
 
     emulator.cpu_exception_hook = function(n)
     {
+        const cpu = emulator.v86.cpu;
+        if(n === 14)
+        {
+            pf_count++;
+            if(n === 14 && !logged_fa80_pf)
+            {
+                const cr2 = u64_from_pair(cpu.cr2_64);
+                if((cr2 >> 32n) === 0xFFFFFA80n)
+                {
+                    logged_fa80_pf = true;
+                    console.error("xp64: first session-pool #PF #" + pf_count +
+                        " cr2=" + hex64(cr2) + "\n" + dump_stuck(cpu));
+                }
+            }
+            return false;
+        }
         if(n !== 6 && n !== 8)
         {
             return false;
         }
-        const cpu = emulator.v86.cpu;
         const what = n === 8 ? "#DF" : "#UD";
         finish(1, "xp64: unexpected " + what + " " + dump_regs(cpu) +
             " prev=" + hex64(u64_from_pair(cpu.previous_rip64)));

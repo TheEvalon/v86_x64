@@ -121,8 +121,11 @@ high_entry:
     mov [rdi + 8], eax
 
     xor ebx, ebx
+    mov r13, rsp
     mov rax, 0xFFFFFFFF90000000
     mov rbx, [rax]
+    cmp rsp, r13
+    jne fail_iret_rsp
     mov ecx, 0xAABBCCDD
     cmp rax, rcx
     jne fail_pf
@@ -173,6 +176,50 @@ high_entry:
     mov rcx, 0xFFFFFFFF90000000
     cmp rax, rcx
     jne fail_invlpg_cr2
+
+    ; 1GB page at VA 0x40000000 identity-maps phys 0. The relocated
+    ; payload at 16MB starts with `cld`.
+    mov rax, 0x41000000
+    cmp byte [rax], 0xFC
+    jne fail_1g
+    mov ebx, [rax]
+    test ebx, ebx
+    jz fail_1g
+
+    ; POP m64 into a higher-half page whose low 32 bits are >4K from RSP
+    ; (stack is in 0xffffffff8100xxxx). A leftover pending_linear64 from the
+    ; stack read used to truncate the store to VA 0x80001000 (unmapped).
+    mov rax, 0xFFFFFFFF80001000
+    mov rbx, 0x1122334455667788
+    mov qword [rax], 0
+    push rbx
+    pop qword [rax]
+    cmp qword [rax], rbx
+    jne fail_popm
+
+    ; XLAT uses RBX+AL. is_asize_32() is sticky-true in 64-bit CS, so the
+    ; 32-bit helper would truncate a higher-half table pointer.
+    lea rbx, [bitmap]
+    mov byte [rbx], 0xAA
+    mov byte [rbx + 1], 0xBB
+    mov al, 1
+    xlat
+    cmp al, 0xBB
+    jne fail_xlat
+
+    ; 32-bit BTS with a bit offset one page away. bt_mem used i32
+    ; arithmetic and the 4K pending window, so the bit landed at a
+    ; truncated low VA instead of bitmap+0x1000.
+    lea rax, [bitmap]
+    xor ecx, ecx
+    mov [rax], ecx
+    mov [rax + 0x1000], ecx
+    mov ecx, 0x8000
+    bts dword [rax], ecx
+    test byte [rax + 0x1000], 1
+    jz fail_bts32
+    cmp byte [rax], 0
+    jne fail_bts32
 
     xor eax, eax
     out 0xF4, al
@@ -226,6 +273,26 @@ fail_invlpg_cr2:
     mov al, 8
     out 0xF4, al
     jmp hang64
+fail_1g:
+    mov al, 9
+    out 0xF4, al
+    jmp hang64
+fail_popm:
+    mov al, 10
+    out 0xF4, al
+    jmp hang64
+fail_bts32:
+    mov al, 11
+    out 0xF4, al
+    jmp hang64
+fail_xlat:
+    mov al, 12
+    out 0xF4, al
+    jmp hang64
+fail_iret_rsp:
+    mov al, 13
+    out 0xF4, al
+    jmp hang64
 hang64:
     hlt
     jmp hang64
@@ -266,6 +333,10 @@ align 16
     times 4096 db 0
 stack_high:
 
+align 4096
+bitmap:
+    times 8192 db 0
+
 high_end:
 
 align 8
@@ -288,7 +359,8 @@ pml4:
 align 4096
 pdpt:
     dq pd + 0x07
-    times 511 dq 0
+    dq 0x0000000000000183
+    times 510 dq 0
 
 align 4096
 pdpt_high:
@@ -301,7 +373,12 @@ pd:
     dq 0x00000000000001E7
     times 7 dq 0
     dq 0x00000000010001E7
-    times 503 dq 0
+    times 119 dq 0
+    ; PDE[128] is VA 0xffffffff90000000. Not-present with bits 32–47 set
+    ; (prototype-style software fields). Checking phys>32 before Present
+    ; used to panic the debug wasm instead of delivering #PF.
+    dq 0x0000FFFF00000000
+    times 383 dq 0
 
 align 16
     times 4096 db 0

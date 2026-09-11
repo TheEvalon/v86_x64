@@ -80,14 +80,88 @@ start64:
     cmp eax, ITERATIONS
     jne fail64
 
+    ; Non-REX `mov r32, [r/m]` must use 64-bit RAX, not truncated EAX.
+    ; Map linear 4GiB+low_buf to phys 2MiB+low_buf (distinct from identity).
+    lea rbx, [low_buf]
+    mov dword [rbx], 0x11111111
+    mov rax, rbx
+    mov rcx, 0x0000000100000000
+    or rax, rcx
+    ; REX.W store: interpreter writes the high mapping, not the low sentinel.
+    mov qword [rax], 0x22222222
+    cmp dword [rbx], 0x11111111
+    jne fail_clobber
+    mov rcx, [rax]
+    cmp rcx, 0x22222222
+    jne fail_map
+    ; 8B 18: mov ebx, [rax] -- no REX. Must read the high sentinel.
+    mov ebx, [rax]
+    cmp ebx, 0x22222222
+    jne fail_trunc
+
+    ; JIT 32-bit ALU writes must zero-extend RAX–RDI (write_reg32 already
+    ; does; xor/add on wasm locals did not). Stale high halves turn a NULL
+    ; pointer into 0x7FF00000000 (XP x64 SxS isolation 7th arg).
+    mov rax, 0x000007FF00000001
+    xor eax, eax
+    test rax, rax
+    jnz fail_zext
+    mov rbp, 0x000007FF12345678
+    xor ebp, ebp
+    test rbp, rbp
+    jnz fail_zext
+    mov rsi, 0x000007FFABCDEF00
+    add esi, 0
+    mov rax, 0xABCDEF00
+    cmp rsi, rax
+    jne fail_zext
+
+    ; `67 65 48 A1 30 00 00 00` is MSVC `mov rax, gs:[0x30]` (TEB PEB).
+    ; moffs used to skip FS/GS, so linear=0x30 and XP winlogon AVd.
+    mov rax, 0xBAD0BAD0BAD0BAD0
+    mov [0x30], rax
+    mov rax, 0x0000000100000030
+    mov rcx, 0x1122334455667788
+    mov [rax], rcx
+    mov ecx, 0xC0000101
+    xor eax, eax
+    mov edx, 1
+    wrmsr
+    xor eax, eax
+    db 0x67, 0x65, 0x48, 0xA1, 0x30, 0x00, 0x00, 0x00
+    mov rcx, 0x1122334455667788
+    cmp rax, rcx
+    jne fail_moffs
+    xor eax, eax
+    db 0x67, 0x65, 0xA1, 0x30, 0x00, 0x00, 0x00
+    mov rcx, 0x55667788
+    cmp rax, rcx
+    jne fail_moffs
+
     xor eax, eax
     out 0xF4, al
 .ok:
     hlt
     jmp .ok
 
+fail_map:
+    mov al, 2
+    jmp fail_out
+fail_clobber:
+    mov al, 3
+    jmp fail_out
+fail_trunc:
+    mov al, 4
+    jmp fail_out
+fail_zext:
+    mov al, 5
+    jmp fail_out
+fail_moffs:
+    mov al, 6
+    jmp fail_out
 fail64:
     mov al, 1
+fail_out:
     out 0xF4, al
 .bad:
     hlt
@@ -112,12 +186,24 @@ pml4:
 align 4096
 pdpt:
     dq pd + 0x07
-    times 511 dq 0
+    times 3 dq 0
+    dq pd_4g + 0x07
+    times 507 dq 0
 
 align 4096
 pd:
     dq 0x00000000000001E7
     times 511 dq 0
+
+align 4096
+pd_4g:
+    dq 0x00000000002001E7
+    times 511 dq 0
+
+align 16
+low_buf:
+    dd 0
+    dd 0
 
 align 16
     times 4096 db 0

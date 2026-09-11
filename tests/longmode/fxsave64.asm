@@ -114,6 +114,18 @@ start64:
     cmp qword [fx_buf + 296], 0
     jne fail_xmm8
 
+    ; FXSAVE64 must not zero reserved +416..511 (XP KERNEL_STACK_CONTROL at +0x1B0).
+    mov rcx, 12
+    lea rsi, [fx_buf + 416]
+.check_fx64_res:
+    cmp qword [rsi], -1
+    jne fail_fxsave64_reserved
+    add rsi, 8
+    dec rcx
+    jnz .check_fx64_res
+    cmp qword [fx_buf + 0x1B0], -1
+    jne fail_fxsave64_reserved
+
     fninit
     xorps xmm0, xmm0
     fxrstor64 [fx_buf]
@@ -131,6 +143,34 @@ start64:
     mov rax, 0xFEDCBA9876543210
     cmp qword [fx_buf2 + 168], rax
     jne fail_restore_xmm
+
+    ; Legacy FXSAVE (no REX.W) in 64-bit CS uses the 32-bit image: FCS at +12,
+    ; XMM0–7 only, bytes 288–511 left untouched (XP header lives at +0x1B0).
+    lea rdi, [fx_buf]
+    mov rcx, 64
+    mov rax, 0xA5A5A5A5A5A5A5A5
+    rep stosq
+
+    fninit
+    fld1
+    movdqa xmm0, [xmm_in]
+    fxsave [fx_buf]
+
+    mov rax, 0x0123456789ABCDEF
+    cmp qword [fx_buf + 160], rax
+    jne fail_xmm0
+
+    mov rax, 0xA5A5A5A5A5A5A5A5
+    mov rcx, 28
+    lea rsi, [fx_buf + 288]
+.check_legacy_res:
+    cmp qword [rsi], rax
+    jne fail_legacy_reserved
+    add rsi, 8
+    dec rcx
+    jnz .check_legacy_res
+    cmp qword [fx_buf + 0x1B0], rax
+    jne fail_legacy_reserved
 
     mov byte [gp_expected], 1
     fxsave64 [fx_buf + 1]
@@ -182,6 +222,16 @@ fail_restore_xmm:
 
 fail_gp:
     mov al, 9
+    out 0xF4, al
+    jmp hang64
+
+fail_fxsave64_reserved:
+    mov al, 10
+    out 0xF4, al
+    jmp hang64
+
+fail_legacy_reserved:
+    mov al, 11
     out 0xF4, al
     jmp hang64
 

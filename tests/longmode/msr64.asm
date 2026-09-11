@@ -142,6 +142,31 @@ start64:
     test edx, edx
     jnz fail_syscfg
 
+    ; MSR_EBC_FREQUENCY_ID (0x2C): P4 intelppm; #GP was bugcheck 0x7E.
+    mov ecx, 0x2C
+    mov eax, 0xFFFFFFFF
+    mov edx, 0xFFFFFFFF
+    wrmsr
+    xor eax, eax
+    xor edx, edx
+    rdmsr
+    test eax, eax
+    jnz fail_ebc
+    test edx, edx
+    jnz fail_ebc
+
+    ; IA32_PERF_CTL (0x199): intelppm P-state r/m/w after the 0x2C probe.
+    mov ecx, 0x199
+    mov eax, 0xDEADBEEF
+    mov edx, 0
+    wrmsr
+    xor eax, eax
+    rdmsr
+    test eax, eax
+    jnz fail_perfctl
+    test edx, edx
+    jnz fail_perfctl
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -163,6 +188,16 @@ fail_mcg:
 
 fail_syscfg:
     mov al, 5
+    out 0xF4, al
+    jmp hang64
+
+fail_ebc:
+    mov al, 6
+    out 0xF4, al
+    jmp hang64
+
+fail_perfctl:
+    mov al, 7
     out 0xF4, al
     jmp hang64
 

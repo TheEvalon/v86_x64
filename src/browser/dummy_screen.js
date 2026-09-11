@@ -59,6 +59,16 @@ export function DummyScreenAdapter(options)
         is_graphical = graphical;
     };
 
+    this.is_graphical = function()
+    {
+        return is_graphical;
+    };
+
+    this.get_graphical_size = function()
+    {
+        return [graphical_mode_width, graphical_mode_height];
+    };
+
     this.set_font_bitmap = function(height, width_9px, width_dbl, copy_8th_col, bitmap, bitmap_changed)
     {
     };

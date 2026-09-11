@@ -30,6 +30,7 @@ use crate::cpu::misc_instr::{
 use crate::cpu::misc_instr::{lar, lsl, verr, verw};
 use crate::cpu::misc_instr::{lss16, lss32};
 use crate::cpu::sse_instr::*;
+use crate::paging::OrPageFault;
 
 fn edx_eax(low: i32, high: i32) -> u64 { low as u32 as u64 | (high as u32 as u64) << 32 }
 
@@ -878,7 +879,7 @@ pub unsafe fn instr_0F20(r: i32, creg: i32) {
         },
         8 => {
             if *is_64 {
-                write_reg64(r, cr8);
+                write_reg64(r, crate::cpu::apic::read_cr8());
             }
             else {
                 undefined_instruction();
@@ -976,7 +977,7 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
         },
         8 => {
             if *is_64 {
-                cr8 = read_reg64(r) & 0xF;
+                crate::cpu::apic::set_cr8(read_reg64(r) & 0xF);
             }
             else {
                 undefined_instruction();
@@ -3604,11 +3605,11 @@ pub unsafe fn instr_0FA2() {
         },
 
         0x80000001 => {
-            // AMD64 feature flags: SYSCALL, NX, long mode.
+            // AMD64 feature flags: SYSCALL, NX, 1GB pages, long mode.
             eax = 0;
             ebx = 0;
             ecx = 1 << 0 | 1 << 8; // lahf_lm, prefetchw
-            edx = 1 << 11 | 1 << 20 | 1 << 27 | 1 << 29; // SCE, NX, RDTSCP, LM
+            edx = 1 << 11 | 1 << 20 | 1 << 26 | 1 << 27 | 1 << 29; // SCE, NX, PDPE1GB, RDTSCP, LM
         },
 
         0x80000008 => {
@@ -5312,6 +5313,20 @@ pub unsafe fn instr_660FF6_mem(addr: i32, r: i32) {
 }
 
 pub unsafe fn instr_0FF7_mem(_addr: i32, _r: i32) { trigger_ud(); }
+
+unsafe fn maskmov_linear_dest() -> OrPageFault<i32> {
+    if *is_64 {
+        let asize32 = *prefixes & crate::prefix::PREFIX_MASK_ADDRSIZE != 0;
+        let rdi = if asize32 { read_reg32(EDI) as u32 as u64 } else { read_reg64(EDI) };
+        let addr = crate::cpu::modrm::linear_from_ea64(DS, rdi, false)?;
+        *pending_linear64 = addr;
+        Ok(addr as i32)
+    }
+    else {
+        get_seg_prefix_ds(get_reg_asize(EDI))
+    }
+}
+
 #[no_mangle]
 pub unsafe fn maskmovq(r1: i32, r2: i32, addr: i32) {
     // maskmovq mm, mm
@@ -5326,7 +5341,7 @@ pub unsafe fn maskmovq(r1: i32, r2: i32, addr: i32) {
     transition_fpu_to_mmx();
 }
 pub unsafe fn instr_0FF7_reg(r1: i32, r2: i32) {
-    let addr = return_on_pagefault!(get_seg_prefix_ds(get_reg_asize(EDI)));
+    let addr = return_on_pagefault!(maskmov_linear_dest());
     return_on_pagefault!(writable_or_pagefault(addr, 8));
     maskmovq(r1, r2, addr)
 }
@@ -5345,7 +5360,7 @@ pub unsafe fn maskmovdqu(r1: i32, r2: i32, addr: i32) {
     }
 }
 pub unsafe fn instr_660FF7_reg(r1: i32, r2: i32) {
-    let addr = return_on_pagefault!(get_seg_prefix_ds(get_reg_asize(EDI)));
+    let addr = return_on_pagefault!(maskmov_linear_dest());
     return_on_pagefault!(writable_or_pagefault(addr, 16));
     maskmovdqu(r1, r2, addr)
 }

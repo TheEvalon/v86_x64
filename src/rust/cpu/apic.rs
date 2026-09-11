@@ -109,6 +109,29 @@ static APIC: Mutex<Apic> = Mutex::new(Apic {
 
 pub fn get_apic() -> MutexGuard<'static, Apic> { APIC.try_lock().unwrap() }
 
+fn tpr_from_cr8(cr8: u64) -> u32 { ((cr8 & 0xF) << 4) as u32 }
+
+fn cr8_from_tpr(tpr: u32) -> u64 { (tpr as u64 >> 4) & 0xF }
+
+/// CR8 is the architectural alias of the local APIC TPR class (bits 7:4).
+pub fn read_cr8() -> u64 { cr8_from_tpr(get_apic().tpr) }
+
+pub fn set_cr8(value: u64) {
+    {
+        let mut apic = get_apic();
+        apic.tpr = tpr_from_cr8(value);
+        unsafe {
+            crate::cpu::cpu::cr8 = value & 0xF;
+        }
+    }
+    // Lowering TPR can unblock a self-IPI already sitting in IRR
+    // (HalRequestSoftwareInterrupt at APC_LEVEL). Evaluate now; waiting
+    // for the next main-loop slice lets the guest reuse a stack KEVENT.
+    unsafe {
+        crate::cpu::cpu::handle_irqs();
+    }
+}
+
 #[no_mangle]
 pub fn get_apic_addr() -> u32 { &raw mut *get_apic() as u32 }
 
@@ -285,7 +308,14 @@ pub fn write32(addr: u32, value: u32) {
     if !local_apic_mmio_active() {
         return;
     }
-    write32_internal(&mut get_apic(), addr, value)
+    write32_internal(&mut get_apic(), addr, value);
+    // TPR and ICR writes can make a pending IRR vector eligible. Drop the
+    // APIC lock first: handle_irqs -> acknowledge_irq tries to take it.
+    if addr == 0x80 || addr == 0x300 {
+        unsafe {
+            crate::cpu::cpu::handle_irqs();
+        }
+    }
 }
 
 fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
@@ -305,6 +335,9 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
                 dbg_log!("Set tpr: {:02x}", value & 0xFF);
             }
             apic.tpr = value & 0xFF;
+            unsafe {
+                crate::cpu::cpu::cr8 = cr8_from_tpr(apic.tpr);
+            }
         },
 
         0xB0 => {
