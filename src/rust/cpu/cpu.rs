@@ -4790,7 +4790,7 @@ pub unsafe fn main_loop() -> f64 {
     let start = js::microtick();
 
     if *in_hlt {
-        if *flags & FLAG_INTERRUPT != 0 {
+        if *flags & FLAG_INTERRUPT != 0 || apic::nmi_pending() {
             let t = js::run_hardware_timers(*acpi_enabled, start);
             handle_irqs();
             if *in_hlt {
@@ -6068,6 +6068,11 @@ pub unsafe fn store_current_tsc() { *current_tsc = read_tsc(); }
 
 #[no_mangle]
 pub unsafe fn handle_irqs() {
+    // NMI is not masked by IF or TPR. Deliver before PIC/APIC FIXED.
+    if apic::take_pending_nmi() {
+        pic_call_irq(CPU_EXCEPTION_NMI as u8);
+        return;
+    }
     if *flags & FLAG_INTERRUPT != 0 {
         // With ACPI/IOAPIC, skip the 8259 after LMA: acknowledging PIC first
         // bypasses CR8/TPR and nested IRQ8 on XP's PCR stack into the GDT.

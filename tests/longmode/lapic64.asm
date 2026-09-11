@@ -150,6 +150,28 @@ en_ok:
     cmp dword [rel ipi_flag], 1
     jne fail_ipi_late
 
+    ; NMI is delivery mode 4; the vector field is ignored and must not go
+    ; through IRR. Linux nmi_selftest uses dest-field ICR (no shorthand).
+    mov dword [rel nmi_flag], 0
+    lea rax, [nmi_handler]
+    mov [idt_nmi], ax
+    shr rax, 16
+    mov [idt_nmi + 6], ax
+    shr rax, 16
+    mov [idt_nmi + 8], eax
+
+    mov esi, 0xFEE00310
+    mov dword [rsi], 0
+    mov esi, 0xFEE00300
+    mov dword [rsi], 0x400
+    cmp dword [rel nmi_flag], 1
+    jne fail_nmi_dest
+
+    mov dword [rel nmi_flag], 0
+    mov dword [rsi], 0x40400
+    cmp dword [rel nmi_flag], 1
+    jne fail_nmi_self
+
     xor eax, eax
     out 0xF4, al
     jmp hang64
@@ -194,19 +216,44 @@ fail_ipi_late:
     out 0xF4, al
     jmp hang64
 
+fail_nmi_dest:
+    mov al, 10
+    out 0xF4, al
+    jmp hang64
+
+fail_nmi_self:
+    mov al, 11
+    out 0xF4, al
+    jmp hang64
+
 ipi_handler:
     inc dword [rel ipi_flag]
     mov esi, 0xFEE000B0
     mov dword [rsi], 0
     iretq
 
+nmi_handler:
+    inc dword [rel nmi_flag]
+    iretq
+
 align 8
 ipi_flag:
+    dd 0
+nmi_flag:
     dd 0
 
 align 16
 idt:
-    times 0x21 * 16 db 0
+    times 2 * 16 db 0
+idt_nmi:
+    dw 0
+    dw 0x08
+    db 0
+    db 0x8E
+    dw 0
+    dd 0
+    dd 0
+    times (0x21 - 3) * 16 db 0
 idt_vec21:
     dw 0
     dw 0x08

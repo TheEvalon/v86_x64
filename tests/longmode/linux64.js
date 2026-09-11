@@ -418,6 +418,11 @@ emulator.add_listener("serial0-output-byte", function(byte)
         saw_run_init = true;
         console.error("linux64: kernel execing /init, continuing");
     }
+    if(serial.includes("local IPI:TIMEOUT"))
+    {
+        finish(1, "linux64: local APIC NMI self-IPI timed out");
+        return;
+    }
     // Pass on the first /init write. Later getpid/uname/brk lines are extra.
     if(serial.includes(LINUX64_INIT_LINE))
     {
