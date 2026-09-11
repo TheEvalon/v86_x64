@@ -5,6 +5,7 @@ use crate::cpu::{
     global_pointers::{acpi_enabled, apic_enabled},
     ioapic,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 const APIC_LOG_VERBOSE: bool = false;
@@ -81,6 +82,10 @@ pub struct Apic {
     lvt_thermal_sensor: u32,
 }
 
+// NMI is not part of the IRR/ISR bitmap and must not enlarge the
+// JavaScript-mirrored Apic blob (`APIC_STRUCT_SIZE`).
+static NMI_PENDING: AtomicBool = AtomicBool::new(false);
+
 static APIC: Mutex<Apic> = Mutex::new(Apic {
     apic_id: 0,
     timer_divider: 0,
@@ -108,6 +113,12 @@ static APIC: Mutex<Apic> = Mutex::new(Apic {
 });
 
 pub fn get_apic() -> MutexGuard<'static, Apic> { APIC.try_lock().unwrap() }
+
+pub fn nmi_pending() -> bool { NMI_PENDING.load(Ordering::SeqCst) }
+
+pub fn take_pending_nmi() -> bool { NMI_PENDING.swap(false, Ordering::SeqCst) }
+
+fn raise_nmi() { NMI_PENDING.store(true, Ordering::SeqCst); }
 
 fn tpr_from_cr8(cr8: u64) -> u32 { ((cr8 & 0xF) << 4) as u32 }
 
@@ -411,8 +422,9 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
                 );
             }
             else if destination_shorthand == 1 {
-                // self
-                deliver(apic, vector, IOAPIC_DELIVERY_FIXED, is_level);
+                // self — keep the ICR delivery mode so NMI self-IPI is not
+                // forced to FIXED (vector 0 would then look invalid).
+                deliver(apic, vector, delivery_mode, is_level);
             }
             else if destination_shorthand == 2 {
                 // all including self
@@ -594,7 +606,9 @@ fn deliver(apic: &mut Apic, vector: u8, mode: u8, is_level: bool) {
     }
 
     if mode == IOAPIC_DELIVERY_NMI {
-        // TODO
+        // Vector is ignored. NMI does not occupy IRR/ISR and is not masked
+        // by TPR or IF; handle_irqs delivers exception 2.
+        raise_nmi();
         return;
     }
 

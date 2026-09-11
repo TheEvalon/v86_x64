@@ -419,6 +419,8 @@ emulator.add_listener("serial0-output-byte", function(byte)
         console.error("linux64: kernel execing /init, continuing");
     }
     // Pass on the first /init write. Later getpid/uname/brk lines are extra.
+    // `acpi=off` keeps the kernel in PIC mode, so nmi_selftest still prints
+    // `local IPI:TIMEOUT`; lapic64 covers ICR NMI while the APIC is enabled.
     if(serial.includes(LINUX64_INIT_LINE))
     {
         console.log("linux64: pass (" + LINUX64_INIT_LINE + ")");
