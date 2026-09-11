@@ -76,18 +76,18 @@ pub union reg128 {
 pub const CHECK_MISSED_ENTRY_POINTS: bool = false;
 
 pub const INTERPRETER_ITERATION_LIMIT: u32 = 100_001;
-/// 64-bit CS: stop the interpreter even on forward jumps so inflate-style
-/// loops cannot spend a whole `do_many` inside one `cycle_internal`.
-pub const INTERPRETER_ITERATION_LIMIT_64: u32 = 4_096;
+/// Same-page forward runs in 64-bit CS. Trampolines are block boundaries, so
+/// this is for higher-half interpreter batches (XP kernel RIP > 4GiB).
+pub const INTERPRETER_ITERATION_LIMIT_64: u32 = INTERPRETER_ITERATION_LIMIT;
 
 // How often, in milliseconds, to yield to the browser for rendering and running events
 pub const TIME_PER_FRAME: f64 = 1.0;
 /// `performance.now()` can stay frozen for the whole WASM `main_loop` call.
 /// Cap slices so we still return to JS (timers, linux64 timeout) in that case.
 pub const MAX_SLICES_PER_FRAME: u32 = 4;
-pub const MAX_SLICES_PER_FRAME_64: u32 = 1;
-/// JIT trampolines often bump `instruction_counter` by 1 per call. A high
-/// step cap lets one `do_many` run for tens of seconds without returning.
+pub const MAX_SLICES_PER_FRAME_64: u32 = MAX_SLICES_PER_FRAME;
+/// Low 4GiB 64-bit CS still trampolines; each step is often one insn. Higher
+/// half uses the interpreter and fills `LOOP_COUNTER` instead.
 pub const MAX_64BIT_STEPS: u32 = 16;
 
 pub const FLAG_SUB: i32 = -0x8000_0000;
@@ -3510,7 +3510,7 @@ pub unsafe fn read_imm8() -> OrPageFault<i32> {
     if *is_64 {
         let eip = get_rip();
         if eip > 0xFFFF_FFFF {
-            let phys = phys_of_linear_rip(eip)?;
+            let phys = phys_of_cached_high_rip(eip)?;
             let data8 = *memory::mem8.offset(phys as isize) as i32;
             set_rip(eip + 1);
             return Ok(data8);
@@ -3519,7 +3519,8 @@ pub unsafe fn read_imm8() -> OrPageFault<i32> {
     let eip = *instruction_pointer;
     if DISABLE_EIP_TRANSLATION_OPTIMISATION || 0 != eip & !0xFFF ^ *last_virt_eip {
         *eip_phys = (translate_address_exec(eip)? ^ eip as u32) as i32;
-        *last_virt_eip = eip & !0xFFF
+        *last_virt_eip = eip & !0xFFF;
+        *last_virt_rip = !0;
     }
     dbg_assert!(!memory::in_mapped_range((*eip_phys ^ eip) as u32));
     let data8 = *memory::mem8.offset((*eip_phys ^ eip) as isize) as i32;
@@ -4037,6 +4038,23 @@ unsafe fn phys_of_linear_rip(eip: u64) -> OrPageFault<u32> {
         translate_address64(eip, false, *cpl == 3, false, true, true)?
     };
     dbg_assert!(!memory::in_mapped_range(phys));
+    Ok(phys)
+}
+
+/// Same-page fetch cache for RIP > 4GiB. Shares `eip_phys` with the 32-bit
+/// path; invalidate `last_virt_eip` on fill so a later low RIP cannot reuse
+/// a kernel physical xor.
+unsafe fn phys_of_cached_high_rip(eip: u64) -> OrPageFault<u32> {
+    dbg_assert!(eip > 0xFFFF_FFFF);
+    if !DISABLE_EIP_TRANSLATION_OPTIMISATION && (eip ^ *last_virt_rip) & !0xFFF == 0 {
+        let phys = *eip_phys as u32 ^ eip as u32;
+        dbg_assert!(!memory::in_mapped_range(phys));
+        return Ok(phys);
+    }
+    let phys = phys_of_linear_rip(eip)?;
+    *eip_phys = (phys ^ eip as u32) as i32;
+    *last_virt_rip = eip & !0xFFF;
+    *last_virt_eip = -1;
     Ok(phys)
 }
 
@@ -4642,12 +4660,13 @@ pub unsafe fn jit_run_one_long() {
 
 pub unsafe fn get_phys_eip() -> OrPageFault<u32> {
     if *is_64 && get_rip() > 0xFFFF_FFFF {
-        return phys_of_linear_rip(get_rip());
+        return phys_of_cached_high_rip(get_rip());
     }
     let eip = *instruction_pointer;
     if 0 != eip & !0xFFF ^ *last_virt_eip {
         *eip_phys = (translate_address_exec(eip)? ^ eip as u32) as i32;
-        *last_virt_eip = eip & !0xFFF
+        *last_virt_eip = eip & !0xFFF;
+        *last_virt_rip = !0;
     }
     let phys_addr = (*eip_phys ^ eip) as u32;
     dbg_assert!(!memory::in_mapped_range(phys_addr));
@@ -4678,6 +4697,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
             *previous_ip = start_eip;
             *previous_rip = start_rip;
             crate::cpu::long_mode::run_one();
+            #[cfg(debug_assertions)]
             note_kernel_stack_drop(start_rip);
         }
         else {
@@ -4717,6 +4737,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
 /// pages (`0xfffff80000300000`..`0xfffff80000304000`), or a single-instruction
 /// drop of a page or more. The early KiSystemStartup `sub rsp, 0x3c0` used to
 /// consume the slot and hide the later smash.
+#[cfg(debug_assertions)]
 unsafe fn note_kernel_stack_drop(start_rip: u64) {
     let rsp = read_reg64(ESP);
     let prev = *dbg_rsp_last;
@@ -4834,12 +4855,17 @@ pub unsafe fn do_many_cycles_native() {
     {
         let before = *instruction_counter;
         cycle_internal();
-        // 64-bit trampolines often count as 1 instruction. Cap turns so a
-        // frozen performance.now() still returns to JS.
         if *is_64 {
-            steps += 1;
-            if steps >= MAX_64BIT_STEPS || *instruction_counter == before {
+            if *instruction_counter == before {
                 break;
+            }
+            // Low 4GiB still trampolines (one insn per step). Higher-half RIP
+            // is interpreter-only and should fill LOOP_COUNTER / TIME_PER_FRAME.
+            if get_rip() <= 0xFFFF_FFFF {
+                steps += 1;
+                if steps >= MAX_64BIT_STEPS {
+                    break;
+                }
             }
         }
     }
@@ -6330,5 +6356,17 @@ mod msr_allowlist_tests {
         assert!(!msr_is_noop_allowlisted(IA32_MTRR_PHYSMASK7 + 1));
         assert!(!msr_is_noop_allowlisted(0xDA0)); // IA32_XSS: no XSAVE in CPUID
         assert!(!msr_is_noop_allowlisted(0x12345678));
+    }
+}
+
+#[cfg(test)]
+mod long_mode_sched_tests {
+    use super::*;
+
+    #[test]
+    fn sixty_four_bit_interpreter_uses_full_32bit_batch() {
+        assert_eq!(INTERPRETER_ITERATION_LIMIT_64, INTERPRETER_ITERATION_LIMIT);
+        assert_eq!(MAX_SLICES_PER_FRAME_64, MAX_SLICES_PER_FRAME);
+        assert!(MAX_64BIT_STEPS < LOOP_COUNTER as u32);
     }
 }

@@ -80,8 +80,10 @@ a { color: #8cf; }
     <div id="help">
         Serve this repo over HTTP with a server that supports
         <code>Range</code> (XAMPP/Apache does; <code>python -m http.server</code> does not),
-        not <code>file://</code>. After clone, run <code>make</code> so
-        <code>build/v86-debug.wasm</code> exists.
+        not <code>file://</code>. After clone, run <code>make all</code> so
+        <code>build/v86.wasm</code> exists (faster than <code>make</code>'s
+        debug wasm). This page prefers the release build; add
+        <code>?debug=1</code> to force <code>v86-debug.wasm</code>.
         Unzip your disk and put the raw image at
         <code>images/windows-xp-x64.img</code> (also accepts
         <code>images/hdd.img</code>, <code>xp64.img</code>, <code>winxp64.img</code>),
@@ -579,7 +581,12 @@ async function find_default_disk()
 
 async function wasm_path()
 {
-    for(const path of ["build/v86-debug.wasm", "build/v86.wasm"])
+    const params = new URLSearchParams(location.search);
+    const want_debug = params.get("debug") === "1" || params.get("wasm") === "debug";
+    const order = want_debug ?
+        ["build/v86-debug.wasm", "build/v86.wasm"] :
+        ["build/v86.wasm", "build/v86-debug.wasm"];
+    for(const path of order)
     {
         try
         {
@@ -594,7 +601,7 @@ async function wasm_path()
             // ignore zip sniff errors on wasm
         }
     }
-    return "build/v86-debug.wasm";
+    return want_debug ? "build/v86-debug.wasm" : "build/v86.wasm";
 }
 
 function memory_size()

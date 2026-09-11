@@ -199,7 +199,9 @@ qemu-system-x86_64 -machine pc-i440fx-8.2 -cpu qemu64-v1 -m 512M -smp 1 \
 
 To boot the same disk in the browser after cloning this repository:
 
-1. Build the wasm (`make` is enough for [xp.html](../xp.html); `make all` for `index.html`).
+1. Build the wasm (`make all` for the release [xp.html](../xp.html) prefers;
+   `make` only builds `v86-debug.wasm`. Add `?debug=1` on xp.html to force
+   the debug build).
 2. Unzip the image if it is a zip, then copy the raw IDE disk to
    `images/windows-xp-x64.img` (`images/` and `*.img` are gitignored).
 3. Serve the repo with XAMPP (Apache). The disk is loaded with HTTP
