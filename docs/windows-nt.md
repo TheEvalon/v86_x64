@@ -209,6 +209,11 @@ To boot the same disk in the browser after cloning this repository:
    need Range.
 4. v86 settings: 512 MB RAM, `acpi: true` (IOAPIC / APIC, skip 8259 after
    long mode), SeaBIOS, VGA, IDE HD, no network relay.
+5. After the first desktop, click **Save state** on [xp.html](../xp.html) to
+   download `xp64-state.bin`. Put that file at `images/xp64-state.bin`
+   (gitignored; not hosted in the repo) and reopen
+   `xp.html?state=images/xp64-state.bin` (or `.zst`). Restore requires the
+   same memory size, ACPI setting, and disk as when you saved.
 
 `debug.html?profile=windowsxpx64` uses the same local image.
 

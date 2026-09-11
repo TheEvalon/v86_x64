@@ -71,6 +71,10 @@ a { color: #8cf; }
         <button id="start_images" type="button">Start from images/</button>
         <button id="pause" type="button" disabled>Pause</button>
         <button id="reset" type="button" disabled>Reset</button>
+        <button id="save_file" type="button" disabled>Save state</button>
+        <button id="save_restore" type="button" disabled>Save / Restore</button>
+        <label>Restore from file <input id="restore_file" type="file" accept=".bin,.zst,application/octet-stream" disabled></label>
+        <button id="restore_idb" type="button" disabled>Restore last local state</button>
     </div>
     <div id="status">Looking for a local disk…</div>
     <div id="help">
@@ -86,6 +90,14 @@ a { color: #8cf; }
         otherwise unzip first. Override the URL with
         <code>?hda=images/hdd.img</code>.
         The disk is not part of git (<code>images/</code> and <code>*.img</code> are ignored).
+        After the first desktop, <strong>Save state</strong> downloads
+        <code>xp64-state.bin</code> (shown in the status line). Put that file at
+        <code>images/xp64-state.bin</code> (gitignored) and reopen
+        <code>xp.html?state=images/xp64-state.bin</code> (or <code>.zst</code>;
+        v86 decompresses state images). Restore needs the same RAM, ACPI, and
+        disk as when you saved. A copy can stay in this browser via IndexedDB
+        (<strong>Restore last local state</strong> after a refresh).
+        <strong>Save / Restore</strong> keeps one snapshot in memory for this tab.
     </div>
 </div>
 
@@ -106,18 +118,235 @@ const DEFAULT_DISKS = [
     "images/winxp64.img",
 ];
 
+const IDB_NAME = "v86-xp64";
+const IDB_STORE = "state";
+const IDB_KEY = "state";
+const STATE_DOWNLOAD_NAME = "xp64-state.bin";
+
 const status_el = document.getElementById("status");
 const screen = document.getElementById("screen_container");
 const pause_btn = document.getElementById("pause");
 const reset_btn = document.getElementById("reset");
+const save_file_btn = document.getElementById("save_file");
+const save_restore_btn = document.getElementById("save_restore");
+const restore_file_el = document.getElementById("restore_file");
+const restore_idb_btn = document.getElementById("restore_idb");
 
 let emulator = null;
 let paused = false;
+let memory_state = null;
+let booted_from_state = null;
+let last_hda = null;
+let screen_bound = false;
+let pending_restore_error = null;
 
 function set_status(text, is_error)
 {
     status_el.textContent = text;
     status_el.classList.toggle("error", !!is_error);
+}
+
+function format_bytes(n)
+{
+    if(!(n >= 0))
+    {
+        return "unknown size";
+    }
+    if(n >= 1024 * 1024)
+    {
+        return n + " bytes (" + (n / (1024 * 1024)).toFixed(1) + " MB)";
+    }
+    if(n >= 1024)
+    {
+        return n + " bytes (" + (n / 1024).toFixed(1) + " KB)";
+    }
+    return n + " bytes";
+}
+
+function buffer_byte_length(data)
+{
+    if(!data)
+    {
+        return 0;
+    }
+    if(typeof data.byteLength === "number")
+    {
+        return data.byteLength;
+    }
+    if(typeof data.size === "number")
+    {
+        return data.size;
+    }
+    return 0;
+}
+
+async function to_array_buffer(data)
+{
+    if(!data)
+    {
+        return null;
+    }
+    if(data instanceof ArrayBuffer)
+    {
+        return data;
+    }
+    if(ArrayBuffer.isView(data))
+    {
+        return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    }
+    if(typeof data.arrayBuffer === "function")
+    {
+        return await data.arrayBuffer();
+    }
+    return data;
+}
+
+function idb_request(req)
+{
+    return new Promise(function(resolve, reject)
+    {
+        req.onsuccess = function()
+        {
+            resolve(req.result);
+        };
+        req.onerror = function()
+        {
+            reject(req.error);
+        };
+    });
+}
+
+function open_idb()
+{
+    return new Promise(function(resolve, reject)
+    {
+        const req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = function()
+        {
+            const db = req.result;
+            if(!db.objectStoreNames.contains(IDB_STORE))
+            {
+                db.createObjectStore(IDB_STORE);
+            }
+        };
+        req.onsuccess = function()
+        {
+            resolve(req.result);
+        };
+        req.onerror = function()
+        {
+            reject(req.error);
+        };
+    });
+}
+
+async function idb_put_state(buffer)
+{
+    const db = await open_idb();
+    try
+    {
+        const tx = db.transaction(IDB_STORE, "readwrite");
+        tx.objectStore(IDB_STORE).put(new Blob([buffer]), IDB_KEY);
+        await new Promise(function(resolve, reject)
+        {
+            tx.oncomplete = resolve;
+            tx.onerror = function()
+            {
+                reject(tx.error);
+            };
+            tx.onabort = function()
+            {
+                reject(tx.error);
+            };
+        });
+    }
+    finally
+    {
+        db.close();
+    }
+}
+
+async function idb_get_state()
+{
+    const db = await open_idb();
+    try
+    {
+        const tx = db.transaction(IDB_STORE, "readonly");
+        return await idb_request(tx.objectStore(IDB_STORE).get(IDB_KEY));
+    }
+    finally
+    {
+        db.close();
+    }
+}
+
+async function idb_has_state()
+{
+    const db = await open_idb();
+    try
+    {
+        const tx = db.transaction(IDB_STORE, "readonly");
+        const store = tx.objectStore(IDB_STORE);
+        if(typeof store.getKey === "function")
+        {
+            return (await idb_request(store.getKey(IDB_KEY))) !== undefined;
+        }
+        const value = await idb_request(store.get(IDB_KEY));
+        return !!value;
+    }
+    finally
+    {
+        db.close();
+    }
+}
+
+async function refresh_idb_button()
+{
+    if(!emulator)
+    {
+        restore_idb_btn.disabled = true;
+        return;
+    }
+    try
+    {
+        restore_idb_btn.disabled = !(await idb_has_state());
+    }
+    catch(_)
+    {
+        restore_idb_btn.disabled = true;
+    }
+}
+
+function set_runtime_controls_enabled(enabled)
+{
+    pause_btn.disabled = !enabled;
+    reset_btn.disabled = !enabled;
+    save_file_btn.disabled = !enabled;
+    save_restore_btn.disabled = !enabled;
+    restore_file_el.disabled = !enabled;
+    if(!enabled)
+    {
+        restore_idb_btn.disabled = true;
+    }
+}
+
+function download_buffer(buffer, name)
+{
+    const blob = new Blob([buffer]);
+    const a = document.createElement("a");
+    a.download = name;
+    a.href = URL.createObjectURL(blob);
+    a.dataset.downloadurl = "application/octet-stream:" + a.download + ":" + a.href;
+    a.click();
+    setTimeout(function()
+    {
+        URL.revokeObjectURL(a.href);
+    }, 4000);
+}
+
+function requested_state_url()
+{
+    return new URLSearchParams(location.search).get("state");
 }
 
 function u16(bytes, offset)
@@ -269,6 +498,43 @@ async function probe_url(url)
     return { url, size };
 }
 
+async function probe_state_url(url)
+{
+    try
+    {
+        const head = await fetch(url, { method: "HEAD" });
+        if(head.ok)
+        {
+            const size = Number(head.headers.get("content-length")) || undefined;
+            return { url, size };
+        }
+    }
+    catch(_)
+    {
+        // Some servers reject HEAD; try a tiny Range next.
+    }
+
+    try
+    {
+        const response = await fetch(url, { headers: { Range: "bytes=0-3" } });
+        if(!response.ok && response.status !== 206)
+        {
+            return null;
+        }
+        response.body && response.body.cancel();
+        const range = response.headers.get("content-range");
+        const total = range && /\/(\d+)$/.exec(range);
+        const length = Number(response.headers.get("content-length")) || 0;
+        const size = total ? Number(total[1]) :
+            (response.status === 200 && length > 16 ? length : undefined);
+        return { url, size };
+    }
+    catch(_)
+    {
+        return null;
+    }
+}
+
 async function supports_range(url)
 {
     const response = await fetch(url, { headers: { Range: "bytes=0-0" } });
@@ -337,8 +603,42 @@ function memory_size()
     return Math.max(128, mb) * 1024 * 1024;
 }
 
-async function start_emulator(hda)
+async function constructor_state(skip_state)
 {
+    const wanted = requested_state_url();
+    if(skip_state || !wanted)
+    {
+        return { initial_state: null, state_missing: null };
+    }
+    const found = await probe_state_url(wanted);
+    if(!found)
+    {
+        return { initial_state: null, state_missing: wanted };
+    }
+    const initial_state = { url: found.url };
+    if(found.size)
+    {
+        initial_state.size = found.size;
+    }
+    return { initial_state, state_missing: null };
+}
+
+async function start_emulator(hda, options)
+{
+    options = options || {};
+    const initial_state = options.initial_state || null;
+
+    if(!options.keep_restore_error)
+    {
+        pending_restore_error = null;
+    }
+
+    set_runtime_controls_enabled(false);
+    memory_state = null;
+    save_restore_btn.textContent = "Save / Restore";
+    last_hda = hda;
+    booted_from_state = initial_state && initial_state.url || null;
+
     if(emulator)
     {
         await emulator.destroy();
@@ -352,10 +652,23 @@ async function start_emulator(hda)
     }
 
     const wasm = await wasm_path();
-    set_status("Starting with " + (hda.url || hda.buffer && hda.buffer.name || "disk") +
-        "  wasm=" + wasm);
+    let msg = "Starting with " + (hda.url || hda.buffer && hda.buffer.name || "disk") +
+        "  wasm=" + wasm;
+    if(initial_state && initial_state.url)
+    {
+        msg += "  state=" + initial_state.url;
+        if(initial_state.size)
+        {
+            msg += " " + format_bytes(initial_state.size);
+        }
+    }
+    else if(options.state_missing)
+    {
+        msg += "  (no file at " + options.state_missing + "; cold boot)";
+    }
+    set_status(msg);
 
-    emulator = window.emulator = new V86({
+    const settings = {
         wasm_path: wasm,
         memory_size: memory_size(),
         vga_memory_size: 8 * 1024 * 1024,
@@ -367,7 +680,13 @@ async function start_emulator(hda)
         fastboot: true,
         autostart: true,
         disable_speaker: false,
-    });
+    };
+    if(initial_state)
+    {
+        settings.initial_state = initial_state;
+    }
+
+    emulator = window.emulator = new V86(settings);
 
     emulator.add_listener("download-progress", function(e)
     {
@@ -385,32 +704,61 @@ async function start_emulator(hda)
     emulator.add_listener("download-error", function(e)
     {
         set_status("Failed to load " + (e && e.file_name || "file") +
-            ". Run make if this is wasm; check the disk path otherwise.", true);
+            ". Run make if this is wasm; check the disk or state path otherwise.", true);
     });
 
     emulator.add_listener("emulator-ready", function()
     {
-        set_status("Running. Click the screen for keyboard. Boot from an ACPI i440fx disk takes several minutes.");
-        pause_btn.disabled = false;
-        reset_btn.disabled = false;
+        set_runtime_controls_enabled(true);
         pause_btn.textContent = "Pause";
         paused = false;
+        refresh_idb_button();
+        if(pending_restore_error)
+        {
+            set_status(pending_restore_error, true);
+        }
+        else if(booted_from_state)
+        {
+            set_status("Restoring " + booted_from_state + "…");
+        }
+        else
+        {
+            set_status("Running. Click the screen for keyboard. Boot from an ACPI i440fx disk takes several minutes.");
+        }
         screen.focus();
     });
 
-    screen.addEventListener("mousedown", function()
+    emulator.add_listener("emulator-loaded", function()
     {
-        screen.focus();
+        if(pending_restore_error)
+        {
+            set_status(pending_restore_error, true);
+            pending_restore_error = null;
+            return;
+        }
+        if(booted_from_state)
+        {
+            set_status("Running from saved state " + booted_from_state +
+                ". Click the screen for keyboard. Same RAM, ACPI, and disk as when you saved.");
+        }
     });
 
-    const canvas = screen.querySelector("canvas");
-    canvas.addEventListener("click", function()
+    if(!screen_bound)
     {
-        canvas.requestPointerLock && canvas.requestPointerLock();
-    });
+        screen_bound = true;
+        screen.addEventListener("mousedown", function()
+        {
+            screen.focus();
+        });
+        const canvas = screen.querySelector("canvas");
+        canvas.addEventListener("click", function()
+        {
+            canvas.requestPointerLock && canvas.requestPointerLock();
+        });
+    }
 }
 
-async function start_from_images()
+async function start_from_images(opts)
 {
     const disk = await find_default_disk();
     if(!disk)
@@ -427,8 +775,83 @@ async function start_from_images()
             "(python -m http.server does not). Use XAMPP/Apache, or pick the .img file.", true);
         return false;
     }
-    await start_emulator({ url: disk.url, async: true, size: disk.size });
+    const state = await constructor_state(opts && opts.skip_state);
+    if(opts && opts.keep_restore_error)
+    {
+        state.keep_restore_error = true;
+    }
+    await start_emulator(
+        { url: disk.url, async: true, size: disk.size },
+        state);
     return true;
+}
+
+async function cold_boot_fallback()
+{
+    if(last_hda)
+    {
+        await start_emulator(last_hda, { keep_restore_error: true });
+        return;
+    }
+    await start_from_images({ skip_state: true, keep_restore_error: true });
+}
+
+async function restore_buffer(buffer, label)
+{
+    if(!emulator)
+    {
+        throw new Error("Emulator is not running.");
+    }
+    await emulator.stop();
+    paused = true;
+    pause_btn.textContent = "Resume";
+    await emulator.restore_state(buffer);
+    await emulator.run();
+    paused = false;
+    pause_btn.textContent = "Pause";
+    set_status("Restored " + label + " (" + format_bytes(buffer_byte_length(buffer)) + ").");
+}
+
+async function restore_or_cold_boot(buffer, label)
+{
+    try
+    {
+        await restore_buffer(buffer, label);
+        return true;
+    }
+    catch(e)
+    {
+        pending_restore_error = "Restore failed: " + String(e && e.message || e) +
+            ". Falling back to cold boot.";
+        set_status(pending_restore_error, true);
+        try
+        {
+            await cold_boot_fallback();
+        }
+        catch(boot_err)
+        {
+            pending_restore_error = pending_restore_error +
+                " Cold boot also failed: " + String(boot_err && boot_err.message || boot_err);
+            set_status(pending_restore_error, true);
+        }
+        return false;
+    }
+}
+
+async function save_current_state()
+{
+    const buffer = await emulator.save_state();
+    let idb_note = "";
+    try
+    {
+        await idb_put_state(buffer);
+        await refresh_idb_button();
+    }
+    catch(e)
+    {
+        idb_note = " IndexedDB keep failed (" + String(e && e.message || e) + ").";
+    }
+    return { buffer, idb_note };
 }
 
 document.getElementById("start_images").onclick = async function()
@@ -453,7 +876,10 @@ document.getElementById("disk_file").onchange = async function()
     try
     {
         const disk = await maybe_unwrap_zip(file);
-        await start_emulator({ buffer: disk, async: disk.size >= 256 * 1024 * 1024 });
+        const state = await constructor_state(false);
+        await start_emulator(
+            { buffer: disk, async: disk.size >= 256 * 1024 * 1024 },
+            state);
     }
     catch(e)
     {
@@ -492,6 +918,106 @@ reset_btn.onclick = function()
     }
 };
 
+save_file_btn.onclick = async function()
+{
+    if(!emulator)
+    {
+        return;
+    }
+    try
+    {
+        set_status("Saving state…");
+        save_file_btn.disabled = true;
+        const { buffer, idb_note } = await save_current_state();
+        download_buffer(buffer, STATE_DOWNLOAD_NAME);
+        set_status("Saved state " + format_bytes(buffer.byteLength) +
+            ". Download " + STATE_DOWNLOAD_NAME + "." + idb_note);
+    }
+    catch(e)
+    {
+        set_status("Save failed: " + String(e && e.message || e), true);
+    }
+    finally
+    {
+        save_file_btn.disabled = !emulator;
+    }
+};
+
+save_restore_btn.onclick = async function()
+{
+    if(!emulator)
+    {
+        return;
+    }
+    try
+    {
+        if(memory_state)
+        {
+            const snapshot = memory_state;
+            memory_state = null;
+            save_restore_btn.textContent = "Save / Restore";
+            await restore_or_cold_boot(snapshot, "in-memory snapshot");
+        }
+        else
+        {
+            set_status("Saving in-memory snapshot…");
+            const { buffer, idb_note } = await save_current_state();
+            memory_state = buffer;
+            save_restore_btn.textContent = "Restore in-memory";
+            set_status("In-memory snapshot " + format_bytes(buffer.byteLength) + "." + idb_note);
+        }
+    }
+    catch(e)
+    {
+        set_status(String(e && e.message || e), true);
+    }
+};
+
+restore_file_el.onchange = async function()
+{
+    const file = this.files && this.files[0];
+    this.value = "";
+    if(!file || !emulator)
+    {
+        return;
+    }
+    try
+    {
+        set_status("Reading " + file.name + "…");
+        const buffer = await file.arrayBuffer();
+        await restore_or_cold_boot(buffer, file.name);
+    }
+    catch(e)
+    {
+        set_status("Could not read state file: " + String(e && e.message || e), true);
+    }
+};
+
+restore_idb_btn.onclick = async function()
+{
+    if(!emulator)
+    {
+        return;
+    }
+    try
+    {
+        set_status("Loading last local state…");
+        const data = await idb_get_state();
+        if(!data)
+        {
+            set_status("No last local state in this browser.", true);
+            restore_idb_btn.disabled = true;
+            return;
+        }
+        const buffer = await to_array_buffer(data);
+        await restore_or_cold_boot(buffer, "last local state");
+    }
+    catch(e)
+    {
+        set_status("Could not load last local state: " + String(e && e.message || e), true);
+    }
+};
+
 (async function()
 {
     if(location.protocol === "file:")
@@ -503,7 +1029,12 @@ reset_btn.onclick = function()
     const params = new URLSearchParams(location.search);
     if(params.get("autostart") === "0")
     {
-        set_status("Autostart off. Pick a disk or click Start from images/.");
+        let msg = "Autostart off. Pick a disk or click Start from images/.";
+        if(params.get("state"))
+        {
+            msg += " ?state=" + params.get("state") + " is used when you start if that file exists.";
+        }
+        set_status(msg);
         return;
     }
 
