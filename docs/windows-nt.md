@@ -183,6 +183,33 @@ Models: Sound Blaster 16 or AWE32 or compatible (WDM)
 > For Windows Server 2003: you will need to [extract](https://www.betaarchive.com/forum/viewtopic.php?t=37969) the `ctlsb16.sys` and `wdma_ctl.inf` files from the Windows XP installation CD (or download them [here](https://github.com/copy/v86/issues/1358#issuecomment-3014178756)), then press "Have disk" and select the `wdma_ctl.inf` file. After installation, enable the Windows Audio service.
 
 
+### 4.4 Windows XP Professional x64 Edition
+
+This fork targets **Windows XP Professional x64 Edition** (AMD64), not
+32-bit XP and not Itanium. Keep the ACPI Uniprocessor HAL: do **not** switch
+the guest to "Standard PC" if you installed on QEMU `pc-i440fx`.
+
+Example QEMU command used to install and run the disk:
+
+```sh
+qemu-system-x86_64 -machine pc-i440fx-8.2 -cpu qemu64-v1 -m 512M -smp 1 \
+    -accel tcg,tb-size=500 -vga std -rtc base=localtime -nic none \
+    -drive if=ide,index=0,media=disk,format=raw,file=hdd.img -boot order=c
+```
+
+To boot the same disk in the browser after cloning this repository:
+
+1. Build the wasm (`make` is enough for [xp.html](../xp.html); `make all` for `index.html`).
+2. Unzip the image if it is a zip, then copy the raw IDE disk to
+   `images/windows-xp-x64.img` (`images/` and `*.img` are gitignored).
+3. Serve the repo with XAMPP (or `python -m http.server`) and open
+   [xp.html](../xp.html). You can also pick the `.img` (or a zip that
+   *stores* the disk uncompressed) from that page.
+4. v86 settings: 512 MB RAM, `acpi: true` (IOAPIC / APIC, skip 8259 after
+   long mode), SeaBIOS, VGA, IDE HD, no network relay.
+
+`debug.html?profile=windowsxpx64` uses the same local image.
+
 ## 5. Windows Vista and newer
 
 ### 5.1 Installing using QEMU

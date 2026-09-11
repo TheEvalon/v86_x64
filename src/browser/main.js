@@ -902,6 +902,16 @@ function onload()
             name: "Windows 2000",
         },
         {
+            id: "windowsxpx64",
+            memory_size: 512 * 1024 * 1024,
+            acpi: true,
+            hda: {
+                url: host + "windows-xp-x64.img",
+                async: true,
+            },
+            name: "Windows XP x64",
+        },
+        {
             id: "windows-me",
             memory_size: 256 * 1024 * 1024,
             hda: {
