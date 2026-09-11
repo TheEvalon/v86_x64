@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Windows XP x64 — v86</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body {
+    margin: 0;
+    background: #111;
+    color: #ddd;
+    font: 14px/1.4 system-ui, sans-serif;
+}
+#bar {
+    padding: 10px 14px;
+    background: #1c1c1c;
+    border-bottom: 1px solid #333;
+}
+#bar h1 {
+    margin: 0 0 6px;
+    font-size: 16px;
+    font-weight: 600;
+}
+#controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 8px 0;
+}
+button, input[type="file"] {
+    font: inherit;
+}
+#status {
+    white-space: pre-wrap;
+    color: #aaa;
+    min-height: 2.8em;
+}
+#status.error { color: #f88; }
+#help {
+    margin-top: 8px;
+    color: #888;
+    max-width: 72em;
+}
+#help code { color: #ccc; }
+a { color: #8cf; }
+#screen_container {
+    display: inline-block;
+    margin: 12px;
+    outline: none;
+    background: #000;
+}
+#screen_container > div {
+    white-space: pre;
+    font: 14px monospace;
+    line-height: 14px;
+}
+</style>
+</head>
+<body>
+<div id="bar">
+    <h1>Windows XP Professional x64 Edition</h1>
+    <div>
+        Local tester for a gitignored IDE disk. Matches QEMU
+        <code>pc-i440fx</code> + 512&nbsp;MB + ACPI (do not switch the guest to Standard PC).
+    </div>
+    <div id="controls">
+        <label>RAM <input id="memory_mb" type="number" value="512" min="128" max="2048" step="16" style="width:5em"> MB</label>
+        <label><input id="acpi" type="checkbox" checked> ACPI / APIC</label>
+        <input id="disk_file" type="file" accept=".img,.raw,.bin,.vhd,.zip,application/octet-stream">
+        <button id="start_images" type="button">Start from images/</button>
+        <button id="pause" type="button" disabled>Pause</button>
+        <button id="reset" type="button" disabled>Reset</button>
+    </div>
+    <div id="status">Looking for a local disk…</div>
+    <div id="help">
+        Serve this repo over HTTP with a server that supports
+        <code>Range</code> (XAMPP/Apache does; <code>python -m http.server</code> does not),
+        not <code>file://</code>. After clone, run <code>make</code> so
+        <code>build/v86-debug.wasm</code> exists.
+        Unzip your disk and put the raw image at
+        <code>images/windows-xp-x64.img</code> (also accepts
+        <code>images/hdd.img</code>, <code>xp64.img</code>, <code>winxp64.img</code>),
+        or pick the <code>.img</code> here (the file picker does not need Range).
+        A <code>.zip</code> works only if the disk inside is stored uncompressed;
+        otherwise unzip first. Override the URL with
+        <code>?hda=images/hdd.img</code>.
+        The disk is not part of git (<code>images/</code> and <code>*.img</code> are ignored).
+    </div>
+</div>
+
+<div id="screen_container" tabindex="0">
+    <div></div>
+    <canvas style="display: none"></canvas>
+</div>
+
+<script type="module">
+"use strict";
+
+import { V86 } from "./src/browser/starter.js";
+
+const DEFAULT_DISKS = [
+    "images/windows-xp-x64.img",
+    "images/hdd.img",
+    "images/xp64.img",
+    "images/winxp64.img",
+];
+
+const status_el = document.getElementById("status");
+const screen = document.getElementById("screen_container");
+const pause_btn = document.getElementById("pause");
+const reset_btn = document.getElementById("reset");
+
+let emulator = null;
+let paused = false;
+
+function set_status(text, is_error)
+{
+    status_el.textContent = text;
+    status_el.classList.toggle("error", !!is_error);
+}
+
+function u16(bytes, offset)
+{
+    return bytes[offset] | bytes[offset + 1] << 8;
+}
+
+function u32(bytes, offset)
+{
+    return (bytes[offset] | bytes[offset + 1] << 8 |
+        bytes[offset + 2] << 16 | bytes[offset + 3] << 24) >>> 0;
+}
+
+async function read_slice(blob, start, length)
+{
+    return new Uint8Array(await blob.slice(start, start + length).arrayBuffer());
+}
+
+/**
+ * If `file` is a zip, return a File for the largest stored (method 0) disk.
+ * Deflated zips cannot be used as an IDE image in the browser.
+ */
+async function maybe_unwrap_zip(file)
+{
+    const name = file.name || "";
+    const head = await read_slice(file, 0, Math.min(4, file.size));
+    const is_zip = name.toLowerCase().endsWith(".zip") ||
+        head.length >= 2 && head[0] === 0x50 && head[1] === 0x4B;
+    if(!is_zip)
+    {
+        return file;
+    }
+
+    const tail_len = Math.min(file.size, 65557 + 256);
+    const tail_start = file.size - tail_len;
+    const tail = await read_slice(file, tail_start, tail_len);
+    let eocd = -1;
+    for(let i = tail.length - 22; i >= 0; i--)
+    {
+        if(u32(tail, i) === 0x06054B50)
+        {
+            eocd = i;
+            break;
+        }
+    }
+    if(eocd < 0)
+    {
+        throw new Error("File looks like a zip, but the central directory was not found.");
+    }
+
+    const cd_off = u32(tail, eocd + 16);
+    const cd_size = u32(tail, eocd + 12);
+    const n_entries = u16(tail, eocd + 10);
+    const cd = await read_slice(file, cd_off, cd_size);
+    const disk_like = /\.(img|ima|raw|bin|vhd|vmdk)$/i;
+    let best = null;
+    let off = 0;
+
+    for(let i = 0; i < n_entries && off + 46 <= cd.length; i++)
+    {
+        if(u32(cd, off) !== 0x02014B50)
+        {
+            break;
+        }
+        const method = u16(cd, off + 10);
+        const usize = u32(cd, off + 24);
+        const name_len = u16(cd, off + 28);
+        const extra_len = u16(cd, off + 30);
+        const comment_len = u16(cd, off + 32);
+        const local_off = u32(cd, off + 42);
+        const entry_name = new TextDecoder("utf-8").decode(
+            cd.subarray(off + 46, off + 46 + name_len));
+        off += 46 + name_len + extra_len + comment_len;
+        if(entry_name.endsWith("/"))
+        {
+            continue;
+        }
+        const score = usize * (disk_like.test(entry_name) ? 10 : 1);
+        if(!best || score > best.score)
+        {
+            best = { name: entry_name, method, usize, local_off, score };
+        }
+    }
+
+    if(!best)
+    {
+        throw new Error("The zip does not contain a disk image.");
+    }
+    if(best.method !== 0)
+    {
+        throw new Error(
+            "Zip entry \"" + best.name + "\" is compressed. " +
+            "Unzip it and use the raw .img (v86 cannot Range-read a deflated zip).");
+    }
+
+    const local = await read_slice(file, best.local_off, 30);
+    if(u32(local, 0) !== 0x04034B50)
+    {
+        throw new Error("Bad zip local header for \"" + best.name + "\".");
+    }
+    const data_start = best.local_off + 30 + u16(local, 26) + u16(local, 28);
+    const blob = file.slice(data_start, data_start + best.usize);
+    const base = best.name.replace(/^.*[/\\]/, "") || "hdd.img";
+    set_status("Using stored zip entry " + best.name +
+        " (" + (best.usize / (1024 * 1024) | 0) + " MB)");
+    return new File([blob], base);
+}
+
+async function probe_url(url)
+{
+    try
+    {
+        const head = await fetch(url, { method: "HEAD" });
+        if(head.ok)
+        {
+            const size = Number(head.headers.get("content-length")) || undefined;
+            return { url, size };
+        }
+    }
+    catch(_)
+    {
+        // Some servers reject HEAD; try a 4-byte Range next.
+    }
+
+    const response = await fetch(url, { headers: { Range: "bytes=0-3" } });
+    if(!response.ok && response.status !== 206)
+    {
+        return null;
+    }
+
+    const length = Number(response.headers.get("content-length")) || 0;
+    if(response.status === 200 && length > 16)
+    {
+        response.body && response.body.cancel();
+        return { url, size: length };
+    }
+
+    const magic = new Uint8Array(await response.arrayBuffer());
+    if(magic[0] === 0x50 && magic[1] === 0x4B)
+    {
+        throw new Error(
+            url + " is a zip. Unzip the raw disk into images/ " +
+            "or pick the .img / stored zip with the file button.");
+    }
+
+    const range = response.headers.get("content-range");
+    const total = range && /\/(\d+)$/.exec(range);
+    const size = total ? Number(total[1]) : undefined;
+    return { url, size };
+}
+
+async function supports_range(url)
+{
+    const response = await fetch(url, { headers: { Range: "bytes=0-0" } });
+    const length = Number(response.headers.get("content-length")) || 0;
+    if(response.status === 206)
+    {
+        response.body && response.body.cancel();
+        return true;
+    }
+    if(response.status === 200 && length > 1)
+    {
+        response.body && response.body.cancel();
+        return false;
+    }
+    response.body && response.body.cancel();
+    return false;
+}
+
+async function find_default_disk()
+{
+    const params = new URLSearchParams(location.search);
+    const requested = params.get("hda");
+    const urls = requested ? [requested] : DEFAULT_DISKS;
+    for(const url of urls)
+    {
+        try
+        {
+            const found = await probe_url(url);
+            if(found)
+            {
+                return found;
+            }
+        }
+        catch(e)
+        {
+            set_status(String(e.message || e), true);
+            return null;
+        }
+    }
+    return null;
+}
+
+async function wasm_path()
+{
+    for(const path of ["build/v86-debug.wasm", "build/v86.wasm"])
+    {
+        try
+        {
+            const found = await probe_url(path);
+            if(found)
+            {
+                return path;
+            }
+        }
+        catch(_)
+        {
+            // ignore zip sniff errors on wasm
+        }
+    }
+    return "build/v86-debug.wasm";
+}
+
+function memory_size()
+{
+    const mb = Number(document.getElementById("memory_mb").value) || 512;
+    return Math.max(128, mb) * 1024 * 1024;
+}
+
+async function start_emulator(hda)
+{
+    if(emulator)
+    {
+        await emulator.destroy();
+        emulator = null;
+    }
+
+    if(location.protocol === "file:")
+    {
+        set_status("Open this page through XAMPP or another HTTP server, not file://.", true);
+        return;
+    }
+
+    const wasm = await wasm_path();
+    set_status("Starting with " + (hda.url || hda.buffer && hda.buffer.name || "disk") +
+        "  wasm=" + wasm);
+
+    emulator = window.emulator = new V86({
+        wasm_path: wasm,
+        memory_size: memory_size(),
+        vga_memory_size: 8 * 1024 * 1024,
+        screen_container: screen,
+        bios: { url: "bios/seabios.bin" },
+        vga_bios: { url: "bios/vgabios.bin" },
+        hda,
+        acpi: document.getElementById("acpi").checked,
+        fastboot: true,
+        autostart: true,
+        disable_speaker: false,
+    });
+
+    emulator.add_listener("download-progress", function(e)
+    {
+        if(!e.file_name || /v86.*\.wasm/.test(e.file_name))
+        {
+            return;
+        }
+        if(e.total && typeof e.loaded === "number")
+        {
+            const pct = Math.min(100, Math.floor(e.loaded / e.total * 100));
+            set_status("Downloading " + e.file_name.split("?")[0] + " " + pct + "%");
+        }
+    });
+
+    emulator.add_listener("download-error", function(e)
+    {
+        set_status("Failed to load " + (e && e.file_name || "file") +
+            ". Run make if this is wasm; check the disk path otherwise.", true);
+    });
+
+    emulator.add_listener("emulator-ready", function()
+    {
+        set_status("Running. Click the screen for keyboard. Boot from an ACPI i440fx disk takes several minutes.");
+        pause_btn.disabled = false;
+        reset_btn.disabled = false;
+        pause_btn.textContent = "Pause";
+        paused = false;
+        screen.focus();
+    });
+
+    screen.addEventListener("mousedown", function()
+    {
+        screen.focus();
+    });
+
+    const canvas = screen.querySelector("canvas");
+    canvas.addEventListener("click", function()
+    {
+        canvas.requestPointerLock && canvas.requestPointerLock();
+    });
+}
+
+async function start_from_images()
+{
+    const disk = await find_default_disk();
+    if(!disk)
+    {
+        set_status(
+            "No disk at images/windows-xp-x64.img (or hdd.img / xp64.img / winxp64.img). " +
+            "Unzip your image there, or pick a file.", true);
+        return false;
+    }
+    if(!await supports_range(disk.url))
+    {
+        set_status(
+            "Found " + disk.url + " but this HTTP server does not support Range " +
+            "(python -m http.server does not). Use XAMPP/Apache, or pick the .img file.", true);
+        return false;
+    }
+    await start_emulator({ url: disk.url, async: true, size: disk.size });
+    return true;
+}
+
+document.getElementById("start_images").onclick = async function()
+{
+    try
+    {
+        await start_from_images();
+    }
+    catch(e)
+    {
+        set_status(String(e && e.message || e), true);
+    }
+};
+
+document.getElementById("disk_file").onchange = async function()
+{
+    const file = this.files && this.files[0];
+    if(!file)
+    {
+        return;
+    }
+    try
+    {
+        const disk = await maybe_unwrap_zip(file);
+        await start_emulator({ buffer: disk, async: disk.size >= 256 * 1024 * 1024 });
+    }
+    catch(e)
+    {
+        set_status(String(e && e.message || e), true);
+    }
+};
+
+pause_btn.onclick = async function()
+{
+    if(!emulator)
+    {
+        return;
+    }
+    if(paused)
+    {
+        await emulator.run();
+        paused = false;
+        pause_btn.textContent = "Pause";
+        set_status("Running.");
+    }
+    else
+    {
+        await emulator.stop();
+        paused = true;
+        pause_btn.textContent = "Resume";
+        set_status("Paused.");
+    }
+};
+
+reset_btn.onclick = function()
+{
+    if(emulator)
+    {
+        emulator.restart();
+        set_status("Reset.");
+    }
+};
+
+(async function()
+{
+    if(location.protocol === "file:")
+    {
+        set_status("Open this page through XAMPP or another HTTP server, not file://.", true);
+        return;
+    }
+
+    const params = new URLSearchParams(location.search);
+    if(params.get("autostart") === "0")
+    {
+        set_status("Autostart off. Pick a disk or click Start from images/.");
+        return;
+    }
+
+    try
+    {
+        await start_from_images();
+    }
+    catch(e)
+    {
+        set_status(String(e && e.message || e), true);
+    }
+})();
+</script>
+</body>
+</html>

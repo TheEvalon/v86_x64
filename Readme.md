@@ -100,6 +100,7 @@ Here's an overview of the operating systems supported in v86:
   - See [Windows 9x guest setup](docs/windows-9x.md)
 - Windows XP, Vista and 8 work under certain conditions (see [#86](https://github.com/copy/v86/issues/86), [#208](https://github.com/copy/v86/issues/208))
   - See [Windows NT guest setup](docs/windows-nt.md)
+- Windows XP Professional x64 Edition (AMD64) on this fork: keep the ACPI Uniprocessor HAL (QEMU `pc-i440fx`, not Standard PC). Local tester: [xp.html](xp.html).
 - Many hobby operating systems work.
 - 9front works.
 - Plan 9 doesn't work.
@@ -180,6 +181,7 @@ See [tests/Readme.md](tests/Readme.md) for more information.
 - [Networking between browser windows/tabs using the Broadcast Channel API](examples/broadcast-network.html)
 - [TCP Terminal (fetch-based networking)](examples/tcp_terminal.html)
 - [Saving and restoring emulator state](examples/save_restore.html)
+- [Windows XP x64 from a local disk](xp.html) (`images/windows-xp-x64.img`, ACPI i440fx)
 
 Using v86 for your own purposes is as easy as:
 

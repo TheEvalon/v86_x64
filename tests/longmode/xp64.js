@@ -6,7 +6,11 @@
 //   XP64_IMG=/path/to/disk.img node tests/longmode/xp64.js
 //   node tests/longmode/xp64.js /path/to/disk.img
 //
-// Default search paths (gitignored): images/windows-xp-x64.img, images/xp64.img
+// Default search paths (gitignored): images/windows-xp-x64.img, images/hdd.img,
+// images/xp64.img, images/winxp64.img
+//
+// Browser: after `make`, serve with XAMPP/Apache (HTTP Range) and open xp.html.
+// Keep ACPI on for QEMU pc-i440fx installs (not Standard PC).
 //
 // First pass bar: the guest sets EFER.LMA and CS.L (is_64) and survives a few
 // seconds without #UD. That is NTLDR/winload entering long mode, not a desktop.
@@ -27,6 +31,7 @@ const CANDIDATES = [
     process.env.XP64_IMG,
     process.argv[2],
     path.join(ROOT, "images/windows-xp-x64.img"),
+    path.join(ROOT, "images/hdd.img"),
     path.join(ROOT, "images/xp64.img"),
     path.join(ROOT, "images/winxp64.img"),
 ].filter(Boolean);
