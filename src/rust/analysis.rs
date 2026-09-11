@@ -77,7 +77,9 @@ pub fn long_cs_needs_trampoline(cpu: &CpuContext) -> bool {
         tmp.rex_prefix,
         opcode,
         peek_imm8(&tmp),
+        peek_imm8_at(&tmp, 1),
         tmp.prefixes & PREFIX_MASK_ADDRSIZE != 0,
+        tmp.prefixes,
     )
 }
 
@@ -109,16 +111,60 @@ pub fn opcode_has_modrm(opcode: u8) -> bool {
     )
 }
 
+fn opcode_0f_whitelist_modrm(op: u8) -> bool {
+    matches!(
+        op,
+        0x40..=0x4F
+            | 0x90..=0x9F
+            | 0xA3
+            | 0xAB
+            | 0xAF
+            | 0xB0
+            | 0xB1
+            | 0xB3
+            | 0xB6
+            | 0xB7
+            | 0xBB
+            | 0xBC
+            | 0xBD
+            | 0xBE
+            | 0xBF
+            | 0xC0
+            | 0xC1
+    )
+}
+
+/// True when a 0F encoding in 64-bit CS must trampoline instead of using
+/// the 32-bit `jit0f` table. Register-form CMOV/BSWAP/etc. are allowed;
+/// REX/66/F2/F3, memory ModRM, Jcc, and system/SSE ops are not.
+fn opcode_0f_needs_long_trampoline(op: u8, modrm: u8, prefixes: u8) -> bool {
+    if prefixes & (PREFIX_66 | PREFIX_F2 | PREFIX_F3) != 0 {
+        return true;
+    }
+    if (0xC8..=0xCF).contains(&op) {
+        // BSWAP r32: 0F C8+rd, no ModRM byte.
+        return false;
+    }
+    if !opcode_0f_whitelist_modrm(op) {
+        return true;
+    }
+    modrm < 0xC0
+}
+
 pub fn opcode_needs_long_trampoline(
     rex: u8,
     opcode: u8,
     next: u8,
+    next2: u8,
     addrsize_override: bool,
+    prefixes: u8,
 ) -> bool {
     if opcode == 0x0F {
-        return true;
+        if opcode_0f_needs_long_trampoline(next, next2, prefixes) {
+            return true;
+        }
     }
-    if long_mode::opcode_is_forced64(opcode as i32) {
+    else if long_mode::opcode_is_forced64(opcode as i32) {
         return true;
     }
     if rex != 0 {
@@ -140,12 +186,14 @@ pub fn opcode_needs_long_trampoline(
     false
 }
 
-fn peek_imm8(cpu: &CpuContext) -> u8 {
-    if cpu.eip & 0xFFF == 0xFFF {
+fn peek_imm8(cpu: &CpuContext) -> u8 { peek_imm8_at(cpu, 0) }
+
+fn peek_imm8_at(cpu: &CpuContext, off: u32) -> u8 {
+    if (cpu.eip as u32 & 0xFFF) + off > 0xFFF {
         0
     }
     else {
-        memory::read8(cpu.eip) as u8
+        memory::read8(cpu.eip.wrapping_add(off)) as u8
     }
 }
 
@@ -170,7 +218,9 @@ fn analyze_step_64(cpu: &mut CpuContext, mut analysis: Analysis) -> Analysis {
         cpu.rex_prefix,
         opcode,
         peek_imm8(cpu),
+        peek_imm8_at(cpu, 1),
         cpu.prefixes & PREFIX_MASK_ADDRSIZE != 0,
+        cpu.prefixes,
     );
     gen::analyzer::analyzer(
         opcode as u32 | (cpu.osize_32() as u32) << 8,
@@ -252,32 +302,61 @@ pub fn modrm_analyze(ctx: &mut CpuContext, modrm_byte: u8) { modrm::skip(ctx, mo
 mod tests {
     use super::*;
 
+    fn needs(rex: u8, opcode: u8, next: u8, addrsize_override: bool) -> bool {
+        opcode_needs_long_trampoline(rex, opcode, next, 0, addrsize_override, 0)
+    }
+
+    fn needs0f(rex: u8, op: u8, modrm: u8, prefixes: u8) -> bool {
+        opcode_needs_long_trampoline(rex, 0x0F, op, modrm, false, prefixes)
+    }
+
     #[test]
     fn trampoline_any_rex() {
-        assert!(opcode_needs_long_trampoline(
-            long_mode::REX_W,
-            0x01,
-            0xC0,
-            false
-        ));
-        assert!(opcode_needs_long_trampoline(0x40, 0x33, 0xC0, false));
+        assert!(needs(long_mode::REX_W, 0x01, 0xC0, false));
+        assert!(needs(0x40, 0x33, 0xC0, false));
     }
 
     #[test]
     fn trampoline_memory_modrm_in_long_cs() {
         assert!(opcode_has_modrm(0x8B));
         assert!(!opcode_has_modrm(0x75));
-        assert!(opcode_needs_long_trampoline(0, 0x8B, 0x05, false));
-        assert!(opcode_needs_long_trampoline(0, 0x8B, 0x18, false));
-        assert!(opcode_needs_long_trampoline(0, 0xC7, 0x44, false));
-        assert!(!opcode_needs_long_trampoline(0, 0x8B, 0x05, true));
-        assert!(!opcode_needs_long_trampoline(0, 0x8B, 0x18, true));
-        assert!(!opcode_needs_long_trampoline(0, 0x8B, 0xC3, false));
-        assert!(opcode_needs_long_trampoline(0, 0xE8, 0, false));
-        assert!(opcode_needs_long_trampoline(0, 0xA4, 0, false));
-        assert!(opcode_needs_long_trampoline(0, 0xAB, 0, false));
-        assert!(opcode_needs_long_trampoline(0, 0xE2, 0, false));
-        assert!(!opcode_needs_long_trampoline(0, 0x75, 0, false));
-        assert!(!opcode_needs_long_trampoline(0, 0x83, 0xC0, false));
+        assert!(needs(0, 0x8B, 0x05, false));
+        assert!(needs(0, 0x8B, 0x18, false));
+        assert!(needs(0, 0xC7, 0x44, false));
+        assert!(!needs(0, 0x8B, 0x05, true));
+        assert!(!needs(0, 0x8B, 0x18, true));
+        assert!(!needs(0, 0x8B, 0xC3, false));
+        assert!(needs(0, 0xE8, 0, false));
+        assert!(needs(0, 0xA4, 0, false));
+        assert!(needs(0, 0xAB, 0, false));
+        assert!(needs(0, 0xE2, 0, false));
+        assert!(!needs(0, 0x75, 0, false));
+        assert!(!needs(0, 0x83, 0xC0, false));
+    }
+
+    #[test]
+    fn trampoline_0f_whitelist_register_form() {
+        // 0F 40 C3: CMOVO eax, ebx (register). 32-bit JIT.
+        assert!(!needs0f(0, 0x40, 0xC3, 0));
+        // 0F 40 05: CMOVO eax, [disp32]. 64-bit addressing.
+        assert!(needs0f(0, 0x40, 0x05, 0));
+        // 41 0F 40 C3: REX.B CMOVO.
+        assert!(needs0f(0x41, 0x40, 0xC3, 0));
+        // 0F 05: SYSCALL.
+        assert!(needs0f(0, 0x05, 0, 0));
+        // 0F CC: BSWAP esp encoding; C8–CF have no ModRM.
+        assert!(!needs0f(0, 0xCC, 0, 0));
+        assert!(!needs0f(0, 0xC8, 0x05, 0));
+        assert!(needs0f(0, 0x40, 0xC3, PREFIX_66));
+        assert!(needs0f(0, 0x40, 0xC3, PREFIX_F2));
+        assert!(needs0f(0, 0x40, 0xC3, PREFIX_F3));
+        assert!(needs0f(0, 0x80, 0, 0));
+        assert!(needs0f(0, 0xA2, 0, 0));
+        assert!(needs0f(0, 0xC7, 0xC1, 0));
+        assert!(!needs0f(0, 0x44, 0xC3, 0));
+        assert!(!needs0f(0, 0xA3, 0xD8, 0));
+        assert!(needs0f(0, 0xA3, 0x18, 0));
+        assert!(!needs0f(0, 0xB6, 0xC3, 0));
+        assert!(!needs0f(0, 0x94, 0xC0, 0));
     }
 }

@@ -138,6 +138,75 @@ start64:
     cmp rax, rcx
     jne fail_moffs
 
+    ; Whitelisted 0F: non-REX register-form CMOVZ/CMOVNZ, BSWAP r32, BT r32,r32.
+    mov rax, 0x000007FFAABBCCDD
+    bswap eax
+    mov ecx, 0xDDCCBBAA
+    cmp rax, rcx
+    jne fail_bswap
+
+    ; CMOVZ taken: 32-bit write zero-extends.
+    mov rax, 0x000007FF11111111
+    mov ebx, 0x22222222
+    xor ecx, ecx
+    cmovz eax, ebx
+    cmp eax, ebx
+    jne fail_cmov
+    mov edx, 0x22222222
+    cmp rax, rdx
+    jne fail_cmov
+
+    ; CMOVNZ not taken: dest and high half unchanged. Re-arm ZF before CMOV.
+    mov rax, 0x000007FF11111111
+    xor ecx, ecx
+    cmovnz eax, ebx
+    mov rdx, 0x000007FF11111111
+    cmp rax, rdx
+    jne fail_cmov
+
+    ; CMOVNZ taken.
+    mov eax, 0x11111111
+    mov esi, 0x33333333
+    mov ecx, 1
+    test ecx, ecx
+    cmovnz eax, esi
+    cmp eax, esi
+    jne fail_cmov
+
+    ; CMOVZ not taken.
+    mov eax, 0x11111111
+    mov ecx, 1
+    test ecx, ecx
+    cmovz eax, ebx
+    cmp eax, 0x11111111
+    jne fail_cmov
+
+    mov eax, 0x00000002
+    mov ebx, 1
+    bt eax, ebx
+    jnc fail_bt
+    mov ebx, 0
+    bt eax, ebx
+    jc fail_bt
+
+    xor eax, eax
+    mov ecx, ITERATIONS
+    mov ebx, 1
+    mov esi, 2
+.loop0f:
+    xor edx, edx
+    test ecx, ecx
+    cmovnz edx, ebx
+    cmovz edx, esi
+    bswap edx
+    bswap edx
+    bt edx, ebx
+    add eax, 1
+    sub ecx, 1
+    jnz .loop0f
+    cmp eax, ITERATIONS
+    jne fail_loop0f
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -158,6 +227,18 @@ fail_zext:
     jmp fail_out
 fail_moffs:
     mov al, 6
+    jmp fail_out
+fail_bswap:
+    mov al, 7
+    jmp fail_out
+fail_cmov:
+    mov al, 8
+    jmp fail_out
+fail_bt:
+    mov al, 9
+    jmp fail_out
+fail_loop0f:
+    mov al, 10
     jmp fail_out
 fail64:
     mov al, 1
