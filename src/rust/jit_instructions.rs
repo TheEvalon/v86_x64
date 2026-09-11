@@ -7049,7 +7049,8 @@ pub fn instr32_0FAB_reg_jit(ctx: &mut JitContext, r1: u32, r2: u32) {
         &ctx.register_locals[r1 as usize],
         &LocalOrImmediate::WasmLocal(&ctx.register_locals[r2 as usize]),
         31,
-    )
+    );
+    codegen::gen_zero_reg_high32(ctx.builder, r1);
 }
 pub fn instr32_0FAB_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte, r: u32) {
     gen_bit_rmw(
@@ -7084,7 +7085,8 @@ pub fn instr32_0FB3_reg_jit(ctx: &mut JitContext, r1: u32, r2: u32) {
         &ctx.register_locals[r1 as usize],
         &LocalOrImmediate::WasmLocal(&ctx.register_locals[r2 as usize]),
         31,
-    )
+    );
+    codegen::gen_zero_reg_high32(ctx.builder, r1);
 }
 pub fn instr32_0FB3_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte, r: u32) {
     gen_bit_rmw(
@@ -7119,7 +7121,8 @@ pub fn instr32_0FBB_reg_jit(ctx: &mut JitContext, r1: u32, r2: u32) {
         &ctx.register_locals[r1 as usize],
         &LocalOrImmediate::WasmLocal(&ctx.register_locals[r2 as usize]),
         31,
-    )
+    );
+    codegen::gen_zero_reg_high32(ctx.builder, r1);
 }
 pub fn instr32_0FBB_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte, r: u32) {
     gen_bit_rmw(
