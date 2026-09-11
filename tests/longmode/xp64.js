@@ -9,8 +9,8 @@
 // Default search paths (gitignored): images/windows-xp-x64.img, images/hdd.img,
 // images/xp64.img, images/winxp64.img
 //
-// Browser: after `make`, serve the repo (XAMPP or python -m http.server) and
-// open xp.html. Keep ACPI on for QEMU pc-i440fx installs (not Standard PC).
+// Browser: after `make`, serve with XAMPP/Apache (HTTP Range) and open xp.html.
+// Keep ACPI on for QEMU pc-i440fx installs (not Standard PC).
 //
 // First pass bar: the guest sets EFER.LMA and CS.L (is_64) and survives a few
 // seconds without #UD. That is NTLDR/winload entering long mode, not a desktop.

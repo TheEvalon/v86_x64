@@ -74,13 +74,14 @@ a { color: #8cf; }
     </div>
     <div id="status">Looking for a local disk…</div>
     <div id="help">
-        Serve this repo over HTTP (XAMPP or <code>python -m http.server</code>), not
-        <code>file://</code>. After clone, run <code>make</code> so
+        Serve this repo over HTTP with a server that supports
+        <code>Range</code> (XAMPP/Apache does; <code>python -m http.server</code> does not),
+        not <code>file://</code>. After clone, run <code>make</code> so
         <code>build/v86-debug.wasm</code> exists.
         Unzip your disk and put the raw image at
         <code>images/windows-xp-x64.img</code> (also accepts
         <code>images/hdd.img</code>, <code>xp64.img</code>, <code>winxp64.img</code>),
-        or pick the <code>.img</code> here.
+        or pick the <code>.img</code> here (the file picker does not need Range).
         A <code>.zip</code> works only if the disk inside is stored uncompressed;
         otherwise unzip first. Override the URL with
         <code>?hda=images/hdd.img</code>.
@@ -268,6 +269,24 @@ async function probe_url(url)
     return { url, size };
 }
 
+async function supports_range(url)
+{
+    const response = await fetch(url, { headers: { Range: "bytes=0-0" } });
+    const length = Number(response.headers.get("content-length")) || 0;
+    if(response.status === 206)
+    {
+        response.body && response.body.cancel();
+        return true;
+    }
+    if(response.status === 200 && length > 1)
+    {
+        response.body && response.body.cancel();
+        return false;
+    }
+    response.body && response.body.cancel();
+    return false;
+}
+
 async function find_default_disk()
 {
     const params = new URLSearchParams(location.search);
@@ -391,19 +410,32 @@ async function start_emulator(hda)
     });
 }
 
+async function start_from_images()
+{
+    const disk = await find_default_disk();
+    if(!disk)
+    {
+        set_status(
+            "No disk at images/windows-xp-x64.img (or hdd.img / xp64.img / winxp64.img). " +
+            "Unzip your image there, or pick a file.", true);
+        return false;
+    }
+    if(!await supports_range(disk.url))
+    {
+        set_status(
+            "Found " + disk.url + " but this HTTP server does not support Range " +
+            "(python -m http.server does not). Use XAMPP/Apache, or pick the .img file.", true);
+        return false;
+    }
+    await start_emulator({ url: disk.url, async: true, size: disk.size });
+    return true;
+}
+
 document.getElementById("start_images").onclick = async function()
 {
     try
     {
-        const disk = await find_default_disk();
-        if(!disk)
-        {
-            set_status(
-                "No disk at images/windows-xp-x64.img (or hdd.img / xp64.img / winxp64.img). " +
-                "Unzip your image there, or pick a file.", true);
-            return;
-        }
-        await start_emulator({ url: disk.url, async: true, size: disk.size });
+        await start_from_images();
     }
     catch(e)
     {
@@ -468,19 +500,20 @@ reset_btn.onclick = function()
         return;
     }
 
-    const disk = await find_default_disk();
-    if(disk)
+    const params = new URLSearchParams(location.search);
+    if(params.get("autostart") === "0")
     {
-        set_status("Found " + disk.url +
-            (disk.size ? " (" + (disk.size / (1024 * 1024) | 0) + " MB)" : "") +
-            ". Starting.");
-        await start_emulator({ url: disk.url, async: true, size: disk.size });
+        set_status("Autostart off. Pick a disk or click Start from images/.");
+        return;
     }
-    else
+
+    try
     {
-        set_status(
-            "No images/windows-xp-x64.img yet. Unzip your QEMU disk there, " +
-            "or pick an .img / stored .zip.");
+        await start_from_images();
+    }
+    catch(e)
+    {
+        set_status(String(e && e.message || e), true);
     }
 })();
 </script>

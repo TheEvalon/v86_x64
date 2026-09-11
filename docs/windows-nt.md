@@ -202,9 +202,11 @@ To boot the same disk in the browser after cloning this repository:
 1. Build the wasm (`make` is enough for [xp.html](../xp.html); `make all` for `index.html`).
 2. Unzip the image if it is a zip, then copy the raw IDE disk to
    `images/windows-xp-x64.img` (`images/` and `*.img` are gitignored).
-3. Serve the repo with XAMPP (or `python -m http.server`) and open
-   [xp.html](../xp.html). You can also pick the `.img` (or a zip that
-   *stores* the disk uncompressed) from that page.
+3. Serve the repo with XAMPP (Apache). The disk is loaded with HTTP
+   `Range` requests; Apache supports that, `python -m http.server` does not.
+   Open [xp.html](../xp.html). You can also pick the `.img` (or a zip that
+   *stores* the disk uncompressed) from that page — the file picker does not
+   need Range.
 4. v86 settings: 512 MB RAM, `acpi: true` (IOAPIC / APIC, skip 8259 after
    long mode), SeaBIOS, VGA, IDE HD, no network relay.
 
