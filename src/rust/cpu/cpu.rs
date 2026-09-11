@@ -4841,6 +4841,12 @@ pub unsafe fn main_loop() -> f64 {
         if now - start > TIME_PER_FRAME || slices >= max_slices {
             break;
         }
+        // `performance.now()` can stay unchanged for the whole WASM call.
+        // Extra slices then never hit TIME_PER_FRAME and starve JS timers
+        // (devices-test 60s timeouts never fire).
+        if now <= start {
+            break;
+        }
     }
 
     return 0.0;
@@ -6368,5 +6374,6 @@ mod long_mode_sched_tests {
         assert_eq!(INTERPRETER_ITERATION_LIMIT_64, INTERPRETER_ITERATION_LIMIT);
         assert_eq!(MAX_SLICES_PER_FRAME_64, MAX_SLICES_PER_FRAME);
         assert!(MAX_64BIT_STEPS < LOOP_COUNTER as u32);
+        assert!(TIME_PER_FRAME > 0.0);
     }
 }
