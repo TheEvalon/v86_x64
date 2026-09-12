@@ -62,6 +62,7 @@ fail32:
     jmp .hang
 
 BITS 64
+DEFAULT REL
 start64:
     mov rax, HIGHER_HALF + higher
     jmp rax
