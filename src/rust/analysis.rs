@@ -152,6 +152,53 @@ fn opcode_0f_needs_long_trampoline(op: u8, modrm: u8, prefixes: u8) -> bool {
     modrm < 0xC0
 }
 
+/// Unprefixed 32-bit register ALU/MOV/CMP/TEST the 32-bit JIT can run when
+/// RIP > 4GiB. Everything else at high RIP is interpreted: 0F, Jcc, prefixes,
+/// memory, shifts, MUL/DIV/XCHG, and 8-bit ops have all produced or can
+/// produce XP STOP 0x7E (STATUS_BREAKPOINT in ntoskrnl INT3 padding).
+fn high_rip_may_jit_32bit_alu(
+    rex: u8,
+    opcode: u8,
+    next: u8,
+    addrsize_override: bool,
+    prefixes: u8,
+) -> bool {
+    if rex != 0 || prefixes != 0 || addrsize_override {
+        return false;
+    }
+    if opcode_has_modrm(opcode) && next < 0xC0 {
+        return false;
+    }
+    matches!(
+        opcode,
+        0x01 | 0x03
+            | 0x05
+            | 0x09
+            | 0x0B
+            | 0x0D
+            | 0x21
+            | 0x23
+            | 0x25
+            | 0x29
+            | 0x2B
+            | 0x2D
+            | 0x31
+            | 0x33
+            | 0x35
+            | 0x39
+            | 0x3B
+            | 0x3D
+            | 0x81
+            | 0x83
+            | 0x85
+            | 0x89
+            | 0x8B
+            | 0x90
+            | 0xA9
+            | 0xB8..=0xBF
+    )
+}
+
 pub fn opcode_needs_long_trampoline(
     rex: u8,
     opcode: u8,
@@ -161,25 +208,14 @@ pub fn opcode_needs_long_trampoline(
     prefixes: u8,
     high_rip: bool,
 ) -> bool {
-    // Compiled Jcc takes wasm edges with 32-bit IP arithmetic. At RIP > 4GiB
-    // that can land in FineIBT `ud2` padding; interpret taken/not-taken instead.
-    if high_rip && (0x70..=0x7F).contains(&opcode) {
-        return true;
+    // Above 4GiB only compile the 32-bit register ALU subset. Compiled Jcc,
+    // 0F, 67h memory, and the rest of the 32-bit helpers have landed XP in
+    // ntoskrnl INT3 padding (STOP 0x7E / STATUS_BREAKPOINT).
+    if high_rip {
+        return !high_rip_may_jit_32bit_alu(rex, opcode, next, addrsize_override, prefixes);
     }
-    // Prefixed ops at RIP > 4GiB: 67h memory uses 32-bit JIT EA ([disp32] for
-    // mod=00 rm=101, 32-bit FS/GS bases) while the interpreter is RIP-relative
-    // then truncates and uses 64-bit FS/GS MSRs. 66h/F2/F3/segment have the
-    // same 32-bit helpers. Interpret them above 4GiB; low-RIP 64-bit CS still
-    // JITs 67h as 32-bit asize.
-    if high_rip && (prefixes != 0 || addrsize_override) {
-        return true;
-    }
-    // 0F two-byte ops (CMOV, BT, CMPXCHG, MOVZX, BSWAP, …) still use 32-bit
-    // codegen. At RIP > 4GiB a wrong dest/flag write plus an indirect transfer
-    // can land in INT3 padding (XP STOP 0x7E / STATUS_BREAKPOINT). Keep the
-    // low-RIP 64-bit CS whitelist; trampoline every 0F above 4GiB.
     if opcode == 0x0F {
-        if high_rip || opcode_0f_needs_long_trampoline(next, next2, prefixes) {
+        if opcode_0f_needs_long_trampoline(next, next2, prefixes) {
             return true;
         }
     }
@@ -395,6 +431,23 @@ mod tests {
         assert!(needs_high(0x0F, 0xB0));
         assert!(needs_high(0x0F, 0xB6));
         assert!(needs_high(0x0F, 0xC8));
+    }
+
+    #[test]
+    fn high_rip_only_jits_32bit_register_alu() {
+        assert!(!needs_high(0x01, 0xC3));
+        assert!(!needs_high(0x8B, 0xC3));
+        assert!(!needs_high(0x83, 0xC0));
+        assert!(!needs_high(0x3D, 0));
+        assert!(!needs_high(0xB8, 0));
+        assert!(!needs_high(0x90, 0));
+        assert!(needs_high(0x00, 0xC3));
+        assert!(needs_high(0x87, 0xC3));
+        assert!(needs_high(0x98, 0));
+        assert!(needs_high(0xD3, 0xE0));
+        assert!(needs_high(0xF7, 0xF8));
+        assert!(needs_high(0xCC, 0));
+        assert!(needs_high(0x8B, 0x05));
     }
 
     #[test]

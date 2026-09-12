@@ -80,6 +80,13 @@ higher:
     mov edi, scratch
 
     ; REX.W encodings trampoline; this loop should compile as 32-bit-opsize JIT.
+    ; 32-bit XOR must zero-extend: stale 0xFFFFFFFF80000000 in RAX after
+    ; `xor eax, eax` becomes a canonical kernel pointer and can land in INT3.
+    mov rax, HIGHER_HALF
+    xor eax, eax
+    test rax, rax
+    jnz fail_zext
+
     xor eax, eax
     mov ecx, ITERATIONS
 .loop:
@@ -127,6 +134,13 @@ fail_asize:
 .hang_asize:
     hlt
     jmp .hang_asize
+
+fail_zext:
+    mov al, 4
+    out 0xF4, al
+.hang_zext:
+    hlt
+    jmp .hang_zext
 
 align 8
 scratch:
