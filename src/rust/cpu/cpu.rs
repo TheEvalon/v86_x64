@@ -1,5 +1,6 @@
 #![allow(non_upper_case_globals)]
 
+use crate::analysis;
 use crate::config;
 use crate::cpu::fpu::fpu_set_tag_word;
 use crate::cpu::global_pointers::*;
@@ -4516,11 +4517,14 @@ pub unsafe fn cycle_internal() {
 
     if high_rip {
         // tlb_code is indexed by a 32-bit virtual page and aliases 4GiB apart.
-        // Look up compiled blocks by physical page instead.
+        // Look up compiled blocks by physical page instead. Skip trampoline-only
+        // entries: entering wasm to interpret one insn is slower than a batch.
         let phys_eip = return_on_pagefault!(get_phys_eip());
-        let entry = jit::jit_find_cache_entry(phys_eip, initial_state_flags);
-        if entry != jit::CachedCode::NONE {
-            jit_entry = Some((entry.wasm_table_index.to_u16(), entry.initial_state));
+        if analysis::high_rip_should_enter_jit(phys_eip, initial_state_flags) {
+            let entry = jit::jit_find_cache_entry(phys_eip, initial_state_flags);
+            if entry != jit::CachedCode::NONE {
+                jit_entry = Some((entry.wasm_table_index.to_u16(), entry.initial_state));
+            }
         }
     }
     else {
@@ -4732,6 +4736,16 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
                 profiler::stat_increment(
                     stat::RUN_INTERPRETED_MISSED_COMPILED_ENTRY_RUN_INTERPRETED,
                 );
+            }
+        }
+
+        // Hand ALU at RIP > 4GiB back to compiled code; stay in this batch for
+        // trampolines (REX/memory/Jcc) so we do not pay wasm enter per insn.
+        if i > 0 && *is_64 && get_rip() > 0xFFFF_FFFF {
+            if analysis::high_rip_should_enter_jit(phys_addr, *state_flags)
+                && jit::jit_find_cache_entry(phys_addr, *state_flags) != jit::CachedCode::NONE
+            {
+                break;
             }
         }
 

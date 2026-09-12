@@ -9,6 +9,7 @@ use crate::prefix::{
     PREFIX_66, PREFIX_67, PREFIX_F2, PREFIX_F3, PREFIX_MASK_ADDRSIZE, PREFIX_MASK_SEGMENT,
 };
 use crate::regs::{CS, DS, ES, FS, GS, SS};
+use crate::state_flags::CachedStateFlags;
 
 #[derive(PartialEq, Eq)]
 pub enum AnalysisType {
@@ -66,6 +67,22 @@ pub fn consume_legacy_prefixes_and_rex(cpu: &mut CpuContext) -> u8 {
             other => return other,
         }
     }
+}
+
+/// True when a high-RIP compiled entry at `phys_eip` is 32-bit register ALU
+/// that is safe to enter. Trampoline-only entries must not be entered: wasm
+/// call + one interpreted insn is slower than an interpreter batch (XP
+/// post-LMA was ~5.6 M insns/s vs ~12 M on master).
+pub fn high_rip_should_enter_jit(phys_eip: u32, state_flags: CachedStateFlags) -> bool {
+    let cpu = CpuContext {
+        eip: phys_eip,
+        prefixes: 0,
+        rex_prefix: 0,
+        cs_offset: 0,
+        state_flags,
+        high_rip: true,
+    };
+    !long_cs_needs_trampoline(&cpu)
 }
 
 pub fn long_cs_needs_trampoline(cpu: &CpuContext) -> bool {
