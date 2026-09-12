@@ -442,9 +442,11 @@ fn jit_find_basic_blocks(
     ctx: &mut JitState,
     entry_points: HashSet<i32>,
     cpu: CpuContext,
+    sample_rip: u64,
 ) -> Vec<BasicBlock> {
     fn follow_jump(
         virt_target: i32,
+        sample_rip: u64,
         ctx: &mut JitState,
         pages: &mut HashSet<Page>,
         page_blacklist: &mut HashSet<Page>,
@@ -455,9 +457,10 @@ fn jit_find_basic_blocks(
         if is_near_end_of_page(virt_target as u32) {
             return None;
         }
-        let phys_target = match cpu::translate_address_read_no_side_effects(virt_target) {
+        let linear = cpu::virt32_to_linear(virt_target, sample_rip);
+        let phys_target = match cpu::translate_linear_no_side_effects(linear) {
             Err(()) => {
-                dbg_log!("Not analysing {:x} (page not mapped)", virt_target);
+                dbg_log!("Not analysing {:x} (page not mapped)", linear);
                 return None;
             },
             Ok(t) => t,
@@ -530,6 +533,7 @@ fn jit_find_basic_blocks(
     for virt_addr in entry_points {
         let ok = follow_jump(
             virt_addr,
+            sample_rip,
             ctx,
             &mut pages,
             &mut page_blacklist,
@@ -542,7 +546,9 @@ fn jit_find_basic_blocks(
     }
 
     while let Some(to_visit) = to_visit_stack.pop() {
-        let phys_addr = match cpu::translate_address_read_no_side_effects(to_visit) {
+        let phys_addr = match cpu::translate_linear_no_side_effects(cpu::virt32_to_linear(
+            to_visit, sample_rip,
+        )) {
             Err(()) => {
                 dbg_log!("Not analysing {:x} (page not mapped)", to_visit);
                 continue;
@@ -661,6 +667,7 @@ fn jit_find_basic_blocks(
                         next_block_addr,
                         next_block_branch_taken_addr: follow_jump(
                             jump_target,
+                            sample_rip,
                             ctx,
                             &mut pages,
                             &mut page_blacklist,
@@ -700,6 +707,7 @@ fn jit_find_basic_blocks(
                     current_block.ty = BasicBlockType::Normal {
                         next_block_addr: follow_jump(
                             jump_target,
+                            sample_rip,
                             ctx,
                             &mut pages,
                             &mut page_blacklist,
@@ -838,7 +846,7 @@ pub fn jit_force_generate_unsafe(virt_addr: i32) {
         "cannot force compile near end of page"
     );
     jit_increase_hotness_and_maybe_compile(
-        virt_addr,
+        virt_addr as u32 as u64,
         cpu::translate_address_read(virt_addr).unwrap(),
         cpu::get_seg_cs() as u32,
         cpu::get_state_flags(),
@@ -850,7 +858,7 @@ pub fn jit_force_generate_unsafe(virt_addr: i32) {
 #[inline(never)]
 fn jit_analyze_and_generate(
     ctx: &mut JitState,
-    virt_entry_point: i32,
+    virt_entry_point: u64,
     phys_entry_point: u32,
     cs_offset: u32,
     state_flags: CachedStateFlags,
@@ -899,14 +907,14 @@ fn jit_analyze_and_generate(
     };
 
     dbg_assert!(
-        cpu::translate_address_read_no_side_effects(virt_entry_point).unwrap() == phys_entry_point
+        cpu::translate_linear_no_side_effects(virt_entry_point).unwrap() == phys_entry_point
     );
     let virt_page = Page::page_of(virt_entry_point as u32);
     let entry_points: HashSet<i32> = entry_points
         .iter()
         .map(|e| virt_page.to_address() as i32 | *e as i32)
         .collect();
-    let basic_blocks = jit_find_basic_blocks(ctx, entry_points, cpu.clone());
+    let basic_blocks = jit_find_basic_blocks(ctx, entry_points, cpu.clone(), virt_entry_point);
 
     let mut pages = HashSet::new();
 
@@ -2167,7 +2175,7 @@ fn jit_generate_basic_block(ctx: &mut JitContext, block: &BasicBlock) {
 }
 
 pub fn jit_increase_hotness_and_maybe_compile(
-    virt_address: i32,
+    virt_address: u64,
     phys_address: u32,
     cs_offset: u32,
     state_flags: CachedStateFlags,
@@ -2196,8 +2204,7 @@ pub fn jit_increase_hotness_and_maybe_compile(
             if is_compiling {
                 None
             }
-            else if cpu::translate_address_read_no_side_effects(virt_address) == Ok(phys_address)
-            {
+            else if cpu::translate_linear_no_side_effects(virt_address) == Ok(phys_address) {
                 *hotness = 0;
                 jit_analyze_and_generate(
                     &mut ctx,

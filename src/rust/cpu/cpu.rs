@@ -87,7 +87,7 @@ pub const TIME_PER_FRAME: f64 = 1.0;
 pub const MAX_SLICES_PER_FRAME: u32 = 4;
 pub const MAX_SLICES_PER_FRAME_64: u32 = MAX_SLICES_PER_FRAME;
 /// Low 4GiB 64-bit CS still trampolines; each step is often one insn. Higher
-/// half uses the interpreter and fills `LOOP_COUNTER` instead.
+/// half JITs 32-bit-opsize ops keyed by physical page and trampolines the rest.
 pub const MAX_64BIT_STEPS: u32 = 16;
 
 pub const FLAG_SUB: i32 = -0x8000_0000;
@@ -2485,6 +2485,10 @@ unsafe fn translate_span(addr: i32, size: i32, for_writing: bool, user: bool) ->
 pub fn translate_address_read_no_side_effects(address: i32) -> OrPageFault<u32> {
     unsafe { translate_address(address, false, *cpl == 3, false, false, false) }
 }
+
+pub fn translate_linear_no_side_effects(address: u64) -> OrPageFault<u32> {
+    unsafe { translate_address64(address, false, *cpl == 3, false, false, false) }
+}
 pub fn translate_address_read(address: i32) -> OrPageFault<u32> {
     unsafe { translate_address(address, false, *cpl == 3, false, true, false) }
 }
@@ -3209,7 +3213,10 @@ pub unsafe fn translate_address64(
     side_effects: bool,
     for_execute: bool,
 ) -> OrPageFault<u32> {
-    if gp_if_noncanonical(address) {
+    if efer_lma() && !is_canonical_va(address) {
+        if side_effects {
+            gp_if_noncanonical(address);
+        }
         return Err(());
     }
     if address <= 0xFFFF_FFFF {
@@ -4027,6 +4034,37 @@ pub unsafe fn set_rip(value: u64) {
     *instruction_pointer = value as i32;
 }
 
+/// Fold compiled-code updates of the i32 instruction pointer into `rip`.
+/// Wasm only rewrites the low 32 bits; the high half of RIP stays in `rip`.
+pub fn fold_ip_delta_into_rip(current_rip: u64, ip: i32) -> u64 {
+    if current_rip <= 0xFFFF_FFFF {
+        ip as u32 as u64
+    }
+    else {
+        let delta = (ip as u32).wrapping_sub(current_rip as u32) as i32 as i64;
+        current_rip.wrapping_add(delta as u64)
+    }
+}
+
+/// Recover a 64-bit linear address from an i32 VA produced by analysis that
+/// started at `sample_rip`. Relative jumps wrap the low half like i32 add.
+pub fn virt32_to_linear(virt: i32, sample_rip: u64) -> u64 {
+    if sample_rip <= 0xFFFF_FFFF {
+        virt as u32 as u64
+    }
+    else {
+        let delta = (virt as u32).wrapping_sub(sample_rip as u32) as i32 as i64;
+        sample_rip.wrapping_add(delta as u64)
+    }
+}
+
+pub unsafe fn sync_rip_from_instruction_pointer() {
+    if !*is_64 {
+        return;
+    }
+    set_rip(fold_ip_delta_into_rip(*rip, *instruction_pointer));
+}
+
 unsafe fn phys_of_linear_rip(eip: u64) -> OrPageFault<u32> {
     if gp_if_noncanonical(eip) {
         return Err(());
@@ -4461,67 +4499,71 @@ pub unsafe fn cycle_internal() {
     let mut jit_entry = None;
     let initial_eip = *instruction_pointer;
     let initial_state_flags = *state_flags;
+    let initial_rip = if *is_64 { get_rip() } else { initial_eip as u32 as u64 };
+    let high_rip = *is_64 && initial_rip > 0xFFFF_FFFF;
 
     if *is_64 {
-        if get_rip() > 0xFFFF_FFFF {
-            *previous_ip = initial_eip;
-            *previous_rip = get_rip();
-            let phys_addr = return_on_pagefault!(get_phys_eip());
-            let initial_instruction_counter = *instruction_counter;
-            jit_run_interpreted(phys_addr);
-            profiler::stat_increment_by(
-                stat::RUN_INTERPRETED_STEPS,
-                (*instruction_counter - initial_instruction_counter) as u64,
-            );
-            return;
-        }
-        *rip = *instruction_pointer as u32 as u64;
-        // After IRETQ/SYSRET from a higher-half kernel RIP, *previous_rip can
-        // still hold that kernel address. Instruction-fetch #PFs on the low
-        // 4GB path must restore the current RIP, not the stale one.
-        *previous_rip = *rip;
         *previous_ip = initial_eip;
+        *previous_rip = initial_rip;
+        if !high_rip {
+            *rip = *instruction_pointer as u32 as u64;
+            // After IRETQ/SYSRET from a higher-half kernel RIP, *previous_rip can
+            // still hold that kernel address. Instruction-fetch #PFs on the low
+            // 4GB path must restore the current RIP, not the stale one.
+            *previous_rip = *rip;
+        }
     }
 
-    match tlb_code[(initial_eip as u32 >> 12) as usize] {
-        None => {},
-        Some(c) => {
-            let c = c.as_ref();
+    if high_rip {
+        // tlb_code is indexed by a 32-bit virtual page and aliases 4GiB apart.
+        // Look up compiled blocks by physical page instead.
+        let phys_eip = return_on_pagefault!(get_phys_eip());
+        let entry = jit::jit_find_cache_entry(phys_eip, initial_state_flags);
+        if entry != jit::CachedCode::NONE {
+            jit_entry = Some((entry.wasm_table_index.to_u16(), entry.initial_state));
+        }
+    }
+    else {
+        match tlb_code[(initial_eip as u32 >> 12) as usize] {
+            None => {},
+            Some(c) => {
+                let c = c.as_ref();
 
-            if initial_state_flags == c.state_flags {
-                let state = c.state_table[initial_eip as usize & 0xFFF];
-                if state != u16::MAX {
-                    jit_entry = Some((c.wasm_table_index.to_u16(), state));
-                }
-                else {
-                    profiler::stat_increment(if is_near_end_of_page(initial_eip as u32) {
-                        stat::RUN_INTERPRETED_NEAR_END_OF_PAGE
+                if initial_state_flags == c.state_flags {
+                    let state = c.state_table[initial_eip as usize & 0xFFF];
+                    if state != u16::MAX {
+                        jit_entry = Some((c.wasm_table_index.to_u16(), state));
                     }
                     else {
-                        stat::RUN_INTERPRETED_PAGE_HAS_CODE
-                    })
+                        profiler::stat_increment(if is_near_end_of_page(initial_eip as u32) {
+                            stat::RUN_INTERPRETED_NEAR_END_OF_PAGE
+                        }
+                        else {
+                            stat::RUN_INTERPRETED_PAGE_HAS_CODE
+                        })
+                    }
                 }
-            }
-            else {
-                profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE);
-                let s = *state_flags;
-                if c.state_flags.cpl3() != s.cpl3() {
-                    profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_CPL3);
+                else {
+                    profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE);
+                    let s = *state_flags;
+                    if c.state_flags.cpl3() != s.cpl3() {
+                        profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_CPL3);
+                    }
+                    if c.state_flags.has_flat_segmentation() != s.has_flat_segmentation() {
+                        profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_FLAT);
+                    }
+                    if c.state_flags.is_32() != s.is_32() {
+                        profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_IS32);
+                    }
+                    if c.state_flags.ssize_32() != s.ssize_32() {
+                        profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_SS32);
+                    }
+                    if c.state_flags.is_64() != s.is_64() {
+                        profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_IS64);
+                    }
                 }
-                if c.state_flags.has_flat_segmentation() != s.has_flat_segmentation() {
-                    profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_FLAT);
-                }
-                if c.state_flags.is_32() != s.is_32() {
-                    profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_IS32);
-                }
-                if c.state_flags.ssize_32() != s.ssize_32() {
-                    profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_SS32);
-                }
-                if c.state_flags.is_64() != s.is_64() {
-                    profiler::stat_increment(stat::RUN_INTERPRETED_DIFFERENT_STATE_IS64);
-                }
-            }
-        },
+            },
+        }
     }
 
     if let Some((wasm_table_index, initial_state)) = jit_entry {
@@ -4593,18 +4635,22 @@ pub unsafe fn cycle_internal() {
         }
         let phys_addr = return_on_pagefault!(get_phys_eip());
 
-        match tlb_code[(initial_eip as u32 >> 12) as usize] {
-            None => {},
-            Some(c) => {
-                let c = c.as_ref();
+        if !high_rip {
+            match tlb_code[(initial_eip as u32 >> 12) as usize] {
+                None => {},
+                Some(c) => {
+                    let c = c.as_ref();
 
-                if initial_state_flags == c.state_flags
-                    && c.state_table[initial_eip as usize & 0xFFF] != u16::MAX
-                {
-                    profiler::stat_increment(stat::RUN_INTERPRETED_PAGE_HAS_ENTRY_AFTER_PAGE_WALK);
-                    return;
-                }
-            },
+                    if initial_state_flags == c.state_flags
+                        && c.state_table[initial_eip as usize & 0xFFF] != u16::MAX
+                    {
+                        profiler::stat_increment(
+                            stat::RUN_INTERPRETED_PAGE_HAS_ENTRY_AFTER_PAGE_WALK,
+                        );
+                        return;
+                    }
+                },
+            }
         }
 
         #[cfg(feature = "profiler")]
@@ -4618,7 +4664,7 @@ pub unsafe fn cycle_internal() {
         jit_run_interpreted(phys_addr);
 
         jit::jit_increase_hotness_and_maybe_compile(
-            initial_eip,
+            initial_rip,
             phys_addr,
             get_seg_cs() as u32,
             initial_state_flags,
@@ -4635,20 +4681,19 @@ pub unsafe fn cycle_internal() {
         );
     };
 
-    if *is_64 && *rip <= 0xFFFF_FFFF {
-        *rip = *instruction_pointer as u32 as u64;
+    if *is_64 {
+        sync_rip_from_instruction_pointer();
     }
 }
 
 #[no_mangle]
 pub unsafe fn jit_run_one_long() {
     dbg_assert!(*is_64);
-    dbg_assert!(get_rip() <= 0xFFFF_FFFF);
     #[cfg(debug_assertions)]
     {
         in_jit = false;
     }
-    *rip = *instruction_pointer as u32 as u64;
+    sync_rip_from_instruction_pointer();
     *previous_ip = *instruction_pointer;
     *previous_rip = get_rip();
     crate::cpu::long_mode::run_one();
@@ -6375,5 +6420,53 @@ mod long_mode_sched_tests {
         assert_eq!(MAX_SLICES_PER_FRAME_64, MAX_SLICES_PER_FRAME);
         assert!(MAX_64BIT_STEPS < LOOP_COUNTER as u32);
         assert!(TIME_PER_FRAME > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod high_rip_jit_tests {
+    use super::*;
+
+    #[test]
+    fn fold_ip_keeps_high_half() {
+        let current_rip = 0xFFFF_FFFF_8000_1234;
+        let ip = 0x8000_1244u32 as i32;
+        assert_eq!(
+            fold_ip_delta_into_rip(current_rip, ip),
+            0xFFFF_FFFF_8000_1244
+        );
+    }
+
+    #[test]
+    fn fold_ip_crosses_4gib_window() {
+        let current_rip = 0xFFFF_F800_FFFF_FF00;
+        let ip = 0x0000_0100;
+        assert_eq!(
+            fold_ip_delta_into_rip(current_rip, ip),
+            0xFFFF_F801_0000_0100
+        );
+    }
+
+    #[test]
+    fn fold_ip_low_rip_uses_ip() {
+        assert_eq!(fold_ip_delta_into_rip(0x1000, 0x2000), 0x2000);
+    }
+
+    #[test]
+    fn virt32_to_linear_same_page() {
+        let sample = 0xFFFF_FFFF_8000_1234;
+        assert_eq!(virt32_to_linear(0x8000_1234u32 as i32, sample), sample);
+        assert_eq!(
+            virt32_to_linear(0x8000_2000u32 as i32, sample),
+            0xFFFF_FFFF_8000_2000
+        );
+    }
+
+    #[test]
+    fn virt32_to_linear_rel32_wraps_like_rip() {
+        let sample = 0xFFFF_FFFF_8000_0000;
+        let virt = (0x8000_0000u32 as i32).wrapping_add(0x7FFF_FFFF);
+        // 0xFFFFFFFF80000000 + 0x7FFFFFFF == 0xFFFFFFFFFFFFFFFF
+        assert_eq!(virt32_to_linear(virt, sample), 0xFFFF_FFFF_FFFF_FFFF);
     }
 }
