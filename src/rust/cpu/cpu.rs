@@ -87,8 +87,8 @@ pub const TIME_PER_FRAME: f64 = 1.0;
 /// Cap slices so we still return to JS (timers, linux64 timeout) in that case.
 pub const MAX_SLICES_PER_FRAME: u32 = 4;
 pub const MAX_SLICES_PER_FRAME_64: u32 = MAX_SLICES_PER_FRAME;
-/// Low 4GiB 64-bit CS still trampolines; each step is often one insn. Higher
-/// half JITs 32-bit-opsize ops keyed by physical page and trampolines the rest.
+/// Low 4GiB 64-bit CS still trampolines when long-mode JIT is on; each step is
+/// often one insn. Production leaves 64-bit CS to the interpreter.
 pub const MAX_64BIT_STEPS: u32 = 16;
 
 pub const FLAG_SUB: i32 = -0x8000_0000;
@@ -4513,6 +4513,23 @@ pub unsafe fn cycle_internal() {
             // 4GB path must restore the current RIP, not the stale one.
             *previous_rip = *rip;
         }
+        // 32-bit-opsize JIT in 64-bit CS trampolines REX.W (XP usermode) and
+        // compiled high-RIP kernel ops hit STOP 0x7E. `sync_jit` tests opt in.
+        if !jit::jit_long_mode_enabled() {
+            let phys_addr = return_on_pagefault!(get_phys_eip());
+            let initial_instruction_counter = *instruction_counter;
+            jit_run_interpreted(phys_addr);
+            profiler::stat_increment_by(
+                stat::RUN_INTERPRETED_STEPS,
+                (*instruction_counter - initial_instruction_counter) as u64,
+            );
+            dbg_assert!(
+                *instruction_counter != initial_instruction_counter,
+                "Instruction counter didn't change"
+            );
+            sync_rip_from_instruction_pointer();
+            return;
+        }
     }
 
     if high_rip {
@@ -6488,5 +6505,13 @@ mod high_rip_jit_tests {
         let virt = (0x8000_0000u32 as i32).wrapping_add(0x7FFF_FFFF);
         // 0xFFFFFFFF80000000 + 0x7FFFFFFF == 0xFFFFFFFFFFFFFFFF
         assert_eq!(virt32_to_linear(virt, sample), 0xFFFF_FFFF_FFFF_FFFF);
+    }
+
+    #[test]
+    fn long_mode_jit_is_opt_in() {
+        assert!(!jit::jit_long_mode_enabled());
+        unsafe {
+            assert_eq!(jit::get_jit_config(5), 0);
+        }
     }
 }
