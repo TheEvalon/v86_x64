@@ -61,6 +61,13 @@ pub fn jit_clear_func(wasm_table_index: WasmTableIndex) {
 
 static mut JIT_DISABLED: bool = false;
 
+/// 64-bit CS JIT is opt-in (`sync_jit` / jit_config 5). Default off: XP x64
+/// usermode is low-RIP 64-bit and the 32-bit JIT trampolines REX.W, then
+/// `MAX_64BIT_STEPS` cuts the slice. Interpreting that path is faster.
+static mut JIT_LONG_MODE: bool = false;
+
+pub fn jit_long_mode_enabled() -> bool { unsafe { JIT_LONG_MODE } }
+
 // Maximum number of pages per wasm module. Necessary for the following reasons:
 // - There is an upper limit on the size of a single function in wasm (currently ~7MB in all browsers)
 //   See https://github.com/WebAssembly/design/issues/1138
@@ -2176,6 +2183,9 @@ pub fn jit_increase_hotness_and_maybe_compile(
     if unsafe { JIT_DISABLED } {
         return;
     }
+    if state_flags.is_64() && !jit_long_mode_enabled() {
+        return;
+    }
 
     let pending_finalize = {
         let mut ctx = get_jit_state();
@@ -2544,6 +2554,7 @@ pub unsafe fn set_jit_config(index: u32, value: u32) {
         2 => JIT_USE_LOOP_SAFETY = value != 0,
         3 => MAX_EXTRA_BASIC_BLOCKS = value,
         4 => JIT_THRESHOLD = value,
+        5 => JIT_LONG_MODE = value != 0,
         _ => dbg_assert!(false),
     }
 }
@@ -2556,6 +2567,7 @@ pub unsafe fn get_jit_config(index: u32) -> u32 {
         2 => JIT_USE_LOOP_SAFETY as u32,
         3 => MAX_EXTRA_BASIC_BLOCKS as u32,
         4 => JIT_THRESHOLD,
+        5 => JIT_LONG_MODE as u32,
         _ => 0,
     }
 }
