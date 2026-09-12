@@ -73,16 +73,24 @@ pub fn consume_legacy_prefixes_and_rex(cpu: &mut CpuContext) -> u8 {
 /// that is safe to enter. Trampoline-only entries must not be entered: wasm
 /// call + one interpreted insn is slower than an interpreter batch (XP
 /// post-LMA was ~5.6 M insns/s vs ~12 M on master).
-pub fn high_rip_should_enter_jit(phys_eip: u32, state_flags: CachedStateFlags) -> bool {
-    let cpu = CpuContext {
-        eip: phys_eip,
-        prefixes: 0,
-        rex_prefix: 0,
-        cs_offset: 0,
-        state_flags,
-        high_rip: true,
-    };
-    !long_cs_needs_trampoline(&cpu)
+///
+/// Peeks guest bytes without `read_imm8` so a RIP on the last byte of a page
+/// cannot assert in `CpuContext`.
+pub fn high_rip_should_enter_jit(phys_eip: u32, _state_flags: CachedStateFlags) -> bool {
+    let page_off = phys_eip & 0xFFF;
+    if page_off == 0xFFF {
+        return false;
+    }
+    let opcode = memory::read8(phys_eip) as u8;
+    // Any legacy prefix or REX is interpreted at high RIP.
+    if matches!(
+        opcode,
+        0x26 | 0x2E | 0x36 | 0x3E | 0x40..=0x4F | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3
+    ) {
+        return false;
+    }
+    let next = if page_off + 1 > 0xFFF { 0 } else { memory::read8(phys_eip.wrapping_add(1)) as u8 };
+    high_rip_may_jit_32bit_alu(0, opcode, next, false, 0)
 }
 
 pub fn long_cs_needs_trampoline(cpu: &CpuContext) -> bool {
