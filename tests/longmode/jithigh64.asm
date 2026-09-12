@@ -73,11 +73,26 @@ higher:
     cmp rax, rbx
     jne fail64
 
+    ; 67h + ModRM 05 is [disp32] in 64-bit CS (32-bit asize), length 7.
+    ; JIT decode16 would treat 8B 05 as [di] (length 3) and execute the
+    ; disp32 bytes. Encode disp32 as 0xCC so that bug hits INT3 / #BP.
+    ; Low 2MB is identity-mapped, so linear 0xCC is a safe scratch.
+    ; Keep this in the hot loop so the JIT compiles it (the post-loop
+    ; fallthrough can stay interpreted).
+    mov rax, 0xCC
+    mov dword [rax], 0x11223344
+
     ; REX.W encodings trampoline; this loop should compile as 32-bit-opsize JIT.
     xor eax, eax
     mov ecx, ITERATIONS
 .loop:
     add eax, 1
+    mov ebx, eax
+    db 0x67, 0x8B, 0x05
+    dd 0x000000CC
+    cmp eax, 0x11223344
+    jne fail_asize
+    mov eax, ebx
     sub ecx, 1
     jnz .loop
 
@@ -108,6 +123,13 @@ fail_rip:
 .hang_rip:
     hlt
     jmp .hang_rip
+
+fail_asize:
+    mov al, 3
+    out 0xF4, al
+.hang_asize:
+    hlt
+    jmp .hang_asize
 
 align 8
 gdt:

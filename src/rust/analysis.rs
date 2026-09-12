@@ -189,7 +189,8 @@ pub fn opcode_needs_long_trampoline(
     }
     // Non-REX memory operands still use 64-bit addressing in 64-bit CS
     // (`mov ebx, [rax]` with RAX above 4GiB). The 32-bit JIT helpers
-    // read EAX and truncate. 67h keeps 32-bit asize, so those stay JIT.
+    // read EAX and truncate. 67h is 32-bit asize (`CpuContext::asize_32`
+    // stays true in long CS), so those stay JIT.
     if !addrsize_override && opcode_has_modrm(opcode) && next < 0xC0 {
         return true;
     }
@@ -341,6 +342,12 @@ mod tests {
         assert!(!needs(0, 0x8B, 0x05, true));
         assert!(!needs(0, 0x8B, 0x18, true));
         assert!(!needs(0, 0x8B, 0xC3, false));
+        assert!(!opcode_needs_long_trampoline(
+            0, 0x8B, 0x05, 0, true, PREFIX_67, true
+        ));
+        assert!(opcode_needs_long_trampoline(
+            0, 0x8B, 0x05, 0, false, 0, true
+        ));
         assert!(needs(0, 0xE8, 0, false));
         assert!(needs(0, 0xA4, 0, false));
         assert!(needs(0, 0xAB, 0, false));
