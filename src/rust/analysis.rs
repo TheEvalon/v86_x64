@@ -166,6 +166,14 @@ pub fn opcode_needs_long_trampoline(
     if high_rip && (0x70..=0x7F).contains(&opcode) {
         return true;
     }
+    // Prefixed ops at RIP > 4GiB: 67h memory uses 32-bit JIT EA ([disp32] for
+    // mod=00 rm=101, 32-bit FS/GS bases) while the interpreter is RIP-relative
+    // then truncates and uses 64-bit FS/GS MSRs. 66h/F2/F3/segment have the
+    // same 32-bit helpers. Interpret them above 4GiB; low-RIP 64-bit CS still
+    // JITs 67h as 32-bit asize.
+    if high_rip && (prefixes != 0 || addrsize_override) {
+        return true;
+    }
     // 0F two-byte ops (CMOV, BT, CMPXCHG, MOVZX, BSWAP, …) still use 32-bit
     // codegen. At RIP > 4GiB a wrong dest/flag write plus an indirect transfer
     // can land in INT3 padding (XP STOP 0x7E / STATUS_BREAKPOINT). Keep the
@@ -191,7 +199,8 @@ pub fn opcode_needs_long_trampoline(
     // Non-REX memory operands still use 64-bit addressing in 64-bit CS
     // (`mov ebx, [rax]` with RAX above 4GiB). The 32-bit JIT helpers
     // read EAX and truncate. 67h is 32-bit asize (`CpuContext::asize_32`
-    // stays true in long CS), so those stay JIT.
+    // stays true in long CS); low-RIP 64-bit CS still JITs those, high RIP
+    // trampolines them above.
     if !addrsize_override && opcode_has_modrm(opcode) && next < 0xC0 {
         return true;
     }
@@ -343,8 +352,15 @@ mod tests {
         assert!(!needs(0, 0x8B, 0x05, true));
         assert!(!needs(0, 0x8B, 0x18, true));
         assert!(!needs(0, 0x8B, 0xC3, false));
-        assert!(!opcode_needs_long_trampoline(
+        // High RIP: 67h/66h memory and register forms trampoline.
+        assert!(opcode_needs_long_trampoline(
             0, 0x8B, 0x05, 0, true, PREFIX_67, true
+        ));
+        assert!(opcode_needs_long_trampoline(
+            0, 0x8B, 0x87, 0, true, PREFIX_67, true
+        ));
+        assert!(opcode_needs_long_trampoline(
+            0, 0x89, 0xC0, 0, false, PREFIX_66, true
         ));
         assert!(opcode_needs_long_trampoline(
             0, 0x8B, 0x05, 0, false, 0, true

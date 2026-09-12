@@ -73,10 +73,10 @@ higher:
     cmp rax, rbx
     jne fail64
 
-    ; 67h + [edi+disp32] is 7 bytes in 64-bit CS. JIT decode16 would take
-    ; disp16 (5 bytes) and load [bx+si] instead of scratch. Use the 32-bit
-    ; identity address (low 2MB is mapped) so 67h truncates to the same VA.
-    ; Keep this in the hot loop so the JIT compiles it.
+    ; 67h + [edi+disp32] is 7 bytes in 64-bit CS. High-RIP JIT trampolines
+    ; 67h (32-bit JIT EA != interpreter RIP-rel/FS-GS). The interpreter must
+    ; still load scratch; decode16 would use [bx+si] and fail the magic
+    ; compare. Use the 32-bit identity address (low 2MB is mapped).
     mov edi, scratch
 
     ; REX.W encodings trampoline; this loop should compile as 32-bit-opsize JIT.
