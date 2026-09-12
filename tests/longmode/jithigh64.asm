@@ -73,14 +73,11 @@ higher:
     cmp rax, rbx
     jne fail64
 
-    ; 67h + ModRM 05 is [disp32] in 64-bit CS (32-bit asize), length 7.
-    ; JIT decode16 would treat 8B 05 as [di] (length 3) and execute the
-    ; disp32 bytes. Encode disp32 as 0xCC so that bug hits INT3 / #BP.
-    ; Low 2MB is identity-mapped, so linear 0xCC is a safe scratch.
-    ; Keep this in the hot loop so the JIT compiles it (the post-loop
-    ; fallthrough can stay interpreted).
-    mov rax, 0xCC
-    mov dword [rax], 0x11223344
+    ; 67h + [edi+disp32] is 7 bytes in 64-bit CS. JIT decode16 would take
+    ; disp16 (5 bytes) and load [bx+si] instead of scratch. Use the 32-bit
+    ; identity address (low 2MB is mapped) so 67h truncates to the same VA.
+    ; Keep this in the hot loop so the JIT compiles it.
+    mov edi, scratch
 
     ; REX.W encodings trampoline; this loop should compile as 32-bit-opsize JIT.
     xor eax, eax
@@ -88,8 +85,8 @@ higher:
 .loop:
     add eax, 1
     mov ebx, eax
-    db 0x67, 0x8B, 0x05
-    dd 0x000000CC
+    db 0x67, 0x8B, 0x87
+    dd 0
     cmp eax, 0x11223344
     jne fail_asize
     mov eax, ebx
@@ -130,6 +127,10 @@ fail_asize:
 .hang_asize:
     hlt
     jmp .hang_asize
+
+align 8
+scratch:
+    dd 0x11223344
 
 align 8
 gdt:
