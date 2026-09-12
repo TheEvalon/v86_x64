@@ -4758,7 +4758,9 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
 
         // Hand ALU at RIP > 4GiB back to compiled code; stay in this batch for
         // trampolines (REX/memory/Jcc) so we do not pay wasm enter per insn.
-        if i > 0 && *is_64 && get_rip() > 0xFFFF_FFFF {
+        // Skip the peek when long-mode JIT is off: high_rip_should_enter_jit
+        // reads a code byte every insn and slowed the XP kernel vs master.
+        if i > 0 && jit::jit_long_mode_enabled() && *is_64 && get_rip() > 0xFFFF_FFFF {
             if analysis::high_rip_should_enter_jit(phys_addr, *state_flags)
                 && jit::jit_find_cache_entry(phys_addr, *state_flags) != jit::CachedCode::NONE
             {
