@@ -91,6 +91,11 @@ a { color: #8cf; }
         A <code>.zip</code> works only if the disk inside is stored uncompressed;
         otherwise unzip first. Override the URL with
         <code>?hda=images/hdd.img</code>.
+        Disk Range reads are coalesced to 256&nbsp;KiB (same as copy.sh
+        Windows images). Without that, XP issues 10–100&nbsp;KB ATA reads
+        as separate HTTP requests and boot stretches into tens of minutes
+        even on a fast SSD. Override with
+        <code>?chunk_size=1048576</code> on localhost.
         The disk is not part of git (<code>images/</code> and <code>*.img</code> are ignored).
         After the first desktop, <strong>Save state</strong> downloads
         <code>xp64-state.bin</code> (shown in the status line). Put that file at
@@ -112,6 +117,7 @@ a { color: #8cf; }
 "use strict";
 
 import { V86 } from "./src/browser/starter.js";
+import { round_up_to_next_power_of_2 } from "./src/lib.js";
 
 const DEFAULT_DISKS = [
     "images/windows-xp-x64.img",
@@ -119,6 +125,8 @@ const DEFAULT_DISKS = [
     "images/xp64.img",
     "images/winxp64.img",
 ];
+
+const DEFAULT_DISK_CHUNK_SIZE = 256 * 1024;
 
 const IDB_NAME = "v86-xp64";
 const IDB_STORE = "state";
@@ -610,6 +618,25 @@ function memory_size()
     return Math.max(128, mb) * 1024 * 1024;
 }
 
+function disk_chunk_size()
+{
+    const raw = parseInt(new URLSearchParams(location.search).get("chunk_size"), 10);
+    if(raw >= 0)
+    {
+        const n = Math.min(4 * 1024 * 1024, Math.max(512, raw));
+        return round_up_to_next_power_of_2(n);
+    }
+    return DEFAULT_DISK_CHUNK_SIZE;
+}
+
+function hda_with_chunks(hda)
+{
+    return Object.assign({}, hda, {
+        async: hda.async !== undefined ? hda.async : true,
+        fixed_chunk_size: hda.fixed_chunk_size || disk_chunk_size(),
+    });
+}
+
 async function constructor_state(skip_state)
 {
     const wanted = requested_state_url();
@@ -660,7 +687,8 @@ async function start_emulator(hda, options)
 
     const wasm = await wasm_path();
     let msg = "Starting with " + (hda.url || hda.buffer && hda.buffer.name || "disk") +
-        "  wasm=" + wasm;
+        "  wasm=" + wasm +
+        "  disk chunks=" + format_bytes(hda.fixed_chunk_size || 0);
     if(initial_state && initial_state.url)
     {
         msg += "  state=" + initial_state.url;
@@ -788,7 +816,7 @@ async function start_from_images(opts)
         state.keep_restore_error = true;
     }
     await start_emulator(
-        { url: disk.url, async: true, size: disk.size },
+        hda_with_chunks({ url: disk.url, size: disk.size }),
         state);
     return true;
 }
@@ -885,7 +913,10 @@ document.getElementById("disk_file").onchange = async function()
         const disk = await maybe_unwrap_zip(file);
         const state = await constructor_state(false);
         await start_emulator(
-            { buffer: disk, async: disk.size >= 256 * 1024 * 1024 },
+            hda_with_chunks({
+                buffer: disk,
+                async: disk.size >= 256 * 1024 * 1024,
+            }),
             state);
     }
     catch(e)
