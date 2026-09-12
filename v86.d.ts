@@ -35,10 +35,11 @@ type V86AsyncFileImage =
         use_parts?: boolean;
 
         /**
-         * Align and cache reads to this size. For HTTP Range disks this is
-         * the Range length (copy.sh Windows images use 256 KiB). Without it,
-         * each guest ATA transfer becomes its own request, often 4–128 KiB
-         * on NTFS. Also used with `use_parts: true` for GitHub Pages.
+         * Align and cache reads to this size. Default is 256 KiB for HTTP
+         * Range disks (copy.sh Windows images). Without coalescing, each
+         * guest ATA transfer becomes its own request, often 4–128 KiB on
+         * NTFS. Pass `0` to keep exact guest sizes. Also used with
+         * `use_parts: true` for GitHub Pages.
          */
         fixed_chunk_size?: number;
     };

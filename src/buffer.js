@@ -7,6 +7,24 @@ const BLOCK_SIZE = 256;
 
 const ASYNC_SAFE = false;
 
+// copy.sh Windows images use 256 KiB Range / part-file chunks. Without a
+// default, each guest ATA transfer (often 4–128 KiB on NTFS) becomes its
+// own HTTP request. Pass fixed_chunk_size: 0 to keep exact guest sizes.
+const DEFAULT_ASYNC_CHUNK_SIZE = 256 * 1024;
+
+function resolve_chunk_size(fixed_chunk_size)
+{
+    if(fixed_chunk_size === 0)
+    {
+        return 0;
+    }
+    if(fixed_chunk_size)
+    {
+        return fixed_chunk_size;
+    }
+    return DEFAULT_ASYNC_CHUNK_SIZE;
+}
+
 /**
  * Widen a guest disk read to a cached Range / File slice when the image
  * uses fixed_chunk_size. Without this, each ATA transfer (often 4–128 KiB
@@ -149,8 +167,8 @@ function AsyncXHRBuffer(filename, size, fixed_chunk_size)
     this.block_cache = new Map();
     this.block_cache_is_write = new Set();
 
-    this.fixed_chunk_size = fixed_chunk_size;
-    this.cache_reads = !!fixed_chunk_size; // TODO: could also be useful in other cases (needs testing)
+    this.fixed_chunk_size = resolve_chunk_size(fixed_chunk_size);
+    this.cache_reads = !!this.fixed_chunk_size; // TODO: could also be useful in other cases (needs testing)
 
     this.onload = undefined;
     this.onprogress = undefined;
@@ -674,8 +692,8 @@ export function AsyncFileBuffer(file, fixed_chunk_size)
     this.block_cache = new Map();
     this.block_cache_is_write = new Set();
 
-    this.fixed_chunk_size = fixed_chunk_size;
-    this.cache_reads = !!fixed_chunk_size;
+    this.fixed_chunk_size = resolve_chunk_size(fixed_chunk_size);
+    this.cache_reads = !!this.fixed_chunk_size;
 
     this.onload = undefined;
     this.onprogress = undefined;

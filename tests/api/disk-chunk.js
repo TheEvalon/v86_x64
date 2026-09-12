@@ -73,10 +73,19 @@ try
     }
     expect_sync(coalesced, CHUNK + 256, 256, "second chunk after miss");
 
+    const by_default = buffer_from_object({
+        url: tmp,
+        size: SIZE,
+        async: true,
+    });
+    await get(by_default, 4096, 4096);
+    expect_sync(by_default, 8192, 256, "default 256KiB chunk");
+
     const exact = buffer_from_object({
         url: tmp,
         size: SIZE,
         async: true,
+        fixed_chunk_size: 0,
     });
     await get(exact, 4096, 4096);
     let neighbour_sync = false;
@@ -86,7 +95,7 @@ try
     });
     if(neighbour_sync)
     {
-        throw new Error("without fixed_chunk_size, neighbour read must not be cached");
+        throw new Error("fixed_chunk_size 0 must not cache neighbour reads");
     }
     await get(exact, 8192, 256);
 

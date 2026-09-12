@@ -67,6 +67,7 @@ a { color: #8cf; }
     <div id="controls">
         <label>RAM <input id="memory_mb" type="number" value="512" min="128" max="2048" step="16" style="width:5em"> MB</label>
         <label><input id="acpi" type="checkbox" checked> ACPI / APIC</label>
+        <span id="chunk_label" style="color:#9ad">disk chunks: —</span>
         <input id="disk_file" type="file" accept=".img,.raw,.bin,.vhd,.zip,application/octet-stream">
         <button id="start_images" type="button">Start from images/</button>
         <button id="pause" type="button" disabled>Pause</button>
@@ -686,6 +687,8 @@ async function start_emulator(hda, options)
     }
 
     const wasm = await wasm_path();
+    document.getElementById("chunk_label").textContent =
+        "disk chunks: " + format_bytes(hda.fixed_chunk_size || 0);
     let msg = "Starting with " + (hda.url || hda.buffer && hda.buffer.name || "disk") +
         "  wasm=" + wasm +
         "  disk chunks=" + format_bytes(hda.fixed_chunk_size || 0);
@@ -758,7 +761,8 @@ async function start_emulator(hda, options)
         }
         else
         {
-            set_status("Running. Click the screen for keyboard. Boot from an ACPI i440fx disk takes several minutes.");
+            set_status("Running. Disk chunks " + format_bytes(last_hda && last_hda.fixed_chunk_size) +
+                ". Click the screen for keyboard. Boot from an ACPI i440fx disk takes several minutes.");
         }
         screen.focus();
     });
