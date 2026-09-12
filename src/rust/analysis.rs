@@ -80,6 +80,7 @@ pub fn long_cs_needs_trampoline(cpu: &CpuContext) -> bool {
         peek_imm8_at(&tmp, 1),
         tmp.prefixes & PREFIX_MASK_ADDRSIZE != 0,
         tmp.prefixes,
+        tmp.high_rip,
     )
 }
 
@@ -158,7 +159,16 @@ pub fn opcode_needs_long_trampoline(
     next2: u8,
     addrsize_override: bool,
     prefixes: u8,
+    high_rip: bool,
 ) -> bool {
+    // Compiled Jcc takes wasm edges with 32-bit IP arithmetic. At RIP > 4GiB
+    // that can land in FineIBT `ud2` padding; interpret taken/not-taken instead.
+    if high_rip && (0x70..=0x7F).contains(&opcode) {
+        return true;
+    }
+    if high_rip && opcode == 0x0F && (0x80..=0x8F).contains(&next) {
+        return true;
+    }
     if opcode == 0x0F {
         if opcode_0f_needs_long_trampoline(next, next2, prefixes) {
             return true;
@@ -221,6 +231,7 @@ fn analyze_step_64(cpu: &mut CpuContext, mut analysis: Analysis) -> Analysis {
         peek_imm8_at(cpu, 1),
         cpu.prefixes & PREFIX_MASK_ADDRSIZE != 0,
         cpu.prefixes,
+        cpu.high_rip,
     );
     gen::analyzer::analyzer(
         opcode as u32 | (cpu.osize_32() as u32) << 8,
@@ -303,11 +314,15 @@ mod tests {
     use super::*;
 
     fn needs(rex: u8, opcode: u8, next: u8, addrsize_override: bool) -> bool {
-        opcode_needs_long_trampoline(rex, opcode, next, 0, addrsize_override, 0)
+        opcode_needs_long_trampoline(rex, opcode, next, 0, addrsize_override, 0, false)
     }
 
     fn needs0f(rex: u8, op: u8, modrm: u8, prefixes: u8) -> bool {
-        opcode_needs_long_trampoline(rex, 0x0F, op, modrm, false, prefixes)
+        opcode_needs_long_trampoline(rex, 0x0F, op, modrm, false, prefixes, false)
+    }
+
+    fn needs_high(opcode: u8, next: u8) -> bool {
+        opcode_needs_long_trampoline(0, opcode, next, 0, false, 0, true)
     }
 
     #[test]
@@ -332,6 +347,14 @@ mod tests {
         assert!(needs(0, 0xE2, 0, false));
         assert!(!needs(0, 0x75, 0, false));
         assert!(!needs(0, 0x83, 0xC0, false));
+    }
+
+    #[test]
+    fn trampoline_short_jcc_at_high_rip() {
+        assert!(!needs(0, 0x75, 0, false));
+        assert!(needs_high(0x75, 0));
+        assert!(needs_high(0x70, 0));
+        assert!(needs_high(0x0F, 0x84));
     }
 
     #[test]

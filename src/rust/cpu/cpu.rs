@@ -5276,7 +5276,13 @@ pub unsafe fn safe_read128s_slow_jit(addr: i32, eip: i32) -> i32 {
 
 #[no_mangle]
 pub unsafe fn get_phys_eip_slow_jit(addr: i32) -> i32 {
-    match translate_address_exec_jit(addr) {
+    let phys = if *is_64 && get_rip() > 0xFFFF_FFFF {
+        phys_of_linear_rip(fold_ip_delta_into_rip(get_rip(), addr))
+    }
+    else {
+        translate_address_exec_jit(addr)
+    };
+    match phys {
         Err(()) => 1,
         Ok(addr_low) => {
             dbg_assert!(!memory::in_mapped_range(addr_low as u32)); // same assumption as in read_imm8

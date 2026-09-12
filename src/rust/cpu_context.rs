@@ -9,6 +9,10 @@ pub struct CpuContext {
     pub rex_prefix: u8,
     pub cs_offset: u32,
     pub state_flags: CachedStateFlags,
+    /// True when compiling a 64-bit CS block whose RIP is above 4GiB.
+    /// `tlb_data`/`tlb_code` are 32-bit VA tables, so page-switch checks and
+    /// compiled Jcc edges are unsafe there.
+    pub high_rip: bool,
 }
 
 impl CpuContext {

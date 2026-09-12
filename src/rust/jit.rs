@@ -419,6 +419,18 @@ pub fn jit_find_cache_entry_in_page(
     let state_flags = CachedStateFlags::of_u32(state_flags);
 
     unsafe {
+        if cpu::get_rip() > 0xFFFF_FFFF {
+            let linear = cpu::fold_ip_delta_into_rip(cpu::get_rip(), virt_address as i32);
+            if let Ok(phys) = cpu::translate_linear_no_side_effects(linear) {
+                let entry = jit_find_cache_entry(phys, state_flags);
+                if entry != CachedCode::NONE && entry.wasm_table_index == wasm_table_index {
+                    return entry.initial_state.into();
+                }
+            }
+            profiler::stat_increment(stat::INDIRECT_JUMP_NO_ENTRY);
+            return -1;
+        }
+
         match cpu::tlb_code[(virt_address >> 12) as usize] {
             None => {},
             Some(c) => {
@@ -527,8 +539,11 @@ fn jit_find_basic_blocks(
     let mut pages: HashSet<Page> = HashSet::new();
     let mut page_blacklist = HashSet::new();
 
-    // 16-bit doesn't work correctly, most likely due to instruction pointer wrap-around
-    let max_pages = if cpu.state_flags.is_32() { unsafe { MAX_PAGES } } else { 1 };
+    // 16-bit doesn't work correctly, most likely due to instruction pointer wrap-around.
+    // High RIP cannot use tlb_data/tlb_code (32-bit VA index); keep those modules to
+    // one physical page so page-switch checks never walk a truncated i32 IP.
+    let max_pages =
+        if cpu.state_flags.is_32() && sample_rip <= 0xFFFF_FFFF { unsafe { MAX_PAGES } } else { 1 };
 
     for virt_addr in entry_points {
         let ok = follow_jump(
@@ -904,6 +919,7 @@ fn jit_analyze_and_generate(
         rex_prefix: 0,
         cs_offset,
         state_flags,
+        high_rip: virt_entry_point > 0xFFFF_FFFF,
     };
 
     dbg_assert!(

@@ -815,6 +815,24 @@ pub fn gen_get_phys_eip_plus_mem(ctx: &mut JitContext, address_local: &WasmLocal
     // XXX: Currently does not use ctx.start_of_current_instruction, but rather assumes that eip is
     //      already correct (pointing at the current instruction)
 
+    // tlb_data is indexed by a 32-bit virtual page. At RIP > 4GiB that aliases
+    // a low mapping; always walk from the folded 64-bit RIP instead.
+    if ctx.cpu.high_rip {
+        ctx.builder.get_local(&address_local);
+        ctx.builder.call_fn1_ret("get_phys_eip_slow_jit");
+        let entry_local = ctx.builder.tee_new_local();
+        ctx.builder.const_i32(1);
+        ctx.builder.and_i32();
+        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.get_local(&entry_local);
+        ctx.builder.const_i32(!0xFFF);
+        ctx.builder.and_i32();
+        ctx.builder.get_local(&address_local);
+        ctx.builder.xor_i32();
+        ctx.builder.free_local(entry_local);
+        return;
+    }
+
     let cont = ctx.builder.block_void();
     ctx.builder.get_local(&address_local);
 
