@@ -86,8 +86,8 @@ pub const TIME_PER_FRAME: f64 = 1.0;
 /// Cap slices so we still return to JS (timers, linux64 timeout) in that case.
 pub const MAX_SLICES_PER_FRAME: u32 = 4;
 pub const MAX_SLICES_PER_FRAME_64: u32 = MAX_SLICES_PER_FRAME;
-/// Low 4GiB 64-bit CS still trampolines; each step is often one insn. Higher
-/// half uses the interpreter and fills `LOOP_COUNTER` instead.
+/// Only when 64-bit CS JIT is on: low 4GiB trampolines (one insn per step).
+/// With the default (interpret 64-bit CS), fill `LOOP_COUNTER` like 32-bit.
 pub const MAX_64BIT_STEPS: u32 = 16;
 
 pub const FLAG_SUB: i32 = -0x8000_0000;
@@ -4463,9 +4463,20 @@ pub unsafe fn cycle_internal() {
     let initial_state_flags = *state_flags;
 
     if *is_64 {
+        *previous_ip = initial_eip;
         if get_rip() > 0xFFFF_FFFF {
-            *previous_ip = initial_eip;
             *previous_rip = get_rip();
+        }
+        else {
+            *rip = *instruction_pointer as u32 as u64;
+            // After IRETQ/SYSRET from a higher-half kernel RIP, *previous_rip can
+            // still hold that kernel address. Instruction-fetch #PFs on the low
+            // 4GB path must restore the current RIP, not the stale one.
+            *previous_rip = *rip;
+        }
+        // 32-bit-opsize JIT in 64-bit CS trampolines REX.W (XP usermode).
+        // `sync_jit` tests opt in; default is interpret.
+        if get_rip() > 0xFFFF_FFFF || !jit::jit_long_mode_enabled() {
             let phys_addr = return_on_pagefault!(get_phys_eip());
             let initial_instruction_counter = *instruction_counter;
             jit_run_interpreted(phys_addr);
@@ -4473,14 +4484,15 @@ pub unsafe fn cycle_internal() {
                 stat::RUN_INTERPRETED_STEPS,
                 (*instruction_counter - initial_instruction_counter) as u64,
             );
+            dbg_assert!(
+                *instruction_counter != initial_instruction_counter,
+                "Instruction counter didn't change"
+            );
+            if *is_64 && *rip <= 0xFFFF_FFFF {
+                *rip = *instruction_pointer as u32 as u64;
+            }
             return;
         }
-        *rip = *instruction_pointer as u32 as u64;
-        // After IRETQ/SYSRET from a higher-half kernel RIP, *previous_rip can
-        // still hold that kernel address. Instruction-fetch #PFs on the low
-        // 4GB path must restore the current RIP, not the stale one.
-        *previous_rip = *rip;
-        *previous_ip = initial_eip;
     }
 
     match tlb_code[(initial_eip as u32 >> 12) as usize] {
@@ -4865,9 +4877,9 @@ pub unsafe fn do_many_cycles_native() {
             if *instruction_counter == before {
                 break;
             }
-            // Low 4GiB still trampolines (one insn per step). Higher-half RIP
-            // is interpreter-only and should fill LOOP_COUNTER / TIME_PER_FRAME.
-            if get_rip() <= 0xFFFF_FFFF {
+            // Trampoline JIT: one insn per step. Interpreter batches already
+            // fill INTERPRETER_ITERATION_LIMIT_64; do not cap those.
+            if jit::jit_long_mode_enabled() && get_rip() <= 0xFFFF_FFFF {
                 steps += 1;
                 if steps >= MAX_64BIT_STEPS {
                     break;
@@ -6375,5 +6387,9 @@ mod long_mode_sched_tests {
         assert_eq!(MAX_SLICES_PER_FRAME_64, MAX_SLICES_PER_FRAME);
         assert!(MAX_64BIT_STEPS < LOOP_COUNTER as u32);
         assert!(TIME_PER_FRAME > 0.0);
+        assert!(!jit::jit_long_mode_enabled());
+        unsafe {
+            assert_eq!(jit::get_jit_config(5), 0);
+        }
     }
 }

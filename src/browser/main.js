@@ -908,6 +908,7 @@ function onload()
             hda: {
                 url: host + "windows-xp-x64.img",
                 async: true,
+                fixed_chunk_size: 256 * 1024,
             },
             name: "Windows XP x64",
         },

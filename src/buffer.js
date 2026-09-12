@@ -7,6 +7,51 @@ const BLOCK_SIZE = 256;
 
 const ASYNC_SAFE = false;
 
+// copy.sh Windows images use 256 KiB Range / part-file chunks. Without a
+// default, each guest ATA transfer (often 4–128 KiB on NTFS) becomes its
+// own HTTP request. Pass fixed_chunk_size: 0 to keep exact guest sizes.
+const DEFAULT_ASYNC_CHUNK_SIZE = 256 * 1024;
+
+function resolve_chunk_size(fixed_chunk_size)
+{
+    if(fixed_chunk_size === 0)
+    {
+        return 0;
+    }
+    if(fixed_chunk_size)
+    {
+        return fixed_chunk_size;
+    }
+    return DEFAULT_ASYNC_CHUNK_SIZE;
+}
+
+/**
+ * Widen a guest disk read to a cached Range / File slice when the image
+ * uses fixed_chunk_size. Without this, each ATA transfer (often 4–128 KiB
+ * on NTFS) becomes its own HTTP request.
+ *
+ * @param {number} offset
+ * @param {number} len
+ * @param {number|undefined} chunk_size
+ * @param {number|undefined} byte_length
+ */
+function coalesced_range(offset, len, chunk_size, byte_length)
+{
+    var start = offset;
+    var length = len;
+    if(chunk_size)
+    {
+        start = offset - offset % chunk_size;
+        length = Math.ceil((offset - start + len) / chunk_size) * chunk_size;
+    }
+    if(byte_length !== undefined && start + length > byte_length)
+    {
+        length = byte_length - start;
+        length -= length % BLOCK_SIZE;
+    }
+    return { start, length };
+}
+
 /**
  * Synchronous access to ArrayBuffer
  * @constructor
@@ -122,8 +167,8 @@ function AsyncXHRBuffer(filename, size, fixed_chunk_size)
     this.block_cache = new Map();
     this.block_cache_is_write = new Set();
 
-    this.fixed_chunk_size = fixed_chunk_size;
-    this.cache_reads = !!fixed_chunk_size; // TODO: could also be useful in other cases (needs testing)
+    this.fixed_chunk_size = resolve_chunk_size(fixed_chunk_size);
+    this.cache_reads = !!this.fixed_chunk_size; // TODO: could also be useful in other cases (needs testing)
 
     this.onload = undefined;
     this.onprogress = undefined;
@@ -203,13 +248,9 @@ AsyncXHRBuffer.prototype.get = function(offset, len, fn, options)
         return;
     }
 
-    var requested_start = offset;
-    var requested_length = len;
-    if(this.fixed_chunk_size)
-    {
-        requested_start = offset - (offset % this.fixed_chunk_size);
-        requested_length = Math.ceil((offset - requested_start + len) / this.fixed_chunk_size) * this.fixed_chunk_size;
-    }
+    var range = coalesced_range(offset, len, this.fixed_chunk_size, this.byteLength);
+    var requested_start = range.start;
+    var requested_length = range.length;
 
     load_file(this.filename, {
         done: function done(buffer)
@@ -640,14 +681,19 @@ SyncFileBuffer.prototype.set_state = SyncBuffer.prototype.set_state;
  * Asynchronous access to File, loading blocks from the input type=file
  *
  * @constructor
+ * @param {!File} file
+ * @param {number|undefined} fixed_chunk_size
  */
-export function AsyncFileBuffer(file)
+export function AsyncFileBuffer(file, fixed_chunk_size)
 {
     this.file = file;
     this.byteLength = file.size;
 
     this.block_cache = new Map();
     this.block_cache_is_write = new Set();
+
+    this.fixed_chunk_size = resolve_chunk_size(fixed_chunk_size);
+    this.cache_reads = !!this.fixed_chunk_size;
 
     this.onload = undefined;
     this.onprogress = undefined;
@@ -676,6 +722,10 @@ AsyncFileBuffer.prototype.get = function(offset, len, fn)
         return;
     }
 
+    var range = coalesced_range(offset, len, this.fixed_chunk_size, this.byteLength);
+    var requested_start = range.start;
+    var requested_length = range.length;
+
     var fr = new FileReader();
 
     fr.onload = function(e)
@@ -683,11 +733,18 @@ AsyncFileBuffer.prototype.get = function(offset, len, fn)
         var buffer = e.target.result;
         var block = new Uint8Array(buffer);
 
-        this.handle_read(offset, len, block);
-        fn(block);
+        this.handle_read(requested_start, requested_length, block);
+        if(requested_start === offset && requested_length === len)
+        {
+            fn(block);
+        }
+        else
+        {
+            fn(block.subarray(offset - requested_start, offset - requested_start + len));
+        }
     }.bind(this);
 
-    fr.readAsArrayBuffer(this.file.slice(offset, offset + len));
+    fr.readAsArrayBuffer(this.file.slice(requested_start, requested_start + requested_length));
 };
 AsyncFileBuffer.prototype.get_from_cache = AsyncXHRBuffer.prototype.get_from_cache;
 AsyncFileBuffer.prototype.get_and_cache = AsyncXHRBuffer.prototype.get_and_cache;
@@ -765,7 +822,7 @@ export function buffer_from_object(obj, zstd_decompress_worker)
 
         if(is_async)
         {
-            return new AsyncFileBuffer(obj.buffer);
+            return new AsyncFileBuffer(obj.buffer, obj.fixed_chunk_size);
         }
         else
         {
