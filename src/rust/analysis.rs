@@ -166,11 +166,12 @@ pub fn opcode_needs_long_trampoline(
     if high_rip && (0x70..=0x7F).contains(&opcode) {
         return true;
     }
-    if high_rip && opcode == 0x0F && (0x80..=0x8F).contains(&next) {
-        return true;
-    }
+    // 0F two-byte ops (CMOV, BT, CMPXCHG, MOVZX, BSWAP, …) still use 32-bit
+    // codegen. At RIP > 4GiB a wrong dest/flag write plus an indirect transfer
+    // can land in INT3 padding (XP STOP 0x7E / STATUS_BREAKPOINT). Keep the
+    // low-RIP 64-bit CS whitelist; trampoline every 0F above 4GiB.
     if opcode == 0x0F {
-        if opcode_0f_needs_long_trampoline(next, next2, prefixes) {
+        if high_rip || opcode_0f_needs_long_trampoline(next, next2, prefixes) {
             return true;
         }
     }
@@ -362,6 +363,22 @@ mod tests {
         assert!(needs_high(0x75, 0));
         assert!(needs_high(0x70, 0));
         assert!(needs_high(0x0F, 0x84));
+    }
+
+    #[test]
+    fn trampoline_every_0f_at_high_rip() {
+        // Low RIP still compiles the 32-bit 0F whitelist (CMOV, BSWAP, MOVZX).
+        assert!(!needs0f(0, 0x40, 0xC3, 0));
+        assert!(!needs0f(0, 0xC8, 0, 0));
+        assert!(!needs0f(0, 0xB6, 0xC3, 0));
+        // High RIP interprets every 0F, including those whitelist ops.
+        assert!(needs_high(0x0F, 0x40));
+        assert!(needs_high(0x0F, 0x44));
+        assert!(needs_high(0x0F, 0x90));
+        assert!(needs_high(0x0F, 0xA3));
+        assert!(needs_high(0x0F, 0xB0));
+        assert!(needs_high(0x0F, 0xB6));
+        assert!(needs_high(0x0F, 0xC8));
     }
 
     #[test]
