@@ -61,6 +61,14 @@ pub fn jit_clear_func(wasm_table_index: WasmTableIndex) {
 
 static mut JIT_DISABLED: bool = false;
 
+/// 64-bit CS JIT is opt-in (`sync_jit` / jit_config 5). Default off: XP x64
+/// usermode is low-RIP 64-bit and the 32-bit JIT trampolines REX.W, then
+/// `MAX_64BIT_STEPS` cuts the slice. Interpreting that path is faster and
+/// avoids STOP 0x7E from compiled high-RIP kernel code.
+static mut JIT_LONG_MODE: bool = false;
+
+pub fn jit_long_mode_enabled() -> bool { unsafe { JIT_LONG_MODE } }
+
 // Maximum number of pages per wasm module. Necessary for the following reasons:
 // - There is an upper limit on the size of a single function in wasm (currently ~7MB in all browsers)
 //   See https://github.com/WebAssembly/design/issues/1138
@@ -419,6 +427,18 @@ pub fn jit_find_cache_entry_in_page(
     let state_flags = CachedStateFlags::of_u32(state_flags);
 
     unsafe {
+        if cpu::get_rip() > 0xFFFF_FFFF {
+            let linear = cpu::fold_ip_delta_into_rip(cpu::get_rip(), virt_address as i32);
+            if let Ok(phys) = cpu::translate_linear_no_side_effects(linear) {
+                let entry = jit_find_cache_entry(phys, state_flags);
+                if entry != CachedCode::NONE && entry.wasm_table_index == wasm_table_index {
+                    return entry.initial_state.into();
+                }
+            }
+            profiler::stat_increment(stat::INDIRECT_JUMP_NO_ENTRY);
+            return -1;
+        }
+
         match cpu::tlb_code[(virt_address >> 12) as usize] {
             None => {},
             Some(c) => {
@@ -442,9 +462,11 @@ fn jit_find_basic_blocks(
     ctx: &mut JitState,
     entry_points: HashSet<i32>,
     cpu: CpuContext,
+    sample_rip: u64,
 ) -> Vec<BasicBlock> {
     fn follow_jump(
         virt_target: i32,
+        sample_rip: u64,
         ctx: &mut JitState,
         pages: &mut HashSet<Page>,
         page_blacklist: &mut HashSet<Page>,
@@ -455,9 +477,10 @@ fn jit_find_basic_blocks(
         if is_near_end_of_page(virt_target as u32) {
             return None;
         }
-        let phys_target = match cpu::translate_address_read_no_side_effects(virt_target) {
+        let linear = cpu::virt32_to_linear(virt_target, sample_rip);
+        let phys_target = match cpu::translate_linear_no_side_effects(linear) {
             Err(()) => {
-                dbg_log!("Not analysing {:x} (page not mapped)", virt_target);
+                dbg_log!("Not analysing {:x} (page not mapped)", linear);
                 return None;
             },
             Ok(t) => t,
@@ -524,12 +547,16 @@ fn jit_find_basic_blocks(
     let mut pages: HashSet<Page> = HashSet::new();
     let mut page_blacklist = HashSet::new();
 
-    // 16-bit doesn't work correctly, most likely due to instruction pointer wrap-around
-    let max_pages = if cpu.state_flags.is_32() { unsafe { MAX_PAGES } } else { 1 };
+    // 16-bit doesn't work correctly, most likely due to instruction pointer wrap-around.
+    // High RIP cannot use tlb_data/tlb_code (32-bit VA index); keep those modules to
+    // one physical page so page-switch checks never walk a truncated i32 IP.
+    let max_pages =
+        if cpu.state_flags.is_32() && sample_rip <= 0xFFFF_FFFF { unsafe { MAX_PAGES } } else { 1 };
 
     for virt_addr in entry_points {
         let ok = follow_jump(
             virt_addr,
+            sample_rip,
             ctx,
             &mut pages,
             &mut page_blacklist,
@@ -542,7 +569,9 @@ fn jit_find_basic_blocks(
     }
 
     while let Some(to_visit) = to_visit_stack.pop() {
-        let phys_addr = match cpu::translate_address_read_no_side_effects(to_visit) {
+        let phys_addr = match cpu::translate_linear_no_side_effects(cpu::virt32_to_linear(
+            to_visit, sample_rip,
+        )) {
             Err(()) => {
                 dbg_log!("Not analysing {:x} (page not mapped)", to_visit);
                 continue;
@@ -661,6 +690,7 @@ fn jit_find_basic_blocks(
                         next_block_addr,
                         next_block_branch_taken_addr: follow_jump(
                             jump_target,
+                            sample_rip,
                             ctx,
                             &mut pages,
                             &mut page_blacklist,
@@ -700,6 +730,7 @@ fn jit_find_basic_blocks(
                     current_block.ty = BasicBlockType::Normal {
                         next_block_addr: follow_jump(
                             jump_target,
+                            sample_rip,
                             ctx,
                             &mut pages,
                             &mut page_blacklist,
@@ -838,7 +869,7 @@ pub fn jit_force_generate_unsafe(virt_addr: i32) {
         "cannot force compile near end of page"
     );
     jit_increase_hotness_and_maybe_compile(
-        virt_addr,
+        virt_addr as u32 as u64,
         cpu::translate_address_read(virt_addr).unwrap(),
         cpu::get_seg_cs() as u32,
         cpu::get_state_flags(),
@@ -850,7 +881,7 @@ pub fn jit_force_generate_unsafe(virt_addr: i32) {
 #[inline(never)]
 fn jit_analyze_and_generate(
     ctx: &mut JitState,
-    virt_entry_point: i32,
+    virt_entry_point: u64,
     phys_entry_point: u32,
     cs_offset: u32,
     state_flags: CachedStateFlags,
@@ -896,17 +927,18 @@ fn jit_analyze_and_generate(
         rex_prefix: 0,
         cs_offset,
         state_flags,
+        high_rip: virt_entry_point > 0xFFFF_FFFF,
     };
 
     dbg_assert!(
-        cpu::translate_address_read_no_side_effects(virt_entry_point).unwrap() == phys_entry_point
+        cpu::translate_linear_no_side_effects(virt_entry_point).unwrap() == phys_entry_point
     );
     let virt_page = Page::page_of(virt_entry_point as u32);
     let entry_points: HashSet<i32> = entry_points
         .iter()
         .map(|e| virt_page.to_address() as i32 | *e as i32)
         .collect();
-    let basic_blocks = jit_find_basic_blocks(ctx, entry_points, cpu.clone());
+    let basic_blocks = jit_find_basic_blocks(ctx, entry_points, cpu.clone(), virt_entry_point);
 
     let mut pages = HashSet::new();
 
@@ -2167,13 +2199,16 @@ fn jit_generate_basic_block(ctx: &mut JitContext, block: &BasicBlock) {
 }
 
 pub fn jit_increase_hotness_and_maybe_compile(
-    virt_address: i32,
+    virt_address: u64,
     phys_address: u32,
     cs_offset: u32,
     state_flags: CachedStateFlags,
     heat: u32,
 ) {
     if unsafe { JIT_DISABLED } {
+        return;
+    }
+    if state_flags.is_64() && !jit_long_mode_enabled() {
         return;
     }
 
@@ -2196,8 +2231,7 @@ pub fn jit_increase_hotness_and_maybe_compile(
             if is_compiling {
                 None
             }
-            else if cpu::translate_address_read_no_side_effects(virt_address) == Ok(phys_address)
-            {
+            else if cpu::translate_linear_no_side_effects(virt_address) == Ok(phys_address) {
                 *hotness = 0;
                 jit_analyze_and_generate(
                     &mut ctx,
@@ -2544,6 +2578,7 @@ pub unsafe fn set_jit_config(index: u32, value: u32) {
         2 => JIT_USE_LOOP_SAFETY = value != 0,
         3 => MAX_EXTRA_BASIC_BLOCKS = value,
         4 => JIT_THRESHOLD = value,
+        5 => JIT_LONG_MODE = value != 0,
         _ => dbg_assert!(false),
     }
 }
@@ -2556,6 +2591,7 @@ pub unsafe fn get_jit_config(index: u32) -> u32 {
         2 => JIT_USE_LOOP_SAFETY as u32,
         3 => MAX_EXTRA_BASIC_BLOCKS as u32,
         4 => JIT_THRESHOLD,
+        5 => JIT_LONG_MODE as u32,
         _ => 0,
     }
 }

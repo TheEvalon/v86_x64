@@ -9,6 +9,7 @@ use crate::prefix::{
     PREFIX_66, PREFIX_67, PREFIX_F2, PREFIX_F3, PREFIX_MASK_ADDRSIZE, PREFIX_MASK_SEGMENT,
 };
 use crate::regs::{CS, DS, ES, FS, GS, SS};
+use crate::state_flags::CachedStateFlags;
 
 #[derive(PartialEq, Eq)]
 pub enum AnalysisType {
@@ -68,6 +69,30 @@ pub fn consume_legacy_prefixes_and_rex(cpu: &mut CpuContext) -> u8 {
     }
 }
 
+/// True when a high-RIP compiled entry at `phys_eip` is 32-bit register ALU
+/// that is safe to enter. Trampoline-only entries must not be entered: wasm
+/// call + one interpreted insn is slower than an interpreter batch (XP
+/// post-LMA was ~5.6 M insns/s vs ~12 M on master).
+///
+/// Peeks guest bytes without `read_imm8` so a RIP on the last byte of a page
+/// cannot assert in `CpuContext`.
+pub fn high_rip_should_enter_jit(phys_eip: u32, _state_flags: CachedStateFlags) -> bool {
+    let page_off = phys_eip & 0xFFF;
+    if page_off == 0xFFF {
+        return false;
+    }
+    let opcode = memory::read8(phys_eip) as u8;
+    // Any legacy prefix or REX is interpreted at high RIP.
+    if matches!(
+        opcode,
+        0x26 | 0x2E | 0x36 | 0x3E | 0x40..=0x4F | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3
+    ) {
+        return false;
+    }
+    let next = if page_off + 1 > 0xFFF { 0 } else { memory::read8(phys_eip.wrapping_add(1)) as u8 };
+    high_rip_may_jit_32bit_alu(0, opcode, next, false, 0)
+}
+
 pub fn long_cs_needs_trampoline(cpu: &CpuContext) -> bool {
     let mut tmp = cpu.clone();
     tmp.prefixes = 0;
@@ -80,6 +105,7 @@ pub fn long_cs_needs_trampoline(cpu: &CpuContext) -> bool {
         peek_imm8_at(&tmp, 1),
         tmp.prefixes & PREFIX_MASK_ADDRSIZE != 0,
         tmp.prefixes,
+        tmp.high_rip,
     )
 }
 
@@ -151,6 +177,53 @@ fn opcode_0f_needs_long_trampoline(op: u8, modrm: u8, prefixes: u8) -> bool {
     modrm < 0xC0
 }
 
+/// Unprefixed 32-bit register ALU/MOV/CMP/TEST the 32-bit JIT can run when
+/// RIP > 4GiB. Everything else at high RIP is interpreted: 0F, Jcc, prefixes,
+/// memory, shifts, MUL/DIV/XCHG, and 8-bit ops have all produced or can
+/// produce XP STOP 0x7E (STATUS_BREAKPOINT in ntoskrnl INT3 padding).
+fn high_rip_may_jit_32bit_alu(
+    rex: u8,
+    opcode: u8,
+    next: u8,
+    addrsize_override: bool,
+    prefixes: u8,
+) -> bool {
+    if rex != 0 || prefixes != 0 || addrsize_override {
+        return false;
+    }
+    if opcode_has_modrm(opcode) && next < 0xC0 {
+        return false;
+    }
+    matches!(
+        opcode,
+        0x01 | 0x03
+            | 0x05
+            | 0x09
+            | 0x0B
+            | 0x0D
+            | 0x21
+            | 0x23
+            | 0x25
+            | 0x29
+            | 0x2B
+            | 0x2D
+            | 0x31
+            | 0x33
+            | 0x35
+            | 0x39
+            | 0x3B
+            | 0x3D
+            | 0x81
+            | 0x83
+            | 0x85
+            | 0x89
+            | 0x8B
+            | 0x90
+            | 0xA9
+            | 0xB8..=0xBF
+    )
+}
+
 pub fn opcode_needs_long_trampoline(
     rex: u8,
     opcode: u8,
@@ -158,7 +231,14 @@ pub fn opcode_needs_long_trampoline(
     next2: u8,
     addrsize_override: bool,
     prefixes: u8,
+    high_rip: bool,
 ) -> bool {
+    // Above 4GiB only compile the 32-bit register ALU subset. Compiled Jcc,
+    // 0F, 67h memory, and the rest of the 32-bit helpers have landed XP in
+    // ntoskrnl INT3 padding (STOP 0x7E / STATUS_BREAKPOINT).
+    if high_rip {
+        return !high_rip_may_jit_32bit_alu(rex, opcode, next, addrsize_override, prefixes);
+    }
     if opcode == 0x0F {
         if opcode_0f_needs_long_trampoline(next, next2, prefixes) {
             return true;
@@ -179,7 +259,9 @@ pub fn opcode_needs_long_trampoline(
     }
     // Non-REX memory operands still use 64-bit addressing in 64-bit CS
     // (`mov ebx, [rax]` with RAX above 4GiB). The 32-bit JIT helpers
-    // read EAX and truncate. 67h keeps 32-bit asize, so those stay JIT.
+    // read EAX and truncate. 67h is 32-bit asize (`CpuContext::asize_32`
+    // stays true in long CS); low-RIP 64-bit CS still JITs those, high RIP
+    // trampolines them above.
     if !addrsize_override && opcode_has_modrm(opcode) && next < 0xC0 {
         return true;
     }
@@ -221,6 +303,7 @@ fn analyze_step_64(cpu: &mut CpuContext, mut analysis: Analysis) -> Analysis {
         peek_imm8_at(cpu, 1),
         cpu.prefixes & PREFIX_MASK_ADDRSIZE != 0,
         cpu.prefixes,
+        cpu.high_rip,
     );
     gen::analyzer::analyzer(
         opcode as u32 | (cpu.osize_32() as u32) << 8,
@@ -303,11 +386,15 @@ mod tests {
     use super::*;
 
     fn needs(rex: u8, opcode: u8, next: u8, addrsize_override: bool) -> bool {
-        opcode_needs_long_trampoline(rex, opcode, next, 0, addrsize_override, 0)
+        opcode_needs_long_trampoline(rex, opcode, next, 0, addrsize_override, 0, false)
     }
 
     fn needs0f(rex: u8, op: u8, modrm: u8, prefixes: u8) -> bool {
-        opcode_needs_long_trampoline(rex, 0x0F, op, modrm, false, prefixes)
+        opcode_needs_long_trampoline(rex, 0x0F, op, modrm, false, prefixes, false)
+    }
+
+    fn needs_high(opcode: u8, next: u8) -> bool {
+        opcode_needs_long_trampoline(0, opcode, next, 0, false, 0, true)
     }
 
     #[test]
@@ -326,12 +413,66 @@ mod tests {
         assert!(!needs(0, 0x8B, 0x05, true));
         assert!(!needs(0, 0x8B, 0x18, true));
         assert!(!needs(0, 0x8B, 0xC3, false));
+        // High RIP: 67h/66h memory and register forms trampoline.
+        assert!(opcode_needs_long_trampoline(
+            0, 0x8B, 0x05, 0, true, PREFIX_67, true
+        ));
+        assert!(opcode_needs_long_trampoline(
+            0, 0x8B, 0x87, 0, true, PREFIX_67, true
+        ));
+        assert!(opcode_needs_long_trampoline(
+            0, 0x89, 0xC0, 0, false, PREFIX_66, true
+        ));
+        assert!(opcode_needs_long_trampoline(
+            0, 0x8B, 0x05, 0, false, 0, true
+        ));
         assert!(needs(0, 0xE8, 0, false));
         assert!(needs(0, 0xA4, 0, false));
         assert!(needs(0, 0xAB, 0, false));
         assert!(needs(0, 0xE2, 0, false));
         assert!(!needs(0, 0x75, 0, false));
         assert!(!needs(0, 0x83, 0xC0, false));
+    }
+
+    #[test]
+    fn trampoline_short_jcc_at_high_rip() {
+        assert!(!needs(0, 0x75, 0, false));
+        assert!(needs_high(0x75, 0));
+        assert!(needs_high(0x70, 0));
+        assert!(needs_high(0x0F, 0x84));
+    }
+
+    #[test]
+    fn trampoline_every_0f_at_high_rip() {
+        // Low RIP still compiles the 32-bit 0F whitelist (CMOV, BSWAP, MOVZX).
+        assert!(!needs0f(0, 0x40, 0xC3, 0));
+        assert!(!needs0f(0, 0xC8, 0, 0));
+        assert!(!needs0f(0, 0xB6, 0xC3, 0));
+        // High RIP interprets every 0F, including those whitelist ops.
+        assert!(needs_high(0x0F, 0x40));
+        assert!(needs_high(0x0F, 0x44));
+        assert!(needs_high(0x0F, 0x90));
+        assert!(needs_high(0x0F, 0xA3));
+        assert!(needs_high(0x0F, 0xB0));
+        assert!(needs_high(0x0F, 0xB6));
+        assert!(needs_high(0x0F, 0xC8));
+    }
+
+    #[test]
+    fn high_rip_only_jits_32bit_register_alu() {
+        assert!(!needs_high(0x01, 0xC3));
+        assert!(!needs_high(0x8B, 0xC3));
+        assert!(!needs_high(0x83, 0xC0));
+        assert!(!needs_high(0x3D, 0));
+        assert!(!needs_high(0xB8, 0));
+        assert!(!needs_high(0x90, 0));
+        assert!(needs_high(0x00, 0xC3));
+        assert!(needs_high(0x87, 0xC3));
+        assert!(needs_high(0x98, 0));
+        assert!(needs_high(0xD3, 0xE0));
+        assert!(needs_high(0xF7, 0xF8));
+        assert!(needs_high(0xCC, 0));
+        assert!(needs_high(0x8B, 0x05));
     }
 
     #[test]
