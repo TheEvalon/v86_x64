@@ -361,34 +361,18 @@ emulator.add_listener("emulator-loaded", function()
     emulator.cpu_exception_hook = function(n)
     {
         // Linux takes page faults, #NM (FPU), and probed #GPs. Deliver those.
-        // #UD is a missing opcode. #DF is a nested-fault shutdown.
-        if(n !== 6 && n !== 8)
+        // WARN()/BUG() are UD2, so #UD must reach the guest; a missing opcode
+        // oopses and typically panics, which the serial watcher still fails.
+        // #DF is a nested-fault shutdown.
+        if(n !== 8)
         {
             return false;
         }
         const cpu = emulator.v86.cpu;
         const rip = u64_from_pair(cpu.previous_rip64);
-        const what = n === 8 ? "#DF" : "#UD";
-        const phys_hint = 0x1000000;
-        const phys_bytes = [];
-        for(let i = 0; i < 16; i++)
-        {
-            phys_bytes.push(("0" + cpu.mem8[phys_hint + i].toString(16)).slice(-2));
-        }
-        const cur = u64_from_pair(cpu.rip64);
-        finish(1, "linux64: unexpected " + what + " previous_rip=" + hex64(rip) +
-            " rip=" + hex64(cur) +
-            " bytes=[" + dump_at(cpu, rip) + "] cur_bytes=[" + dump_at(cpu, cur) +
-            "] phys1M=[" + phys_bytes.join(" ") + "] " +
-            dump_regs(cpu) + " walk=" + dump_page_walk(cpu, rip) +
-            " cr2walk=" + dump_page_walk(cpu, u64_from_pair(cpu.cr2_64)) +
-            " " + dump_idt_gate(cpu, 8) + " " + dump_idt_gate(cpu, 13) +
-            " " + dump_idt_gate(cpu, 14) +
-            " " + dump_qword(cpu, 0xffffffff829803e8n) +
-            " " + dump_qword(cpu, 0xffffffff8283d0c0n) +
-            " " + dump_qword(cpu, 0xffffffff8283d030n) +
-            " " + dump_qword(cpu, 0xffffffff82843980n) +
-            " " + dump_stack(cpu));
+        finish(1, "linux64: unexpected #DF previous_rip=" + hex64(rip) +
+            " rip=" + hex64(u64_from_pair(cpu.rip64)) +
+            " bytes=[" + dump_at(cpu, rip) + "] " + dump_regs(cpu) + " " + dump_stack(cpu));
         return true;
     };
 });
@@ -447,6 +431,16 @@ emulator.add_listener("serial0-output-byte", function(byte)
         if(nl >= 0)
         {
             finish(1, "linux64: kernel panic: " + rest.slice(0, nl).trim());
+        }
+    }
+    const bug_at = serial.lastIndexOf("kernel BUG at");
+    if(bug_at >= 0)
+    {
+        const rest = serial.slice(bug_at);
+        const nl = rest.indexOf("\n");
+        if(nl >= 0)
+        {
+            finish(1, "linux64: kernel BUG: " + rest.slice(0, nl).trim());
         }
     }
 });
