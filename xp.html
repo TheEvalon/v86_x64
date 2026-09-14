@@ -68,8 +68,19 @@ a { color: #8cf; }
         <label>RAM <input id="memory_mb" type="number" value="512" min="128" max="2048" step="16" style="width:5em"> MB</label>
         <label><input id="acpi" type="checkbox" checked> ACPI / APIC</label>
         <span id="chunk_label" style="color:#9ad">disk chunks: —</span>
-        <input id="disk_file" type="file" accept=".img,.raw,.bin,.vhd,.zip,application/octet-stream">
-        <button id="start_images" type="button">Start from images/</button>
+        <label>HDD <input id="disk_file" type="file" accept=".img,.raw,.bin,.vhd,.zip,application/octet-stream"></label>
+        <button id="clear_disk" type="button">Clear disk</button>
+        <label>CD-ROM <input id="cdrom_file" type="file" accept=".iso,.cue,.bin,application/octet-stream"></label>
+        <button id="clear_cdrom" type="button">Clear CD</button>
+        <label>Boot
+            <select id="boot_order">
+                <option value="auto">Auto</option>
+                <option value="312">Hard disk first</option>
+                <option value="123">CD-ROM first</option>
+            </select>
+        </label>
+        <button id="start" type="button">Start</button>
+        <button id="stop" type="button" disabled>Stop</button>
         <button id="pause" type="button" disabled>Pause</button>
         <button id="reset" type="button" disabled>Reset</button>
         <button id="save_file" type="button" disabled>Save state</button>
@@ -77,7 +88,7 @@ a { color: #8cf; }
         <label>Restore from file <input id="restore_file" type="file" accept=".bin,.zst,application/octet-stream" disabled></label>
         <button id="restore_idb" type="button" disabled>Restore last local state</button>
     </div>
-    <div id="status">Looking for a local disk…</div>
+    <div id="status">Looking for a local disk or CD…</div>
     <div id="help">
         Serve this repo over HTTP with a server that supports
         <code>Range</code> (XAMPP/Apache does; <code>python -m http.server</code> does not),
@@ -89,9 +100,16 @@ a { color: #8cf; }
         <code>images/windows-xp-x64.img</code> (also accepts
         <code>images/hdd.img</code>, <code>xp64.img</code>, <code>winxp64.img</code>),
         or pick the <code>.img</code> here (the file picker does not need Range).
+        A <code>.iso</code> goes in the CD-ROM picker (or
+        <code>images/windows-xp-x64.iso</code> /
+        <code>?cdrom=images/foo.iso</code>). The VM does not start until you
+        click <strong>Start</strong>; picking a disk or CD only selects media
+        and boot order (hard disk first vs CD-ROM first).
         A <code>.zip</code> works only if the disk inside is stored uncompressed;
-        otherwise unzip first. Override the URL with
+        otherwise unzip first. Override the disk URL with
         <code>?hda=images/hdd.img</code>.
+        <code>?autostart=1</code> starts as soon as a disk or CD is found.
+        <code>?boot_order=123</code> (CD first) or <code>312</code> (HDD first).
         Disk Range reads are coalesced to 256&nbsp;KiB (same as copy.sh
         Windows images). Without that, XP issues 10–100&nbsp;KB ATA reads
         as separate HTTP requests and boot stretches into tens of minutes
@@ -123,11 +141,22 @@ a { color: #8cf; }
 import { V86 } from "./src/browser/starter.js";
 import { round_up_to_next_power_of_2 } from "./src/lib.js";
 
+// SeaBIOS CMOS boot nibbles; same values as src/rtc.js.
+const BOOT_ORDER_CD_FIRST = 0x123;
+const BOOT_ORDER_HD_FIRST = 0x312;
+
 const DEFAULT_DISKS = [
     "images/windows-xp-x64.img",
     "images/hdd.img",
     "images/xp64.img",
     "images/winxp64.img",
+];
+
+const DEFAULT_CDS = [
+    "images/windows-xp-x64.iso",
+    "images/xp64.iso",
+    "images/cdrom.iso",
+    "images/boot.iso",
 ];
 
 const DEFAULT_DISK_CHUNK_SIZE = 256 * 1024;
@@ -139,18 +168,28 @@ const STATE_DOWNLOAD_NAME = "xp64-state.bin";
 
 const status_el = document.getElementById("status");
 const screen = document.getElementById("screen_container");
+const start_btn = document.getElementById("start");
+const stop_btn = document.getElementById("stop");
 const pause_btn = document.getElementById("pause");
 const reset_btn = document.getElementById("reset");
 const save_file_btn = document.getElementById("save_file");
 const save_restore_btn = document.getElementById("save_restore");
 const restore_file_el = document.getElementById("restore_file");
 const restore_idb_btn = document.getElementById("restore_idb");
+const boot_order_el = document.getElementById("boot_order");
+const disk_file_el = document.getElementById("disk_file");
+const cdrom_file_el = document.getElementById("cdrom_file");
 
 let emulator = null;
 let paused = false;
 let memory_state = null;
 let booted_from_state = null;
 let last_hda = null;
+let last_cdrom = null;
+let probed_hda = null;
+let probed_cdrom = null;
+let file_hda = null;
+let file_cdrom = null;
 let screen_bound = false;
 let pending_restore_error = null;
 
@@ -338,10 +377,119 @@ function set_runtime_controls_enabled(enabled)
     save_file_btn.disabled = !enabled;
     save_restore_btn.disabled = !enabled;
     restore_file_el.disabled = !enabled;
+    stop_btn.disabled = !enabled;
+    start_btn.disabled = enabled || !has_boot_media();
     if(!enabled)
     {
         restore_idb_btn.disabled = true;
+        pause_btn.textContent = "Pause";
+        paused = false;
     }
+}
+
+function current_hda()
+{
+    return file_hda || probed_hda;
+}
+
+function current_cdrom()
+{
+    return file_cdrom || probed_cdrom;
+}
+
+function has_boot_media()
+{
+    return !!(current_hda() || current_cdrom());
+}
+
+function media_name(media)
+{
+    if(!media)
+    {
+        return "";
+    }
+    if(media.url)
+    {
+        return media.url;
+    }
+    if(media.buffer && media.buffer.name)
+    {
+        return media.buffer.name;
+    }
+    return "file";
+}
+
+function media_summary()
+{
+    const disk = current_hda();
+    const cd = current_cdrom();
+    const parts = [];
+    parts.push(disk ? "disk " + media_name(disk) : "no disk");
+    parts.push(cd ? "CD " + media_name(cd) : "no CD");
+    const order = boot_order_el.value;
+    if(order === "123")
+    {
+        parts.push("boot CD first");
+    }
+    else if(order === "312")
+    {
+        parts.push("boot HDD first");
+    }
+    else
+    {
+        parts.push("boot auto");
+    }
+    return parts.join(", ");
+}
+
+function refresh_idle_status()
+{
+    start_btn.disabled = !!emulator || !has_boot_media();
+    if(emulator)
+    {
+        set_status("Selected " + media_summary() +
+            ". Stop, then Start to boot with this media and boot order.");
+        return;
+    }
+    if(!has_boot_media())
+    {
+        set_status("Pick a hard disk (.img) or CD-ROM (.iso), set boot order, then Start.");
+        return;
+    }
+    let msg = "Ready (" + media_summary() + "). Click Start to boot.";
+    const wanted = requested_state_url();
+    if(wanted)
+    {
+        msg += " ?state=" + wanted + " is used when you start if that file exists.";
+    }
+    set_status(msg);
+}
+
+function apply_boot_order_query()
+{
+    const raw = (new URLSearchParams(location.search).get("boot_order") || "").toLowerCase();
+    if(raw === "123" || raw === "cd")
+    {
+        boot_order_el.value = "123";
+    }
+    else if(raw === "312" || raw === "hd" || raw === "hdd")
+    {
+        boot_order_el.value = "312";
+    }
+}
+
+function selected_boot_order(hda, cdrom)
+{
+    const raw = boot_order_el.value;
+    if(raw === "123")
+    {
+        return BOOT_ORDER_CD_FIRST;
+    }
+    if(raw === "312")
+    {
+        return BOOT_ORDER_HD_FIRST;
+    }
+    return hda ? BOOT_ORDER_HD_FIRST : BOOT_ORDER_CD_FIRST;
 }
 
 function download_buffer(buffer, name)
@@ -567,12 +715,10 @@ async function supports_range(url)
     return false;
 }
 
-async function find_default_disk()
+async function find_default_image(requested, urls)
 {
-    const params = new URLSearchParams(location.search);
-    const requested = params.get("hda");
-    const urls = requested ? [requested] : DEFAULT_DISKS;
-    for(const url of urls)
+    const list = requested ? [requested] : urls;
+    for(const url of list)
     {
         try
         {
@@ -589,6 +735,18 @@ async function find_default_disk()
         }
     }
     return null;
+}
+
+async function find_default_disk()
+{
+    const params = new URLSearchParams(location.search);
+    return find_default_image(params.get("hda"), DEFAULT_DISKS);
+}
+
+async function find_default_cdrom()
+{
+    const params = new URLSearchParams(location.search);
+    return find_default_image(params.get("cdrom"), DEFAULT_CDS);
 }
 
 async function wasm_path()
@@ -633,11 +791,11 @@ function disk_chunk_size()
     return DEFAULT_DISK_CHUNK_SIZE;
 }
 
-function hda_with_chunks(hda)
+function image_with_chunks(image)
 {
-    return Object.assign({}, hda, {
-        async: hda.async !== undefined ? hda.async : true,
-        fixed_chunk_size: hda.fixed_chunk_size || disk_chunk_size(),
+    return Object.assign({}, image, {
+        async: image.async !== undefined ? image.async : true,
+        fixed_chunk_size: image.fixed_chunk_size || disk_chunk_size(),
     });
 }
 
@@ -661,10 +819,19 @@ async function constructor_state(skip_state)
     return { initial_state, state_missing: null };
 }
 
-async function start_emulator(hda, options)
+async function start_emulator(media, options)
 {
     options = options || {};
+    media = media || {};
+    const hda = media.hda || null;
+    const cdrom = media.cdrom || null;
     const initial_state = options.initial_state || null;
+
+    if(!hda && !cdrom)
+    {
+        set_status("Pick a hard disk or CD-ROM first.", true);
+        return;
+    }
 
     if(!options.keep_restore_error)
     {
@@ -672,9 +839,11 @@ async function start_emulator(hda, options)
     }
 
     set_runtime_controls_enabled(false);
+    start_btn.disabled = true;
     memory_state = null;
     save_restore_btn.textContent = "Save / Restore";
     last_hda = hda;
+    last_cdrom = cdrom;
     booted_from_state = initial_state && initial_state.url || null;
 
     if(emulator)
@@ -686,15 +855,27 @@ async function start_emulator(hda, options)
     if(location.protocol === "file:")
     {
         set_status("Open this page through XAMPP or another HTTP server, not file://.", true);
+        refresh_idle_status();
         return;
     }
 
     const wasm = await wasm_path();
+    const chunk_bytes = (hda && hda.fixed_chunk_size) || (cdrom && cdrom.fixed_chunk_size) || 0;
     document.getElementById("chunk_label").textContent =
-        "disk chunks: " + format_bytes(hda.fixed_chunk_size || 0);
-    let msg = "Starting with " + (hda.url || hda.buffer && hda.buffer.name || "disk") +
+        "disk chunks: " + format_bytes(chunk_bytes);
+    const names = [];
+    if(hda)
+    {
+        names.push(media_name(hda));
+    }
+    if(cdrom)
+    {
+        names.push("cd " + media_name(cdrom));
+    }
+    let msg = "Starting with " + names.join(" + ") +
         "  wasm=" + wasm +
-        "  disk chunks=" + format_bytes(hda.fixed_chunk_size || 0);
+        "  disk chunks=" + format_bytes(chunk_bytes) +
+        "  boot=" + boot_order_el.options[boot_order_el.selectedIndex].text;
     if(initial_state && initial_state.url)
     {
         msg += "  state=" + initial_state.url;
@@ -716,18 +897,28 @@ async function start_emulator(hda, options)
         screen_container: screen,
         bios: { url: "bios/seabios.bin" },
         vga_bios: { url: "bios/vgabios.bin" },
-        hda,
         acpi: document.getElementById("acpi").checked,
         fastboot: true,
         autostart: true,
         disable_speaker: false,
+        boot_order: selected_boot_order(hda, cdrom),
     };
+    if(hda)
+    {
+        settings.hda = hda;
+    }
+    if(cdrom)
+    {
+        settings.cdrom = cdrom;
+    }
     if(initial_state)
     {
         settings.initial_state = initial_state;
     }
 
     emulator = window.emulator = new V86(settings);
+    stop_btn.disabled = false;
+    start_btn.disabled = true;
 
     emulator.add_listener("download-progress", function(e)
     {
@@ -764,7 +955,7 @@ async function start_emulator(hda, options)
         }
         else
         {
-            set_status("Running. Disk chunks " + format_bytes(last_hda && last_hda.fixed_chunk_size) +
+            set_status("Running. " + media_summary() +
                 ". Click the screen for keyboard. Boot from an ACPI i440fx disk takes several minutes.");
         }
         screen.focus();
@@ -800,21 +991,42 @@ async function start_emulator(hda, options)
     }
 }
 
-async function start_from_images(opts)
+async function ensure_url_range(image, kind)
 {
-    const disk = await find_default_disk();
-    if(!disk)
+    if(!image || !image.url)
+    {
+        return true;
+    }
+    if(await supports_range(image.url))
+    {
+        return true;
+    }
+    set_status(
+        "Found " + image.url + " but this HTTP server does not support Range " +
+        "(python -m http.server does not). Use XAMPP/Apache, or pick the " +
+        kind + " file.", true);
+    return false;
+}
+
+async function start_from_pending(opts)
+{
+    const hda_src = current_hda();
+    const cd_src = current_cdrom();
+    if(!hda_src && !cd_src)
     {
         set_status(
-            "No disk at images/windows-xp-x64.img (or hdd.img / xp64.img / winxp64.img). " +
-            "Unzip your image there, or pick a file.", true);
+            "No disk at images/windows-xp-x64.img and no CD at " +
+            "images/windows-xp-x64.iso. Put images there, or pick files.", true);
         return false;
     }
-    if(!await supports_range(disk.url))
+    const hda = hda_src ? image_with_chunks(hda_src) : null;
+    const cdrom = cd_src ? image_with_chunks(cd_src) : null;
+    if(!await ensure_url_range(hda, ".img"))
     {
-        set_status(
-            "Found " + disk.url + " but this HTTP server does not support Range " +
-            "(python -m http.server does not). Use XAMPP/Apache, or pick the .img file.", true);
+        return false;
+    }
+    if(!await ensure_url_range(cdrom, ".iso"))
+    {
         return false;
     }
     const state = await constructor_state(opts && opts.skip_state);
@@ -822,20 +1034,40 @@ async function start_from_images(opts)
     {
         state.keep_restore_error = true;
     }
-    await start_emulator(
-        hda_with_chunks({ url: disk.url, size: disk.size }),
-        state);
+    await start_emulator({ hda, cdrom }, state);
     return true;
+}
+
+async function stop_emulator()
+{
+    if(!emulator)
+    {
+        return;
+    }
+    const current = emulator;
+    emulator = window.emulator = null;
+    try
+    {
+        await current.destroy();
+    }
+    catch(_)
+    {
+        // already torn down
+    }
+    set_runtime_controls_enabled(false);
+    memory_state = null;
+    save_restore_btn.textContent = "Save / Restore";
+    refresh_idle_status();
 }
 
 async function cold_boot_fallback()
 {
-    if(last_hda)
+    if(last_hda || last_cdrom)
     {
-        await start_emulator(last_hda, { keep_restore_error: true });
+        await start_emulator({ hda: last_hda, cdrom: last_cdrom }, { keep_restore_error: true });
         return;
     }
-    await start_from_images({ skip_state: true, keep_restore_error: true });
+    await start_from_pending({ skip_state: true, keep_restore_error: true });
 }
 
 async function restore_buffer(buffer, label)
@@ -896,19 +1128,44 @@ async function save_current_state()
     return { buffer, idb_note };
 }
 
-document.getElementById("start_images").onclick = async function()
+start_btn.onclick = async function()
+{
+    if(emulator)
+    {
+        return;
+    }
+    try
+    {
+        await start_from_pending();
+    }
+    catch(e)
+    {
+        emulator = window.emulator = null;
+        set_runtime_controls_enabled(false);
+        set_status(String(e && e.message || e), true);
+        refresh_idle_status();
+    }
+};
+
+stop_btn.onclick = async function()
 {
     try
     {
-        await start_from_images();
+        await stop_emulator();
     }
     catch(e)
     {
         set_status(String(e && e.message || e), true);
+        refresh_idle_status();
     }
 };
 
-document.getElementById("disk_file").onchange = async function()
+boot_order_el.onchange = function()
+{
+    refresh_idle_status();
+};
+
+disk_file_el.onchange = async function()
 {
     const file = this.files && this.files[0];
     if(!file)
@@ -918,18 +1175,52 @@ document.getElementById("disk_file").onchange = async function()
     try
     {
         const disk = await maybe_unwrap_zip(file);
-        const state = await constructor_state(false);
-        await start_emulator(
-            hda_with_chunks({
-                buffer: disk,
-                async: disk.size >= 256 * 1024 * 1024,
-            }),
-            state);
+        file_hda = image_with_chunks({
+            buffer: disk,
+            async: disk.size >= 256 * 1024 * 1024,
+        });
+        if(boot_order_el.value === "auto")
+        {
+            boot_order_el.value = "312";
+        }
+        refresh_idle_status();
     }
     catch(e)
     {
         set_status(String(e && e.message || e), true);
     }
+};
+
+cdrom_file_el.onchange = function()
+{
+    const file = this.files && this.files[0];
+    if(!file)
+    {
+        return;
+    }
+    file_cdrom = image_with_chunks({
+        buffer: file,
+        async: file.size >= 256 * 1024 * 1024,
+    });
+    if(boot_order_el.value === "auto")
+    {
+        boot_order_el.value = "123";
+    }
+    refresh_idle_status();
+};
+
+document.getElementById("clear_disk").onclick = function()
+{
+    file_hda = null;
+    disk_file_el.value = "";
+    refresh_idle_status();
+};
+
+document.getElementById("clear_cdrom").onclick = function()
+{
+    file_cdrom = null;
+    cdrom_file_el.value = "";
+    refresh_idle_status();
 };
 
 pause_btn.onclick = async function()
@@ -1065,31 +1356,47 @@ restore_idb_btn.onclick = async function()
 
 (async function()
 {
+    apply_boot_order_query();
+    start_btn.disabled = true;
+
     if(location.protocol === "file:")
     {
         set_status("Open this page through XAMPP or another HTTP server, not file://.", true);
         return;
     }
 
-    const params = new URLSearchParams(location.search);
-    if(params.get("autostart") === "0")
-    {
-        let msg = "Autostart off. Pick a disk or click Start from images/.";
-        if(params.get("state"))
-        {
-            msg += " ?state=" + params.get("state") + " is used when you start if that file exists.";
-        }
-        set_status(msg);
-        return;
-    }
-
     try
     {
-        await start_from_images();
+        const [disk, cdrom] = await Promise.all([find_default_disk(), find_default_cdrom()]);
+        if(disk)
+        {
+            probed_hda = image_with_chunks({ url: disk.url, size: disk.size });
+        }
+        if(cdrom)
+        {
+            probed_cdrom = image_with_chunks({ url: cdrom.url, size: cdrom.size });
+        }
     }
     catch(e)
     {
         set_status(String(e && e.message || e), true);
+        return;
+    }
+
+    refresh_idle_status();
+
+    const params = new URLSearchParams(location.search);
+    if(params.get("autostart") === "1" && has_boot_media())
+    {
+        try
+        {
+            await start_from_pending();
+        }
+        catch(e)
+        {
+            set_status(String(e && e.message || e), true);
+            refresh_idle_status();
+        }
     }
 })();
 </script>
