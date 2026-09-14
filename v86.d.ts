@@ -35,7 +35,11 @@ type V86AsyncFileImage =
         use_parts?: boolean;
 
         /**
-         * Fixed chunk size, useful with `use_parts: true` for GitHub Pages users.
+         * Align and cache reads to this size. Default is 256 KiB for HTTP
+         * Range disks (copy.sh Windows images). Without coalescing, each
+         * guest ATA transfer becomes its own request, often 4–128 KiB on
+         * NTFS. Pass `0` to keep exact guest sizes. Also used with
+         * `use_parts: true` for GitHub Pages.
          */
         fixed_chunk_size?: number;
     };

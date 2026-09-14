@@ -1068,6 +1068,7 @@ CPU.prototype.init = function(settings, device_bus)
     }
 
     this.sync_jit = !!settings.sync_jit;
+    this.set_jit_config(5, +this.sync_jit);
     if(settings.jit_threshold)
     {
         this.set_jit_config(4, settings.jit_threshold);
