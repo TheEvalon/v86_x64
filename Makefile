@@ -374,6 +374,7 @@ rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test
 
 api-tests: build/v86-debug.wasm
+	./tests/api/disk-chunk.js
 	./tests/api/clean-shutdown.js
 	./tests/api/state.js
 	./tests/api/reset.js

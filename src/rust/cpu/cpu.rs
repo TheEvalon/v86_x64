@@ -87,8 +87,8 @@ pub const TIME_PER_FRAME: f64 = 1.0;
 /// Cap slices so we still return to JS (timers, linux64 timeout) in that case.
 pub const MAX_SLICES_PER_FRAME: u32 = 4;
 pub const MAX_SLICES_PER_FRAME_64: u32 = MAX_SLICES_PER_FRAME;
-/// Low 4GiB 64-bit CS still trampolines when long-mode JIT is on; each step is
-/// often one insn. Production leaves 64-bit CS to the interpreter.
+/// Only when 64-bit CS JIT is on: low 4GiB trampolines (one insn per step).
+/// With the default (interpret 64-bit CS), fill `LOOP_COUNTER` like 32-bit.
 pub const MAX_64BIT_STEPS: u32 = 16;
 
 pub const FLAG_SUB: i32 = -0x8000_0000;
@@ -4943,9 +4943,9 @@ pub unsafe fn do_many_cycles_native() {
             if *instruction_counter == before {
                 break;
             }
-            // Low 4GiB still trampolines (one insn per step). Higher-half RIP
-            // is interpreter-only and should fill LOOP_COUNTER / TIME_PER_FRAME.
-            if get_rip() <= 0xFFFF_FFFF {
+            // Trampoline JIT: one insn per step. Interpreter batches already
+            // fill INTERPRETER_ITERATION_LIMIT_64; do not cap those.
+            if jit::jit_long_mode_enabled() && get_rip() <= 0xFFFF_FFFF {
                 steps += 1;
                 if steps >= MAX_64BIT_STEPS {
                     break;
@@ -6459,6 +6459,10 @@ mod long_mode_sched_tests {
         assert_eq!(MAX_SLICES_PER_FRAME_64, MAX_SLICES_PER_FRAME);
         assert!(MAX_64BIT_STEPS < LOOP_COUNTER as u32);
         assert!(TIME_PER_FRAME > 0.0);
+        assert!(!jit::jit_long_mode_enabled());
+        unsafe {
+            assert_eq!(jit::get_jit_config(5), 0);
+        }
     }
 }
 
