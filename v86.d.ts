@@ -599,6 +599,14 @@ export interface V86Options {
     disable_jit?: boolean;
 
     /**
+     * Compile 64-bit CS (including RIP &gt; 4GiB register ALU). Off by default:
+     * XP x64 is faster on the interpreter, and compiled high-RIP kernel code
+     * hit STOP 0x7E. Also compiles wasm modules synchronously.
+     * @default false
+     */
+    sync_jit?: boolean;
+
+    /**
      * The URL of a server running network relay.
      * Deprecated in favor of {@link V86Options.net_device}.
      * @deprecated

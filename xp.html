@@ -67,6 +67,7 @@ a { color: #8cf; }
     <div id="controls">
         <label>RAM <input id="memory_mb" type="number" value="512" min="128" max="2048" step="16" style="width:5em"> MB</label>
         <label><input id="acpi" type="checkbox" checked> ACPI / APIC</label>
+        <label title="Compile 64-bit CS. Off by default: XP is faster interpreted, and compiled high-RIP kernel code hit STOP 0x7E."><input id="sync_jit" type="checkbox"> 64-bit JIT</label>
         <span id="chunk_label" style="color:#9ad">disk chunks: —</span>
         <label>HDD <input id="disk_file" type="file" accept=".img,.raw,.bin,.vhd,.zip,application/octet-stream"></label>
         <button id="clear_disk" type="button">Clear disk</button>
@@ -112,6 +113,9 @@ a { color: #8cf; }
         <code>?hda=images/hdd.img</code>.
         <code>?autostart=1</code> starts as soon as a disk or CD is found.
         <code>?boot_order=123</code> (CD first) or <code>312</code> (HDD first).
+        <code>?sync_jit=1</code> (or the <strong>64-bit JIT</strong> box) compiles
+        64-bit CS, including the high-RIP ALU whitelist. Leave it off for XP:
+        the interpreter is faster, and a broader compiler hit STOP 0x7E.
         Disk Range reads are coalesced to 256&nbsp;KiB (same as copy.sh
         Windows images). Without that, XP issues 10–100&nbsp;KB ATA reads
         as separate HTTP requests and boot stretches into tens of minutes
@@ -478,6 +482,12 @@ function apply_boot_order_query()
     {
         boot_order_el.value = "312";
     }
+}
+
+function apply_sync_jit_query()
+{
+    const raw = (new URLSearchParams(location.search).get("sync_jit") || "").toLowerCase();
+    document.getElementById("sync_jit").checked = raw === "1" || raw === "true";
 }
 
 function selected_boot_order(hda, cdrom)
@@ -878,6 +888,10 @@ async function start_emulator(media, options)
         "  wasm=" + wasm +
         "  disk chunks=" + format_bytes(chunk_bytes) +
         "  boot=" + boot_order_el.options[boot_order_el.selectedIndex].text;
+    if(document.getElementById("sync_jit").checked)
+    {
+        msg += "  64-bit JIT on";
+    }
     if(initial_state && initial_state.url)
     {
         msg += "  state=" + initial_state.url;
@@ -904,6 +918,7 @@ async function start_emulator(media, options)
         autostart: true,
         disable_speaker: false,
         boot_order: selected_boot_order(hda, cdrom),
+        sync_jit: document.getElementById("sync_jit").checked,
     };
     if(hda)
     {
@@ -1359,6 +1374,7 @@ restore_idb_btn.onclick = async function()
 (async function()
 {
     apply_boot_order_query();
+    apply_sync_jit_query();
     start_btn.disabled = true;
 
     if(location.protocol === "file:")
