@@ -14,6 +14,12 @@
 //
 // First pass bar: the guest sets EFER.LMA and CS.L (is_64) and survives a few
 // seconds without #UD. That is NTLDR/winload entering long mode, not a desktop.
+//
+// Time to Start menu (needs a long timeout; default HOLD is only 5s):
+//   XP64_UNTIL_START=1 node tests/longmode/xp64.js
+// Heartbeats every XP64_HEARTBEAT_MS (default 30000). Passes when the green
+// XP Start button is on the VGA dump. Offline check of existing PNGs:
+//   node tests/longmode/xp64.js --check-start shot.png
 
 import fs from "node:fs";
 import path from "node:path";
@@ -26,6 +32,164 @@ const EFER_LMA = 1 << 10;
 const EFER_LME = 1 << 8;
 
 process.on("unhandledRejection", exn => { throw exn; });
+
+function format_elapsed(ms)
+{
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return m + "m" + String(r).padStart(2, "0") + "s";
+}
+
+function decode_png_rgba(buf)
+{
+    if(buf.length < 8 || buf[0] !== 0x89 || buf[1] !== 0x50)
+    {
+        throw new Error("not a png");
+    }
+    let pos = 8;
+    let width = 0, height = 0, bit_depth = 0, color_type = 0;
+    const idat = [];
+    while(pos + 12 <= buf.length)
+    {
+        const len = buf.readUInt32BE(pos);
+        const typ = buf.toString("latin1", pos + 4, pos + 8);
+        const chunk = buf.subarray(pos + 8, pos + 8 + len);
+        pos += 12 + len;
+        if(typ === "IHDR")
+        {
+            width = chunk.readUInt32BE(0);
+            height = chunk.readUInt32BE(4);
+            bit_depth = chunk[8];
+            color_type = chunk[9];
+        }
+        else if(typ === "IDAT")
+        {
+            idat.push(chunk);
+        }
+        else if(typ === "IEND")
+        {
+            break;
+        }
+    }
+    if(bit_depth !== 8 || (color_type !== 2 && color_type !== 6))
+    {
+        throw new Error("unsupported png " + bit_depth + "/" + color_type);
+    }
+    const bpp = color_type === 6 ? 4 : 3;
+    const raw = zlib.inflateSync(Buffer.concat(idat));
+    const stride = width * bpp;
+    const rgba = Buffer.alloc(width * height * 4);
+    let i = 0;
+    let prev = Buffer.alloc(stride);
+    for(let y = 0; y < height; y++)
+    {
+        const filt = raw[i++];
+        const row = Buffer.from(raw.subarray(i, i + stride));
+        i += stride;
+        const recon = Buffer.alloc(stride);
+        for(let x = 0; x < stride; x++)
+        {
+            const a = x >= bpp ? recon[x - bpp] : 0;
+            const b = prev[x];
+            const c = x >= bpp ? prev[x - bpp] : 0;
+            let v = row[x];
+            if(filt === 1)
+            {
+                v = (v + a) & 255;
+            }
+            else if(filt === 2)
+            {
+                v = (v + b) & 255;
+            }
+            else if(filt === 3)
+            {
+                v = (v + ((a + b) >> 1)) & 255;
+            }
+            else if(filt === 4)
+            {
+                const p = a + b - c;
+                const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+                const pr = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+                v = (v + pr) & 255;
+            }
+            else if(filt !== 0)
+            {
+                throw new Error("bad png filter " + filt);
+            }
+            recon[x] = v;
+        }
+        prev = recon;
+        for(let x = 0; x < width; x++)
+        {
+            const si = x * bpp;
+            const di = (y * width + x) * 4;
+            rgba[di] = recon[si];
+            rgba[di + 1] = recon[si + 1];
+            rgba[di + 2] = recon[si + 2];
+            rgba[di + 3] = bpp === 4 ? recon[si + 3] : 255;
+        }
+    }
+    return { width, height, rgba };
+}
+
+function rgba_has_xp_start_button(rgba, width, height)
+{
+    if(!rgba || width < 80 || height < 40)
+    {
+        return false;
+    }
+    let greens = 0;
+    const y0 = height - 36;
+    for(let y = y0; y < height; y++)
+    {
+        for(let x = 0; x < 70; x++)
+        {
+            const o = (y * width + x) * 4;
+            const r = rgba[o], g = rgba[o + 1], b = rgba[o + 2];
+            if(g > 100 && g > r + 20 && g > b)
+            {
+                greens++;
+            }
+        }
+    }
+    return greens >= 80;
+}
+
+function expect_start_png(file)
+{
+    const name = path.basename(file);
+    if(/no_start|no-start|soak_live|soak_lma/.test(name))
+    {
+        return false;
+    }
+    return /15min|t15m08|_start\.png$|soak\.png$/.test(name);
+}
+
+if(process.argv[2] === "--check-start")
+{
+    const files = process.argv.slice(3);
+    if(!files.length)
+    {
+        console.error("xp64: --check-start needs PNG paths");
+        process.exit(2);
+    }
+    let failed = 0;
+    for(const file of files)
+    {
+        const img = decode_png_rgba(fs.readFileSync(file));
+        const hit = rgba_has_xp_start_button(img.rgba, img.width, img.height);
+        const expect = expect_start_png(file);
+        const ok = hit === expect;
+        if(!ok)
+        {
+            failed++;
+        }
+        console.log((ok ? "ok" : "FAIL") + " " + (hit ? "START" : "no-start") +
+            " expect=" + (expect ? "START" : "no-start") + " " + file);
+    }
+    process.exit(failed ? 1 : 0);
+}
 
 const CANDIDATES = [
     process.env.XP64_IMG,
@@ -148,8 +312,11 @@ if(!probe.pe_amd64 && probe.pe_i386)
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
 
-const TIMEOUT_MS = +process.env.XP64_TIMEOUT_MS || 180000;
+const UNTIL_START = process.env.XP64_UNTIL_START === "1" ||
+    process.env.XP64_UNTIL_START === "true";
+const TIMEOUT_MS = +process.env.XP64_TIMEOUT_MS || (UNTIL_START ? 20 * 60 * 1000 : 180000);
 const HOLD_MS = +process.env.XP64_HOLD_MS || 5000;
+const HEARTBEAT_MS = +process.env.XP64_HEARTBEAT_MS || 30000;
 // QEMU-installed XP x64 uses the ACPI HAL; Standard PC is XP64_ACPI=0.
 const ACPI = process.env.XP64_ACPI !== "0";
 
@@ -185,6 +352,9 @@ const MAX_SYSCALL_LOGS = 48;
 let pf_count = 0;
 let last_screenshot_score = -1;
 let saved_boot_menu = false;
+let boot_t0 = 0;
+let last_hb = 0;
+let hb_n = 0;
 const NTOS_BUGCHECK = 0xFFFFF80001041690n;
 const KI_BUGCHECK_DATA = 0xFFFFF800011A2880n;
 const NTOS_SYSCALL = 0xFFFFF80001040F40n;
@@ -1426,6 +1596,13 @@ function finish(code, message)
 
 emulator.add_listener("emulator-loaded", function()
 {
+    boot_t0 = Date.now();
+    last_hb = boot_t0;
+    if(UNTIL_START)
+    {
+        console.error("xp64: timing Start menu (timeout " + TIMEOUT_MS +
+            "ms heartbeat " + HEARTBEAT_MS + "ms)");
+    }
     const cpu0 = emulator.v86.cpu;
     const orig_reboot = cpu0.reboot_internal.bind(cpu0);
     cpu0.reboot_internal = function()
@@ -1580,7 +1757,8 @@ emulator.add_listener("emulator-loaded", function()
         if(cpu0.is_64[0] && !saw_is_64)
         {
             saw_is_64 = true;
-            console.error("xp64: CS.L gen=" + lma_generation + " " + dump_regs(cpu0));
+            console.error("xp64: T+" + format_elapsed(Date.now() - boot_t0) +
+                " CS.L gen=" + lma_generation + " " + dump_regs(cpu0));
             console.log("xp64: entered long mode");
             try
             {
@@ -1588,19 +1766,22 @@ emulator.add_listener("emulator-loaded", function()
             }
             catch(_e)
             {}
-            if(hold_timer)
+            if(!UNTIL_START)
             {
-                clearTimeout(hold_timer);
-            }
-            hold_timer = setTimeout(() => {
-                const efer_now = emulator.v86.cpu.efer[0] >>> 0;
-                if(!(efer_now & EFER_LMA))
+                if(hold_timer)
                 {
-                    return;
+                    clearTimeout(hold_timer);
                 }
-                finish(0, "xp64: pass (long mode held " + HOLD_MS +
-                    "ms gen=" + lma_generation + ")");
-            }, HOLD_MS);
+                hold_timer = setTimeout(() => {
+                    const efer_now = emulator.v86.cpu.efer[0] >>> 0;
+                    if(!(efer_now & EFER_LMA))
+                    {
+                        return;
+                    }
+                    finish(0, "xp64: pass (long mode held " + HOLD_MS +
+                        "ms gen=" + lma_generation + ")");
+                }, HOLD_MS);
+            }
         }
         const now = Date.now();
         if(now - last_log >= 2000)
@@ -1634,7 +1815,7 @@ emulator.add_listener("emulator-loaded", function()
                 catch(_e)
                 {}
             }
-            if(LOGON_RE.test(screen_text()))
+            if(!UNTIL_START && LOGON_RE.test(screen_text()))
             {
                 finish(0, "xp64: pass (logon text) gen=" + lma_generation +
                     "\n" + last_lma_line);
@@ -1661,6 +1842,30 @@ emulator.add_listener("emulator-loaded", function()
             }
             catch(_e)
             {}
+            if(UNTIL_START && boot_t0 && now - last_hb >= HEARTBEAT_MS)
+            {
+                last_hb = now;
+                hb_n++;
+                const elapsed = now - boot_t0;
+                let hit = false;
+                try
+                {
+                    const gfx = grab_vga_rgba();
+                    hit = !!(gfx && rgba_has_xp_start_button(gfx.rgba, gfx.width, gfx.height));
+                }
+                catch(_e)
+                {}
+                save_boot_screenshot("hb" + hb_n);
+                console.error("xp64: T+" + format_elapsed(elapsed) + " hb=" + hb_n +
+                    (hit ? " START" : " no-start"));
+                if(hit)
+                {
+                    save_boot_screenshot("start");
+                    finish(0, "xp64: start menu at T+" + format_elapsed(elapsed) +
+                        " (" + elapsed + "ms from emulator-loaded)");
+                    return orig_main_loop();
+                }
+            }
         }
         return orig_main_loop();
     };
@@ -1708,7 +1913,8 @@ setTimeout(() => {
     try
     {
         const cpu = emulator.v86.cpu;
-        const why = saw_is_64 ? "long mode seen but hold not finished" :
+        const why = UNTIL_START && saw_is_64 ? "Start button never appeared" :
+            saw_is_64 ? "long mode seen but hold not finished" :
             saw_lma ? "LMA without CS.L" :
             saw_lme ? "LME without LMA" :
             "never reached long mode (32-bit XP, ACPI HAL, or NTLDR died)";
