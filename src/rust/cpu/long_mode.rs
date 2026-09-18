@@ -2179,8 +2179,71 @@ unsafe fn dispatch_opcode(opcode: i32) {
     run_legacy_opcode(opcode);
 }
 
+fn is_legacy_prefix_byte(byte: i32) -> bool {
+    matches!(
+        byte,
+        0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3
+    )
+}
+
+unsafe fn apply_legacy_prefix(byte: i32) {
+    match byte {
+        0x26 => {
+            *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (ES as u8 + 1);
+        },
+        0x2E => {
+            *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (CS as u8 + 1);
+        },
+        0x36 => {
+            *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (SS as u8 + 1);
+        },
+        0x3E => {
+            *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (DS as u8 + 1);
+        },
+        0x64 => {
+            *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (FS as u8 + 1);
+        },
+        0x65 => {
+            *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (GS as u8 + 1);
+        },
+        0x66 => *prefixes |= prefix::PREFIX_MASK_OPSIZE,
+        0x67 => *prefixes |= prefix::PREFIX_MASK_ADDRSIZE,
+        0xF0 => {},
+        0xF2 => *prefixes |= prefix::PREFIX_REPNZ,
+        0xF3 => *prefixes |= prefix::PREFIX_REPZ,
+        _ => dbg_assert!(false),
+    }
+}
+
+unsafe fn dispatch_after_prefixes(byte: i32) {
+    if byte == 0x0F {
+        let opcode = return_on_pagefault!(read_imm8());
+        dispatch_two_byte(opcode);
+        return;
+    }
+    if byte >= 0x40 && byte <= 0x4F {
+        *rex_prefix = byte as u8;
+        let opcode = return_on_pagefault!(read_imm8());
+        if opcode == 0x0F {
+            let opcode = return_on_pagefault!(read_imm8());
+            dispatch_two_byte(opcode);
+            return;
+        }
+        dispatch_opcode(opcode);
+        return;
+    }
+    dispatch_opcode(byte);
+}
+
 /// Fetch prefixes + opcode at CS:RIP and execute one 64-bit-mode instruction.
 pub unsafe fn run_one() {
+    let byte = return_on_pagefault!(read_imm8());
+    run_one_after_first_byte(byte);
+}
+
+/// Like `run_one`, but the first instruction byte was already consumed from
+/// the physical fetch (same as the 32-bit interpreter's `mem8[phys]` path).
+pub unsafe fn run_one_after_first_byte(byte: i32) {
     dbg_assert!(*is_64);
     *rex_prefix = 0;
     *prefixes = 0;
@@ -2188,54 +2251,19 @@ pub unsafe fn run_one() {
     current_interp_opcode = 0;
     current_interp_0f = false;
 
-    loop {
-        let byte = return_on_pagefault!(read_imm8());
-        match byte {
-            0x26 => {
-                *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (ES as u8 + 1);
-            },
-            0x2E => {
-                *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (CS as u8 + 1);
-            },
-            0x36 => {
-                *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (SS as u8 + 1);
-            },
-            0x3E => {
-                *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (DS as u8 + 1);
-            },
-            0x64 => {
-                *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (FS as u8 + 1);
-            },
-            0x65 => {
-                *prefixes = *prefixes & !prefix::PREFIX_MASK_SEGMENT | (GS as u8 + 1);
-            },
-            0x66 => *prefixes |= prefix::PREFIX_MASK_OPSIZE,
-            0x67 => *prefixes |= prefix::PREFIX_MASK_ADDRSIZE,
-            0xF0 => {},
-            0xF2 => *prefixes |= prefix::PREFIX_REPNZ,
-            0xF3 => *prefixes |= prefix::PREFIX_REPZ,
-            0x40..=0x4F => {
-                *rex_prefix = byte as u8;
-                let opcode = return_on_pagefault!(read_imm8());
-                if opcode == 0x0F {
-                    let opcode = return_on_pagefault!(read_imm8());
-                    dispatch_two_byte(opcode);
-                    return;
-                }
-                dispatch_opcode(opcode);
-                return;
-            },
-            0x0F => {
-                let opcode = return_on_pagefault!(read_imm8());
-                dispatch_two_byte(opcode);
-                return;
-            },
-            _ => {
-                dispatch_opcode(byte);
-                return;
-            },
+    if is_legacy_prefix_byte(byte) {
+        apply_legacy_prefix(byte);
+        loop {
+            let next = return_on_pagefault!(read_imm8());
+            if is_legacy_prefix_byte(next) {
+                apply_legacy_prefix(next);
+                continue;
+            }
+            dispatch_after_prefixes(next);
+            return;
         }
     }
+    dispatch_after_prefixes(byte);
 }
 
 #[cfg(test)]
@@ -2335,6 +2363,26 @@ mod tests {
         assert!(opcode_invalid_in_64(0x27));
         assert!(!opcode_invalid_in_64(0x90));
         assert!(!opcode_invalid_in_64(0x8B));
+    }
+
+    #[test]
+    fn rex_and_two_byte_escape_are_not_legacy_prefixes() {
+        assert!(!is_legacy_prefix_byte(0x40));
+        assert!(!is_legacy_prefix_byte(0x48));
+        assert!(!is_legacy_prefix_byte(0x4F));
+        assert!(!is_legacy_prefix_byte(0x0F));
+        assert!(!is_legacy_prefix_byte(0x89));
+        assert!(is_legacy_prefix_byte(0x26));
+        assert!(is_legacy_prefix_byte(0x2E));
+        assert!(is_legacy_prefix_byte(0x36));
+        assert!(is_legacy_prefix_byte(0x3E));
+        assert!(is_legacy_prefix_byte(0x64));
+        assert!(is_legacy_prefix_byte(0x65));
+        assert!(is_legacy_prefix_byte(0x66));
+        assert!(is_legacy_prefix_byte(0x67));
+        assert!(is_legacy_prefix_byte(0xF0));
+        assert!(is_legacy_prefix_byte(0xF2));
+        assert!(is_legacy_prefix_byte(0xF3));
     }
 
     #[test]

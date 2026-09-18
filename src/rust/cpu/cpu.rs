@@ -3533,9 +3533,9 @@ pub unsafe fn read_imm8() -> OrPageFault<i32> {
     dbg_assert!(!memory::in_mapped_range((*eip_phys ^ eip) as u32));
     let data8 = *memory::mem8.offset((*eip_phys ^ eip) as isize) as i32;
     *instruction_pointer = eip + 1;
-    if *is_64 {
-        *rip = *instruction_pointer as u32 as u64;
-    }
+    // Low 4GiB 64-bit CS: get_rip() uses instruction_pointer while *rip is
+    // still <= 4GiB. Skip the extra store; sync_rip_from_instruction_pointer
+    // folds at the end of the interpreter batch.
     return Ok(data8);
 }
 
@@ -3556,9 +3556,6 @@ pub unsafe fn read_imm16() -> OrPageFault<i32> {
     else {
         let data16 = memory::read16((*eip_phys ^ *instruction_pointer) as u32);
         *instruction_pointer = *instruction_pointer + 2;
-        if *is_64 {
-            *rip = *instruction_pointer as u32 as u64;
-        }
         return Ok(data16);
     };
 }
@@ -3576,9 +3573,6 @@ pub unsafe fn read_imm32s() -> OrPageFault<i32> {
     else {
         let data32 = memory::read32s((*eip_phys ^ *instruction_pointer) as u32);
         *instruction_pointer = *instruction_pointer + 4;
-        if *is_64 {
-            *rip = *instruction_pointer as u32 as u64;
-        }
         return Ok(data32);
     };
 }
@@ -4774,7 +4768,14 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
         if *is_64 {
             *previous_ip = start_eip;
             *previous_rip = start_rip;
-            crate::cpu::long_mode::run_one();
+            let byte = *memory::mem8.offset(phys_addr as isize) as i32;
+            if start_rip > 0xFFFF_FFFF {
+                set_rip(start_rip + 1);
+            }
+            else {
+                *instruction_pointer = start_eip + 1;
+            }
+            crate::cpu::long_mode::run_one_after_first_byte(byte);
             #[cfg(debug_assertions)]
             note_kernel_stack_drop(start_rip);
         }
