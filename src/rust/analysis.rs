@@ -224,7 +224,7 @@ fn high_rip_may_jit_32bit_alu(
     )
 }
 
-/// Low-RIP REX.W MOV/ALU the i64 JIT can emit, including R8–R15 (REX.R/B/X)
+/// Low-RIP REX.W MOV/ALU/LEA the i64 JIT can emit, including R8–R15 (REX.R/B/X)
 /// and memory ModRM. ADC/SBB (/2 /3) and any legacy prefix stay interpreted.
 pub fn rexw_alu_may_jit(rex: u8, opcode: u8, next: u8, prefixes: u8) -> bool {
     if rex & long_mode::REX_W == 0 || prefixes != 0 {
@@ -274,6 +274,7 @@ fn long_cs_alu_opcode_ok(opcode: u8, next: u8) -> bool {
             let group = next >> 3 & 7;
             group != 2 && group != 3
         },
+        0x8D => next < 0xC0,
         _ => false,
     }
 }
@@ -297,8 +298,7 @@ pub fn opcode_needs_long_trampoline(
         if opcode_0f_needs_long_trampoline(next, next2, prefixes) {
             return true;
         }
-    }
-    else if long_mode::opcode_is_forced64(opcode as i32) {
+    } else if long_mode::opcode_is_forced64(opcode as i32) {
         return true;
     }
     if rex != 0 {
@@ -323,13 +323,14 @@ pub fn opcode_needs_long_trampoline(
     false
 }
 
-fn peek_imm8(cpu: &CpuContext) -> u8 { peek_imm8_at(cpu, 0) }
+fn peek_imm8(cpu: &CpuContext) -> u8 {
+    peek_imm8_at(cpu, 0)
+}
 
 fn peek_imm8_at(cpu: &CpuContext, off: u32) -> u8 {
     if (cpu.eip as u32 & 0xFFF) + off > 0xFFF {
         0
-    }
-    else {
+    } else {
         memory::read8(cpu.eip.wrapping_add(off)) as u8
     }
 }
@@ -338,8 +339,7 @@ fn fixup_imm64_skip(cpu: &mut CpuContext, opcode: u8) {
     if cpu.rex_prefix & long_mode::REX_W != 0 && (0xB8..=0xBF).contains(&opcode) {
         if cpu.osize_32() {
             let _ = cpu.read_imm32();
-        }
-        else {
+        } else {
             let _ = cpu.read_imm16();
             let _ = cpu.read_imm32();
         }
@@ -434,7 +434,9 @@ pub fn instr_F3_analyze(cpu: &mut CpuContext, analysis: &mut Analysis) {
     analyze_step_handle_prefix(cpu, analysis)
 }
 
-pub fn modrm_analyze(ctx: &mut CpuContext, modrm_byte: u8) { modrm::skip(ctx, modrm_byte); }
+pub fn modrm_analyze(ctx: &mut CpuContext, modrm_byte: u8) {
+    modrm::skip(ctx, modrm_byte);
+}
 
 #[cfg(test)]
 mod tests {
@@ -532,9 +534,11 @@ mod tests {
             0x00,
             false
         ));
-        // C7 / LEA / 8-bit / ADC stay interpreted.
+        // C7 / 8-bit / ADC stay interpreted. LEA memory compiles.
         assert!(needs(0, 0xC7, 0x44, false));
-        assert!(needs(0, 0x8D, 0x05, false));
+        assert!(!needs(0, 0x8D, 0x05, false));
+        assert!(!needs(long_mode::REX_W, 0x8D, 0x05, false));
+        assert!(needs(0, 0x8D, 0xC0, false));
         assert!(needs(0, 0x00, 0x00, false));
         assert!(needs(0, 0x11, 0x00, false));
         assert!(needs(long_mode::REX_W, 0xC7, 0x00, false));

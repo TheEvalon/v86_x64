@@ -63,7 +63,7 @@ fail32:
 BITS 64
 start64:
     ; Register and whitelist memory REX.W MOV/ALU compile as wasm i64 (low
-    ; RIP), including R8–R15. ADC/SBB, C7, LEA, FS/GS, and high RIP still
+    ; RIP), including R8–R15 and LEA. ADC/SBB, C7, FS/GS, and high RIP still
     ; trampoline. The 32-bit-opsize loop below stays on the 32-bit helpers
     ; except memory forms, which use a 64-bit EA.
     mov rax, 0x1122334455667788
@@ -307,6 +307,18 @@ start64:
     cmp rax, rbx
     jne fail_sib
 
+    ; LEA: RIP-relative and 32-bit dest zero-extend.
+    lea rax, [rel test_qword]
+    mov rcx, [rax]
+    mov rbx, 0x1122334455667789
+    cmp rcx, rbx
+    jne fail_lea
+    mov rax, 0x000007FF12345678
+    lea eax, [rax]
+    mov rcx, 0x12345678
+    cmp rax, rcx
+    jne fail_lea
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -351,6 +363,9 @@ fail_rip:
     jmp fail_out
 fail_sib:
     mov al, 14
+    jmp fail_out
+fail_lea:
+    mov al, 15
     jmp fail_out
 fail64:
     mov al, 1
