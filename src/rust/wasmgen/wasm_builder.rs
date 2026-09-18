@@ -791,10 +791,13 @@ impl WasmBuilder {
     pub fn add_i32(&mut self) { self.instruction_body.push(op::OP_I32ADD); }
     pub fn add_i64(&mut self) { self.instruction_body.push(op::OP_I64ADD); }
     pub fn sub_i32(&mut self) { self.instruction_body.push(op::OP_I32SUB); }
+    pub fn sub_i64(&mut self) { self.instruction_body.push(op::OP_I64SUB); }
     pub fn and_i32(&mut self) { self.instruction_body.push(op::OP_I32AND); }
+    pub fn and_i64(&mut self) { self.instruction_body.push(op::OP_I64AND); }
     pub fn or_i32(&mut self) { self.instruction_body.push(op::OP_I32OR); }
     pub fn or_i64(&mut self) { self.instruction_body.push(op::OP_I64OR); }
     pub fn xor_i32(&mut self) { self.instruction_body.push(op::OP_I32XOR); }
+    pub fn xor_i64(&mut self) { self.instruction_body.push(op::OP_I64XOR); }
     pub fn mul_i32(&mut self) { self.instruction_body.push(op::OP_I32MUL); }
     pub fn mul_i64(&mut self) { self.instruction_body.push(op::OP_I64MUL); }
     pub fn div_i64(&mut self) { self.instruction_body.push(op::OP_I64DIVU); }
@@ -824,6 +827,8 @@ impl WasmBuilder {
     pub fn leu_i32(&mut self) { self.instruction_body.push(op::OP_I32LEU); }
 
     pub fn gtu_i64(&mut self) { self.instruction_body.push(op::OP_I64GTU); }
+    pub fn lt_i64(&mut self) { self.instruction_body.push(op::OP_I64LTS); }
+    pub fn ltu_i64(&mut self) { self.instruction_body.push(op::OP_I64LTU); }
 
     pub fn reinterpret_i32_as_f32(&mut self) {
         self.instruction_body.push(op::OP_F32REINTERPRETI32);
@@ -848,6 +853,7 @@ impl WasmBuilder {
     pub fn wrap_i64_to_i32(&mut self) { self.instruction_body.push(op::OP_I32WRAPI64); }
 
     pub fn eqz_i32(&mut self) { self.instruction_body.push(op::OP_I32EQZ); }
+    pub fn eqz_i64(&mut self) { self.instruction_body.push(op::OP_I64EQZ); }
 
     pub fn select(&mut self) { self.instruction_body.push(op::OP_SELECT); }
 

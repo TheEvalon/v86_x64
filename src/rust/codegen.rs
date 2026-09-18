@@ -1,6 +1,7 @@
 use crate::cpu::cpu::{
-    tlb_data, FLAG_CARRY, FLAG_OVERFLOW, FLAG_SIGN, FLAG_ZERO, OPSIZE_16, OPSIZE_32, OPSIZE_8,
-    TLB_GLOBAL, TLB_HAS_CODE, TLB_NO_EXEC, TLB_NO_USER, TLB_READONLY, TLB_VALID,
+    tlb_data, FLAG_ADJUST, FLAG_CARRY, FLAG_OVERFLOW, FLAG_PARITY, FLAG_SIGN, FLAG_ZERO, OPSIZE_16,
+    OPSIZE_32, OPSIZE_8, TLB_GLOBAL, TLB_HAS_CODE, TLB_NO_EXEC, TLB_NO_USER, TLB_READONLY,
+    TLB_VALID,
 };
 use crate::cpu::global_pointers;
 use crate::cpu::memory;
@@ -318,6 +319,179 @@ pub fn gen_set_reg32(ctx: &mut JitContext, r: u32) {
     // IA-32e zero-extends 32-bit GPR writes in both 64-bit and compatibility
     // mode. Match write_reg32 even when this block was compiled with CS.L=0.
     gen_zero_reg_high32(ctx.builder, r);
+}
+
+/// Push RAX–RDI as i64: wasm local (low 32) | `reg_high32[r]` << 32.
+pub fn gen_get_reg64(ctx: &mut JitContext, r: u32) {
+    dbg_assert!(r < 8);
+    ctx.builder.get_local(&ctx.register_locals[r as usize]);
+    ctx.builder.extend_unsigned_i32_to_i64();
+    ctx.builder
+        .load_fixed_i32(global_pointers::get_reg_high32_offset(r));
+    ctx.builder.extend_unsigned_i32_to_i64();
+    ctx.builder.const_i64(32);
+    ctx.builder.shl_i64();
+    ctx.builder.or_i64();
+}
+
+/// Pop i64 into RAX–RDI: low half stays in the wasm local, high half in `reg_high32`.
+pub fn gen_set_reg64(ctx: &mut JitContext, r: u32) {
+    dbg_assert!(r < 8);
+    let val = ctx.builder.set_new_local_i64();
+    ctx.builder.get_local_i64(&val);
+    ctx.builder.wrap_i64_to_i32();
+    ctx.builder.set_local(&ctx.register_locals[r as usize]);
+    ctx.builder
+        .const_i32(global_pointers::get_reg_high32_offset(r) as i32);
+    ctx.builder.get_local_i64(&val);
+    ctx.builder.const_i64(32);
+    ctx.builder.shr_u_i64();
+    ctx.builder.wrap_i64_to_i32();
+    ctx.builder.store_aligned_i32(0);
+    ctx.builder.free_local_i64(val);
+}
+
+#[derive(Copy, Clone)]
+pub enum Arith64Kind {
+    Add,
+    Sub,
+    Logic,
+}
+
+fn gen_or_flag_from_bool(builder: &mut WasmBuilder, f: &WasmLocal, bit: i32) {
+    builder.const_i32(bit.trailing_zeros() as i32);
+    builder.shl_i32();
+    builder.get_local(f);
+    builder.or_i32();
+    builder.set_local(f);
+}
+
+fn gen_af64(
+    builder: &mut WasmBuilder,
+    a: &WasmLocalI64,
+    b: &WasmLocalI64,
+    res: &WasmLocalI64,
+    f: &WasmLocal,
+) {
+    builder.get_local_i64(a);
+    builder.get_local_i64(b);
+    builder.xor_i64();
+    builder.get_local_i64(res);
+    builder.xor_i64();
+    builder.const_i64(0x10);
+    builder.and_i64();
+    builder.const_i64(0);
+    builder.ne_i64();
+    gen_or_flag_from_bool(builder, f, FLAG_ADJUST);
+}
+
+fn gen_pf64(builder: &mut WasmBuilder, res: &WasmLocalI64, f: &WasmLocal) {
+    builder.get_local_i64(res);
+    builder.wrap_i64_to_i32();
+    builder.const_i32(0xFF);
+    builder.and_i32();
+    let p = builder.set_new_local();
+    builder.get_local(&p);
+    builder.get_local(&p);
+    builder.const_i32(4);
+    builder.shr_u_i32();
+    builder.xor_i32();
+    builder.set_local(&p);
+    builder.get_local(&p);
+    builder.get_local(&p);
+    builder.const_i32(2);
+    builder.shr_u_i32();
+    builder.xor_i32();
+    builder.set_local(&p);
+    builder.get_local(&p);
+    builder.get_local(&p);
+    builder.const_i32(1);
+    builder.shr_u_i32();
+    builder.xor_i32();
+    builder.const_i32(1);
+    builder.and_i32();
+    builder.eqz_i32();
+    gen_or_flag_from_bool(builder, f, FLAG_PARITY);
+    builder.free_local(p);
+}
+
+/// Eager 64-bit flags matching `set_arith_flags64`. Lazy 32-bit last_op1/last_result
+/// cannot represent SF/OF at bit 63, so compiled REX.W ALU writes `flags` here.
+pub fn gen_set_arith_flags64(
+    ctx: &mut JitContext,
+    a: &WasmLocalI64,
+    b: &WasmLocalI64,
+    res: &WasmLocalI64,
+    kind: Arith64Kind,
+) {
+    ctx.builder.const_i32(global_pointers::flags_changed as i32);
+    ctx.builder.const_i32(0);
+    ctx.builder.store_aligned_i32(0);
+
+    let arith = FLAG_CARRY | FLAG_PARITY | FLAG_ADJUST | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW;
+    ctx.builder.const_i32(global_pointers::flags as i32);
+    gen_get_flags(ctx.builder);
+    ctx.builder.const_i32(!arith);
+    ctx.builder.and_i32();
+    let f = ctx.builder.set_new_local();
+
+    match kind {
+        Arith64Kind::Add => {
+            ctx.builder.get_local_i64(res);
+            ctx.builder.get_local_i64(a);
+            ctx.builder.ltu_i64();
+            gen_or_flag_from_bool(ctx.builder, &f, FLAG_CARRY);
+
+            ctx.builder.get_local_i64(a);
+            ctx.builder.get_local_i64(res);
+            ctx.builder.xor_i64();
+            ctx.builder.get_local_i64(b);
+            ctx.builder.get_local_i64(res);
+            ctx.builder.xor_i64();
+            ctx.builder.and_i64();
+            ctx.builder.const_i64(0);
+            ctx.builder.lt_i64();
+            gen_or_flag_from_bool(ctx.builder, &f, FLAG_OVERFLOW);
+
+            gen_af64(ctx.builder, a, b, res, &f);
+        },
+        Arith64Kind::Sub => {
+            ctx.builder.get_local_i64(a);
+            ctx.builder.get_local_i64(b);
+            ctx.builder.ltu_i64();
+            gen_or_flag_from_bool(ctx.builder, &f, FLAG_CARRY);
+
+            ctx.builder.get_local_i64(a);
+            ctx.builder.get_local_i64(b);
+            ctx.builder.xor_i64();
+            ctx.builder.get_local_i64(a);
+            ctx.builder.get_local_i64(res);
+            ctx.builder.xor_i64();
+            ctx.builder.and_i64();
+            ctx.builder.const_i64(0);
+            ctx.builder.lt_i64();
+            gen_or_flag_from_bool(ctx.builder, &f, FLAG_OVERFLOW);
+
+            gen_af64(ctx.builder, a, b, res, &f);
+        },
+        Arith64Kind::Logic => {},
+    }
+
+    ctx.builder.get_local_i64(res);
+    ctx.builder.eqz_i64();
+    gen_or_flag_from_bool(ctx.builder, &f, FLAG_ZERO);
+
+    ctx.builder.get_local_i64(res);
+    ctx.builder.const_i64(0);
+    ctx.builder.lt_i64();
+    gen_or_flag_from_bool(ctx.builder, &f, FLAG_SIGN);
+
+    gen_pf64(ctx.builder, res, &f);
+
+    ctx.builder.const_i32(global_pointers::flags as i32);
+    ctx.builder.get_local(&f);
+    ctx.builder.store_aligned_i32(0);
+    ctx.builder.free_local(f);
 }
 
 pub fn decr_exc_asize(ctx: &mut JitContext) {
