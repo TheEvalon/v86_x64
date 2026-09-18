@@ -4,7 +4,9 @@ use crate::cpu::cpu::{
     TLB_VALID,
 };
 use crate::cpu::global_pointers;
+use crate::cpu::long_mode;
 use crate::cpu::memory;
+use crate::cpu::modrm::trailing_imm_after_modrm;
 use crate::jit::{Instruction, InstructionOperand, InstructionOperandDest, JitContext};
 use crate::modrm;
 use crate::modrm::ModrmByte;
@@ -321,34 +323,308 @@ pub fn gen_set_reg32(ctx: &mut JitContext, r: u32) {
     gen_zero_reg_high32(ctx.builder, r);
 }
 
-/// Push RAX–RDI as i64: wasm local (low 32) | `reg_high32[r]` << 32.
+/// Push RAX–R15 as i64. RAX–RDI: wasm local (low 32) | `reg_high32[r]` << 32.
+/// R8–R15 live in the `reg_r8` array (not JIT locals).
 pub fn gen_get_reg64(ctx: &mut JitContext, r: u32) {
-    dbg_assert!(r < 8);
-    ctx.builder.get_local(&ctx.register_locals[r as usize]);
-    ctx.builder.extend_unsigned_i32_to_i64();
-    ctx.builder
-        .load_fixed_i32(global_pointers::get_reg_high32_offset(r));
-    ctx.builder.extend_unsigned_i32_to_i64();
-    ctx.builder.const_i64(32);
-    ctx.builder.shl_i64();
-    ctx.builder.or_i64();
+    dbg_assert!(r < 16);
+    if r < 8 {
+        ctx.builder.get_local(&ctx.register_locals[r as usize]);
+        ctx.builder.extend_unsigned_i32_to_i64();
+        ctx.builder
+            .load_fixed_i32(global_pointers::get_reg_high32_offset(r));
+        ctx.builder.extend_unsigned_i32_to_i64();
+        ctx.builder.const_i64(32);
+        ctx.builder.shl_i64();
+        ctx.builder.or_i64();
+    }
+    else {
+        ctx.builder
+            .load_fixed_i64(global_pointers::get_reg_r8_offset(r));
+    }
 }
 
-/// Pop i64 into RAX–RDI: low half stays in the wasm local, high half in `reg_high32`.
+/// Pop i64 into RAX–R15: RAX–RDI keep the low half in the wasm local.
 pub fn gen_set_reg64(ctx: &mut JitContext, r: u32) {
-    dbg_assert!(r < 8);
-    let val = ctx.builder.set_new_local_i64();
-    ctx.builder.get_local_i64(&val);
-    ctx.builder.wrap_i64_to_i32();
-    ctx.builder.set_local(&ctx.register_locals[r as usize]);
-    ctx.builder
-        .const_i32(global_pointers::get_reg_high32_offset(r) as i32);
-    ctx.builder.get_local_i64(&val);
-    ctx.builder.const_i64(32);
-    ctx.builder.shr_u_i64();
-    ctx.builder.wrap_i64_to_i32();
-    ctx.builder.store_aligned_i32(0);
-    ctx.builder.free_local_i64(val);
+    dbg_assert!(r < 16);
+    if r < 8 {
+        let val = ctx.builder.set_new_local_i64();
+        ctx.builder.get_local_i64(&val);
+        ctx.builder.wrap_i64_to_i32();
+        ctx.builder.set_local(&ctx.register_locals[r as usize]);
+        ctx.builder
+            .const_i32(global_pointers::get_reg_high32_offset(r) as i32);
+        ctx.builder.get_local_i64(&val);
+        ctx.builder.const_i64(32);
+        ctx.builder.shr_u_i64();
+        ctx.builder.wrap_i64_to_i32();
+        ctx.builder.store_aligned_i32(0);
+        ctx.builder.free_local_i64(val);
+    }
+    else {
+        let val = ctx.builder.set_new_local_i64();
+        ctx.builder
+            .const_i32(global_pointers::get_reg_r8_offset(r) as i32);
+        ctx.builder.get_local_i64(&val);
+        ctx.builder.store_aligned_i64(0);
+        ctx.builder.free_local_i64(val);
+    }
+}
+
+/// Push the low 32 bits of RAX–R15. R8–R15 wrap the `reg_r8` qword.
+pub fn gen_get_reg32x(ctx: &mut JitContext, r: u32) {
+    dbg_assert!(r < 16);
+    if r < 8 {
+        gen_get_reg32(ctx, r);
+    }
+    else {
+        ctx.builder
+            .load_fixed_i64(global_pointers::get_reg_r8_offset(r));
+        ctx.builder.wrap_i64_to_i32();
+    }
+}
+
+/// Pop i32 into RAX–R15 and zero-extend to 64 bits (IA-32e 32-bit GPR write).
+pub fn gen_set_reg32x(ctx: &mut JitContext, r: u32) {
+    dbg_assert!(r < 16);
+    if r < 8 {
+        gen_set_reg32(ctx, r);
+    }
+    else {
+        ctx.builder.extend_unsigned_i32_to_i64();
+        let val = ctx.builder.set_new_local_i64();
+        ctx.builder
+            .const_i32(global_pointers::get_reg_r8_offset(r) as i32);
+        ctx.builder.get_local_i64(&val);
+        ctx.builder.store_aligned_i64(0);
+        ctx.builder.free_local_i64(val);
+    }
+}
+
+pub fn gen_set_pending_linear64(builder: &mut WasmBuilder, ea: &WasmLocalI64) {
+    builder.const_i32(global_pointers::pending_linear64 as i32);
+    builder.get_local_i64(ea);
+    builder.store_aligned_i64(0);
+}
+
+pub fn gen_clear_pending_linear64(builder: &mut WasmBuilder) {
+    builder.const_i32(global_pointers::pending_linear64 as i32);
+    builder.const_i64(0);
+    builder.store_aligned_i64(0);
+}
+
+fn gen_ea64_is_low32(builder: &mut WasmBuilder, ea: &WasmLocalI64) {
+    builder.get_local_i64(ea);
+    builder.const_i64(32);
+    builder.shr_u_i64();
+    builder.eqz_i64();
+}
+
+fn gen_ea64_is_high32(builder: &mut WasmBuilder, ea: &WasmLocalI64) {
+    gen_ea64_is_low32(builder, ea);
+    builder.eqz_i32();
+}
+
+fn gen_wrap_ea64(builder: &mut WasmBuilder, ea: &WasmLocalI64) -> WasmLocal {
+    builder.get_local_i64(ea);
+    builder.wrap_i64_to_i32();
+    builder.set_new_local()
+}
+
+/// 64-bit CS effective address: REX.B/X, SIB, RIP-relative. FS/GS stay
+/// trampolined (`prefixes != 0`), so this does not add a segment base.
+pub fn gen_modrm64_ea(ctx: &mut JitContext, modrm_byte: u8, opcode: u8) -> WasmLocalI64 {
+    dbg_assert!(modrm_byte < 0xC0);
+    let rex = ctx.cpu.rex_prefix;
+    let rm_low = modrm_byte & 7;
+    let modb = modrm_byte >> 6;
+
+    if rm_low == 4 {
+        gen_sib64_ea(ctx, modb != 0);
+        if modb == 1 {
+            let d = ctx.cpu.read_imm8s() as i64;
+            if d != 0 {
+                ctx.builder.const_i64(d);
+                ctx.builder.add_i64();
+            }
+        }
+        else if modb == 2 {
+            let d = ctx.cpu.read_imm32() as i32 as i64;
+            if d != 0 {
+                ctx.builder.const_i64(d);
+                ctx.builder.add_i64();
+            }
+        }
+        return ctx.builder.set_new_local_i64();
+    }
+
+    if rm_low == 5 && modb == 0 {
+        let disp = ctx.cpu.read_imm32() as i32 as i64;
+        if rex & long_mode::REX_B != 0 {
+            gen_get_reg64(ctx, 13);
+            if disp != 0 {
+                ctx.builder.const_i64(disp);
+                ctx.builder.add_i64();
+            }
+            return ctx.builder.set_new_local_i64();
+        }
+        let tail = trailing_imm_after_modrm(opcode as u32 | 0x100, false, modrm_byte as i32);
+        let rip = ctx.virt_page as u64 | ctx.cpu.eip as u64 & 0xFFF;
+        let ea = rip.wrapping_add(tail as u64).wrapping_add(disp as u64);
+        ctx.builder.const_i64(ea as i64);
+        return ctx.builder.set_new_local_i64();
+    }
+
+    let rm = rm_low | if rex & long_mode::REX_B != 0 { 8 } else { 0 };
+    gen_get_reg64(ctx, rm as u32);
+    if modb == 1 {
+        let d = ctx.cpu.read_imm8s() as i64;
+        if d != 0 {
+            ctx.builder.const_i64(d);
+            ctx.builder.add_i64();
+        }
+    }
+    else if modb == 2 {
+        let d = ctx.cpu.read_imm32() as i32 as i64;
+        if d != 0 {
+            ctx.builder.const_i64(d);
+            ctx.builder.add_i64();
+        }
+    }
+    ctx.builder.set_new_local_i64()
+}
+
+/// Leaves the SIB effective address (i64) on the stack.
+fn gen_sib64_ea(ctx: &mut JitContext, mod_has_disp: bool) {
+    let sib = ctx.cpu.read_imm8();
+    let rex = ctx.cpu.rex_prefix;
+    let base_low = sib & 7;
+    let index_low = sib >> 3 & 7;
+    let scale = sib >> 6 & 3;
+    let base = base_low | if rex & long_mode::REX_B != 0 { 8 } else { 0 };
+    let index = index_low | if rex & long_mode::REX_X != 0 { 8 } else { 0 };
+
+    let mut have = false;
+    if base_low == 5 && !mod_has_disp {
+        let disp = ctx.cpu.read_imm32() as i32 as i64;
+        if rex & long_mode::REX_B != 0 {
+            gen_get_reg64(ctx, 13);
+            have = true;
+            if disp != 0 {
+                ctx.builder.const_i64(disp);
+                ctx.builder.add_i64();
+            }
+        }
+        else if disp != 0 {
+            ctx.builder.const_i64(disp);
+            have = true;
+        }
+    }
+    else {
+        gen_get_reg64(ctx, base as u32);
+        have = true;
+    }
+
+    if index_low != 4 || rex & long_mode::REX_X != 0 {
+        gen_get_reg64(ctx, index as u32);
+        if scale != 0 {
+            ctx.builder.const_i64(scale as i64);
+            ctx.builder.shl_i64();
+        }
+        if have {
+            ctx.builder.add_i64();
+        }
+        have = true;
+    }
+
+    if !have {
+        ctx.builder.const_i64(0);
+    }
+}
+
+/// Load DWORD/QWORD from a 64-bit EA. Low 4GiB uses `tlb_data`; higher-half
+/// stashes `pending_linear64` and takes the slow_jit path (tlb_data aliases).
+///
+/// Do not wrap `gen_safe_read` in `if_i32`/`if_i64`: it emits an inner
+/// `block_void` plus a load, and a typed if around that fails wasm
+/// validation (`expected 0 elements on the stack for fallthru, found 2`).
+pub fn gen_safe_read_ea64(ctx: &mut JitContext, bits: BitSize, ea: &WasmLocalI64) {
+    dbg_assert!(bits == BitSize::DWORD || bits == BitSize::QWORD);
+    let addr = gen_wrap_ea64(ctx.builder, ea);
+    if bits == BitSize::QWORD {
+        ctx.builder.const_i64(0);
+        let result = ctx.builder.set_new_local_i64();
+        let done = ctx.builder.block_void();
+        gen_ea64_is_high32(ctx.builder, ea);
+        ctx.builder.if_void();
+        {
+            gen_set_pending_linear64(ctx.builder, ea);
+            gen_safe_read_slow_only(ctx, bits, &addr);
+            ctx.builder.set_local_i64(&result);
+            gen_clear_pending_linear64(ctx.builder);
+            ctx.builder.br(done);
+        }
+        ctx.builder.block_end();
+        gen_safe_read(ctx, bits, &addr, None);
+        ctx.builder.set_local_i64(&result);
+        ctx.builder.block_end();
+        ctx.builder.get_local_i64(&result);
+        ctx.builder.free_local_i64(result);
+    }
+    else {
+        ctx.builder.const_i32(0);
+        let result = ctx.builder.set_new_local();
+        let done = ctx.builder.block_void();
+        gen_ea64_is_high32(ctx.builder, ea);
+        ctx.builder.if_void();
+        {
+            gen_set_pending_linear64(ctx.builder, ea);
+            gen_safe_read_slow_only(ctx, bits, &addr);
+            ctx.builder.set_local(&result);
+            gen_clear_pending_linear64(ctx.builder);
+            ctx.builder.br(done);
+        }
+        ctx.builder.block_end();
+        gen_safe_read(ctx, bits, &addr, None);
+        ctx.builder.set_local(&result);
+        ctx.builder.block_end();
+        ctx.builder.get_local(&result);
+        ctx.builder.free_local(result);
+    }
+    ctx.builder.free_local(addr);
+}
+
+pub fn gen_safe_write32_ea64(ctx: &mut JitContext, ea: &WasmLocalI64, value: &WasmLocal) {
+    let addr = gen_wrap_ea64(ctx.builder, ea);
+    let done = ctx.builder.block_void();
+    gen_ea64_is_high32(ctx.builder, ea);
+    ctx.builder.if_void();
+    {
+        gen_set_pending_linear64(ctx.builder, ea);
+        gen_safe_write_slow_only(ctx, BitSize::DWORD, &addr, GenSafeWriteValue::I32(value));
+        gen_clear_pending_linear64(ctx.builder);
+        ctx.builder.br(done);
+    }
+    ctx.builder.block_end();
+    gen_safe_write32(ctx, &addr, value);
+    ctx.builder.block_end();
+    ctx.builder.free_local(addr);
+}
+
+pub fn gen_safe_write64_ea64(ctx: &mut JitContext, ea: &WasmLocalI64, value: &WasmLocalI64) {
+    let addr = gen_wrap_ea64(ctx.builder, ea);
+    let done = ctx.builder.block_void();
+    gen_ea64_is_high32(ctx.builder, ea);
+    ctx.builder.if_void();
+    {
+        gen_set_pending_linear64(ctx.builder, ea);
+        gen_safe_write_slow_only(ctx, BitSize::QWORD, &addr, GenSafeWriteValue::I64(value));
+        gen_clear_pending_linear64(ctx.builder);
+        ctx.builder.br(done);
+    }
+    ctx.builder.block_end();
+    gen_safe_write64(ctx, &addr, value);
+    ctx.builder.block_end();
+    ctx.builder.free_local(addr);
 }
 
 #[derive(Copy, Clone)]
@@ -429,7 +705,8 @@ pub fn gen_set_arith_flags64(
     ctx.builder.store_aligned_i32(0);
 
     let arith = FLAG_CARRY | FLAG_PARITY | FLAG_ADJUST | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW;
-    ctx.builder.const_i32(global_pointers::flags as i32);
+    // `load_fixed` already pushes the flags address; a second const here leaked
+    // an i32 per REX.W ALU and failed wasm validation at the next Jcc.
     gen_get_flags(ctx.builder);
     ctx.builder.const_i32(!arith);
     ctx.builder.and_i32();
@@ -1218,6 +1495,86 @@ fn gen_safe_write(
         BitSize::DQWORD => {}, // handled above
     }
 
+    ctx.builder.free_local(entry_local);
+}
+
+/// Always take `safe_read*_slow_jit`. Used for VAs above 4GiB, where `tlb_data`
+/// is indexed by the truncated low 32 bits and would alias a low mapping.
+fn gen_safe_read_slow_only(ctx: &mut JitContext, bits: BitSize, address_local: &WasmLocal) {
+    dbg_assert!(bits == BitSize::DWORD || bits == BitSize::QWORD);
+    ctx.builder.get_local(address_local);
+    ctx.builder
+        .const_i32(ctx.start_of_current_instruction as i32 & 0xFFF);
+    match bits {
+        BitSize::DWORD => ctx.builder.call_fn2_ret("safe_read32s_slow_jit"),
+        BitSize::QWORD => ctx.builder.call_fn2_ret("safe_read64s_slow_jit"),
+        _ => unreachable!(),
+    }
+    let entry_local = ctx.builder.tee_new_local();
+    ctx.builder.const_i32(1);
+    ctx.builder.and_i32();
+    ctx.builder.br_if(ctx.exit_with_fault_label);
+
+    ctx.builder.get_local(&entry_local);
+    ctx.builder.const_i32(!0xFFF);
+    ctx.builder.and_i32();
+    ctx.builder.get_local(address_local);
+    ctx.builder.xor_i32();
+    match bits {
+        BitSize::DWORD => ctx.builder.load_unaligned_i32(0),
+        BitSize::QWORD => ctx.builder.load_unaligned_i64(0),
+        _ => unreachable!(),
+    }
+    ctx.builder.free_local(entry_local);
+}
+
+fn gen_safe_write_slow_only(
+    ctx: &mut JitContext,
+    bits: BitSize,
+    address_local: &WasmLocal,
+    value_local: GenSafeWriteValue,
+) {
+    dbg_assert!(bits == BitSize::DWORD || bits == BitSize::QWORD);
+    ctx.builder.get_local(address_local);
+    match value_local {
+        GenSafeWriteValue::I32(local) => ctx.builder.get_local(local),
+        GenSafeWriteValue::I64(local) => ctx.builder.get_local_i64(local),
+        GenSafeWriteValue::TwoI64s(_, _) => unreachable!(),
+    }
+    ctx.builder.const_i32(
+        ctx.start_of_current_instruction as i32 & 0xFFF
+            | (ctx.wasm_table_index.to_u16() as i32) << 16,
+    );
+    match bits {
+        BitSize::DWORD => {
+            ctx.builder.call_fn3_ret("safe_write32_slow_jit");
+        },
+        BitSize::QWORD => {
+            ctx.builder
+                .call_fn3_i32_i64_i32_ret("safe_write64_slow_jit");
+        },
+        _ => unreachable!(),
+    }
+    let entry_local = ctx.builder.tee_new_local();
+    ctx.builder.const_i32(1);
+    ctx.builder.and_i32();
+    ctx.builder.br_if(ctx.exit_with_fault_label);
+
+    ctx.builder.get_local(&entry_local);
+    ctx.builder.const_i32(!0xFFF);
+    ctx.builder.and_i32();
+    ctx.builder.get_local(address_local);
+    ctx.builder.xor_i32();
+    match value_local {
+        GenSafeWriteValue::I32(local) => ctx.builder.get_local(local),
+        GenSafeWriteValue::I64(local) => ctx.builder.get_local_i64(local),
+        GenSafeWriteValue::TwoI64s(_, _) => unreachable!(),
+    }
+    match bits {
+        BitSize::DWORD => ctx.builder.store_unaligned_i32(0),
+        BitSize::QWORD => ctx.builder.store_unaligned_i64(0),
+        _ => unreachable!(),
+    }
     ctx.builder.free_local(entry_local);
 }
 

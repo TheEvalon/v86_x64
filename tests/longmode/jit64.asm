@@ -62,9 +62,10 @@ fail32:
 
 BITS 64
 start64:
-    ; Register-form REX.W MOV/ALU compile as wasm i64 (low RIP). Memory,
-    ; R8–R15, ADC/SBB, and high RIP still trampoline. The 32-bit-opsize
-    ; loop below stays on the existing 32-bit JIT helpers.
+    ; Register and whitelist memory REX ALU/MOV compile (low RIP), including
+    ; R8–R15, 32-bit REX, LEA, and C7 MOV r/m,imm. ADC/SBB, FS/GS, and high
+    ; RIP still trampoline. The 32-bit-opsize loop below stays on the 32-bit
+    ; helpers except memory forms, which use a 64-bit EA.
     mov rax, 0x1122334455667788
     add rax, 1
     mov rbx, 0x1122334455667789
@@ -252,6 +253,128 @@ start64:
     sub rax, 1
     jns fail_rexw
 
+    ; R8–R15 register ALU (Windows x64 ABI args).
+    mov r8, 0x100000000
+    add r8, 1
+    mov r9, 0x100000001
+    cmp r8, r9
+    jne fail_r8
+    mov r10, r8
+    xor r10, r9
+    test r10, r10
+    jnz fail_r8
+    mov r11, 0xF0F0F0F0F0F0F0F0
+    mov rax, 0x0F0F0F0F0F0F0F0F
+    or r11, rax
+    mov rax, 0xFFFFFFFFFFFFFFFF
+    cmp r11, rax
+    jne fail_r8
+
+    ; RIP-relative load (MSVC).
+    mov rax, [rel test_qword]
+    mov rbx, 0x1122334455667788
+    cmp rax, rbx
+    jne fail_rip
+    add qword [rel test_qword], 1
+    mov rax, [rel test_qword]
+    mov rbx, 0x1122334455667789
+    cmp rax, rbx
+    jne fail_rip
+    mov eax, [rel test_dword]
+    cmp eax, 0xAABBCCDD
+    jne fail_rip
+
+    ; [rsp+disp] SIB.
+    mov rax, 0xA1A2A3A4A5A6A7A8
+    push rax
+    mov rbx, [rsp]
+    cmp rax, rbx
+    jne fail_sib
+    mov rcx, 0xB1B2B3B4B5B6B7B8
+    mov [rsp], rcx
+    mov rdx, [rsp]
+    cmp rcx, rdx
+    jne fail_sib
+    pop rax
+    cmp rax, rcx
+    jne fail_sib
+
+    ; [rcx+r8] SIB with REX.X.
+    lea rcx, [rel test_qword]
+    xor r8, r8
+    mov rax, [rcx+r8]
+    mov rbx, 0x1122334455667789
+    cmp rax, rbx
+    jne fail_sib
+
+    ; LEA: RIP-relative and 32-bit dest zero-extend.
+    lea rax, [rel test_qword]
+    mov rcx, [rax]
+    mov rbx, 0x1122334455667789
+    cmp rcx, rbx
+    jne fail_lea
+    mov rax, 0x000007FF12345678
+    lea eax, [rax]
+    mov rcx, 0x12345678
+    cmp rax, rcx
+    jne fail_lea
+
+    ; 32-bit REX without W: R8–R15 ALU, zero-extend, and 64-bit EA.
+    mov r8, 0x000007FFAABBCCDD
+    xor r8d, r8d
+    test r8, r8
+    jnz fail_rex32
+    mov r9d, 0x12345678
+    mov eax, r9d
+    cmp eax, 0x12345678
+    jne fail_rex32
+    add r9d, 1
+    cmp r9d, 0x12345679
+    jne fail_rex32
+    mov r9, 0x000007FF12345679
+    add r9d, 0
+    mov rax, 0x12345679
+    cmp r9, rax
+    jne fail_rex32
+    lea rbx, [rel test_dword]
+    mov dword [rbx], 0x11111111
+    mov r8, 0x0000000100000000
+    or r8, rbx
+    mov ecx, 0x55667788
+    mov [r8], ecx
+    cmp dword [rbx], 0x11111111
+    jne fail_rex32
+    mov eax, [r8]
+    cmp eax, 0x55667788
+    jne fail_rex32
+    mov dword [rbx], 0xAABBCCDD
+    mov r10, 0x000007FF00000000
+    lea r10d, [r9]
+    mov rax, 0x12345679
+    cmp r10, rax
+    jne fail_rex32
+
+    ; C7 MOV r/m, imm32 (32-bit and REX.W sign-extend).
+    mov dword [rel test_dword], 0x11223344
+    cmp dword [rel test_dword], 0x11223344
+    jne fail_c7
+    push rax
+    mov dword [rsp], 0x55667788
+    cmp dword [rsp], 0x55667788
+    jne fail_c7
+    pop rax
+    mov qword [rel test_qword], -1
+    cmp qword [rel test_qword], -1
+    jne fail_c7
+    mov r11d, 0xDEADBEEF
+    cmp r11d, 0xDEADBEEF
+    jne fail_c7
+    mov r11, 0x000007FF00000000
+    mov r11d, 0xAABBCCDD
+    mov rax, 0xAABBCCDD
+    cmp r11, rax
+    jne fail_c7
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -287,6 +410,24 @@ fail_loop0f:
     jmp fail_out
 fail_rexw:
     mov al, 11
+    jmp fail_out
+fail_r8:
+    mov al, 12
+    jmp fail_out
+fail_rip:
+    mov al, 13
+    jmp fail_out
+fail_sib:
+    mov al, 14
+    jmp fail_out
+fail_lea:
+    mov al, 15
+    jmp fail_out
+fail_rex32:
+    mov al, 16
+    jmp fail_out
+fail_c7:
+    mov al, 17
     jmp fail_out
 fail64:
     mov al, 1
@@ -332,6 +473,13 @@ pd_4g:
 align 16
 low_buf:
     dd 0
+    dd 0
+
+align 8
+test_qword:
+    dq 0x1122334455667788
+test_dword:
+    dd 0xAABBCCDD
     dd 0
 
 align 16

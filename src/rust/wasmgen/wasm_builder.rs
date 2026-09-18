@@ -646,6 +646,10 @@ impl WasmBuilder {
         self.instruction_body.push(op::OP_GETLOCAL);
         self.instruction_body.push(local.idx());
     }
+    pub fn set_local_i64(&mut self, local: &WasmLocalI64) {
+        self.instruction_body.push(op::OP_SETLOCAL);
+        self.instruction_body.push(local.idx());
+    }
 
     pub fn const_i32(&mut self, v: i32) {
         self.instruction_body.push(op::OP_I32CONST);

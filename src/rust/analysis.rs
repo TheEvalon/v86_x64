@@ -224,15 +224,30 @@ fn high_rip_may_jit_32bit_alu(
     )
 }
 
-/// Low-RIP REX.W register-form MOV/ALU the i64 JIT can emit. R8–R15 (REX.R/B),
-/// memory ModRM, ADC/SBB (/2 /3), and any legacy prefix stay interpreted.
-pub fn rexw_register_alu_may_jit(rex: u8, opcode: u8, next: u8, prefixes: u8) -> bool {
-    if rex != long_mode::REX_W || prefixes != 0 {
+/// Low-RIP REX MOV/ALU/LEA the JIT can emit, including R8–R15 (REX.R/B/X)
+/// and memory ModRM. REX.W uses wasm i64; REX without W is 32-bit opsize
+/// with zero-extending writes. ADC/SBB (/2 /3) and any legacy prefix stay
+/// interpreted.
+pub fn rex_alu_may_jit(rex: u8, opcode: u8, next: u8, prefixes: u8) -> bool {
+    if rex == 0 || prefixes != 0 {
         return false;
     }
-    if opcode_has_modrm(opcode) && next < 0xC0 {
+    long_cs_alu_opcode_ok(opcode, next)
+}
+
+/// Non-REX 32-bit-opsize memory MOV/ALU in 64-bit CS. Address size is 64-bit
+/// unless 67h (`prefixes != 0` here); the 32-bit JIT helpers truncate EAX.
+pub fn long_cs_mem32_may_jit(opcode: u8, next: u8, prefixes: u8) -> bool {
+    if prefixes != 0 {
         return false;
     }
+    if !opcode_has_modrm(opcode) || next >= 0xC0 {
+        return false;
+    }
+    long_cs_alu_opcode_ok(opcode, next)
+}
+
+fn long_cs_alu_opcode_ok(opcode: u8, next: u8) -> bool {
     match opcode {
         0x01
         | 0x03
@@ -261,6 +276,8 @@ pub fn rexw_register_alu_may_jit(rex: u8, opcode: u8, next: u8, prefixes: u8) ->
             let group = next >> 3 & 7;
             group != 2 && group != 3
         },
+        0x8D => next < 0xC0,
+        0xC7 => next >> 3 & 7 == 0,
         _ => false,
     }
 }
@@ -289,9 +306,9 @@ pub fn opcode_needs_long_trampoline(
         return true;
     }
     if rex != 0 {
-        // Low-RIP REX.W register ALU/MOV compiles as wasm i64. REX.R/B/X,
-        // memory, ADC/SBB, and any other REX still trampoline.
-        return !rexw_register_alu_may_jit(rex, opcode, next, prefixes);
+        // Low-RIP REX ALU/MOV (32- or 64-bit opsize, R8–R15, memory) compiles.
+        // ADC/SBB and any legacy prefix trampoline.
+        return !rex_alu_may_jit(rex, opcode, next, prefixes);
     }
     if matches!(
         opcode,
@@ -300,13 +317,12 @@ pub fn opcode_needs_long_trampoline(
         // 64-bit string/LOOP use RSI/RDI/RCX; the 32-bit JIT helpers do not.
         return true;
     }
-    // Non-REX memory operands still use 64-bit addressing in 64-bit CS
+    // Non-REX memory operands use 64-bit addressing in 64-bit CS
     // (`mov ebx, [rax]` with RAX above 4GiB). The 32-bit JIT helpers
-    // read EAX and truncate. 67h is 32-bit asize (`CpuContext::asize_32`
-    // stays true in long CS); low-RIP 64-bit CS still JITs those, high RIP
-    // trampolines them above.
+    // read EAX and truncate. 67h is 32-bit asize and still JITs through
+    // those helpers; whitelist MOV/ALU memory is compiled with a 64-bit EA.
     if !addrsize_override && opcode_has_modrm(opcode) && next < 0xC0 {
-        return true;
+        return !long_cs_mem32_may_jit(opcode, next, prefixes);
     }
     false
 }
@@ -441,25 +457,20 @@ mod tests {
     }
 
     #[test]
-    fn trampoline_any_rex() {
-        assert!(needs(0x40, 0x33, 0xC0, false));
-        assert!(needs(
-            long_mode::REX_W | long_mode::REX_B,
-            0x01,
-            0xC0,
-            false
-        ));
-        assert!(needs(
-            long_mode::REX_W | long_mode::REX_R,
-            0x8B,
-            0xC3,
-            false
-        ));
-        assert!(needs(long_mode::REX_W, 0x01, 0x00, false));
+    fn trampoline_rex_legacy_prefix_and_high_rip() {
         assert!(opcode_needs_long_trampoline(
             long_mode::REX_W,
             0x01,
             0xC0,
+            0,
+            false,
+            PREFIX_66,
+            false
+        ));
+        assert!(opcode_needs_long_trampoline(
+            long_mode::REX_B,
+            0x8B,
+            0xC3,
             0,
             false,
             PREFIX_66,
@@ -474,6 +485,27 @@ mod tests {
             0,
             true
         ));
+        assert!(opcode_needs_long_trampoline(
+            long_mode::REX_B,
+            0x8B,
+            0xC3,
+            0,
+            false,
+            0,
+            true
+        ));
+    }
+
+    #[test]
+    fn jit_rex_without_w_alu() {
+        assert!(!needs(0x40, 0x33, 0xC0, false));
+        assert!(!needs(long_mode::REX_B, 0x8B, 0xC3, false));
+        assert!(!needs(long_mode::REX_R, 0x8B, 0xC3, false));
+        assert!(!needs(long_mode::REX_B, 0x89, 0x00, false));
+        assert!(!needs(long_mode::REX_R, 0x8D, 0x05, false));
+        assert!(!needs(long_mode::REX_B, 0xB8, 0, false));
+        assert!(needs(long_mode::REX_B, 0x11, 0xC0, false));
+        assert!(needs(long_mode::REX_B, 0x00, 0xC0, false));
     }
 
     #[test]
@@ -492,15 +524,56 @@ mod tests {
         assert!(needs(long_mode::REX_W, 0x83, 0xD8, false));
         assert!(needs(long_mode::REX_W, 0x11, 0xC0, false));
         assert!(needs(long_mode::REX_W, 0x90, 0, false));
+        assert!(!needs(
+            long_mode::REX_W | long_mode::REX_B,
+            0x01,
+            0xC0,
+            false
+        ));
+        assert!(!needs(
+            long_mode::REX_W | long_mode::REX_R,
+            0x8B,
+            0xC3,
+            false
+        ));
+        assert!(!needs(
+            long_mode::REX_W | long_mode::REX_B | long_mode::REX_R,
+            0x89,
+            0xC3,
+            false
+        ));
     }
 
     #[test]
-    fn trampoline_memory_modrm_in_long_cs() {
+    fn jit_memory_modrm_whitelist_in_long_cs() {
         assert!(opcode_has_modrm(0x8B));
         assert!(!opcode_has_modrm(0x75));
-        assert!(needs(0, 0x8B, 0x05, false));
-        assert!(needs(0, 0x8B, 0x18, false));
-        assert!(needs(0, 0xC7, 0x44, false));
+        // Whitelist MOV/ALU memory compiles with a 64-bit EA.
+        assert!(!needs(0, 0x8B, 0x05, false));
+        assert!(!needs(0, 0x8B, 0x18, false));
+        assert!(!needs(0, 0x89, 0x03, false));
+        assert!(!needs(0, 0x01, 0x00, false));
+        assert!(!needs(0, 0x03, 0x18, false));
+        assert!(!needs(0, 0x83, 0x44, false));
+        assert!(!needs(long_mode::REX_W, 0x8B, 0x05, false));
+        assert!(!needs(long_mode::REX_W, 0x01, 0x00, false));
+        assert!(!needs(
+            long_mode::REX_W | long_mode::REX_B,
+            0x8B,
+            0x00,
+            false
+        ));
+        // 8-bit / ADC stay interpreted. LEA memory and C7 /0 compile.
+        assert!(!needs(0, 0xC7, 0x44, false));
+        assert!(!needs(long_mode::REX_W, 0xC7, 0x00, false));
+        assert!(!needs(long_mode::REX_B, 0xC7, 0xC0, false));
+        assert!(needs(0, 0xC7, 0x08, false));
+        assert!(!needs(0, 0x8D, 0x05, false));
+        assert!(!needs(long_mode::REX_W, 0x8D, 0x05, false));
+        assert!(!needs(0, 0x8D, 0xC0, false));
+        assert!(needs(long_mode::REX_W, 0x8D, 0xC0, false));
+        assert!(needs(0, 0x00, 0x00, false));
+        assert!(needs(0, 0x11, 0x00, false));
         assert!(!needs(0, 0x8B, 0x05, true));
         assert!(!needs(0, 0x8B, 0x18, true));
         assert!(!needs(0, 0x8B, 0xC3, false));
