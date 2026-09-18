@@ -63,9 +63,9 @@ static mut JIT_DISABLED: bool = false;
 
 /// 64-bit CS JIT is opt-in (`sync_jit` / jit_config 5). Default off: XP x64
 /// usermode is low-RIP 64-bit. Whitelist ALU/MOV/LEA compiles with 64-bit
-/// addressing, REX.W i64 ops, and 32-bit REX (R8–R15); `MAX_64BIT_STEPS`
-/// still cuts the interpreter slice. Interpreting remains faster with JIT
-/// off, and avoids STOP 0x7E from compiled high-RIP kernel code.
+/// addressing, REX.W i64 ops, and 32-bit REX (R8–R15), including at RIP > 4GiB.
+/// Jcc/0F/CALL stay interpreted at high RIP so compiled edges cannot hit
+/// ntoskrnl INT3 padding. `MAX_64BIT_STEPS` still cuts the interpreter slice.
 static mut JIT_LONG_MODE: bool = false;
 
 pub fn jit_long_mode_enabled() -> bool { unsafe { JIT_LONG_MODE } }
@@ -361,9 +361,13 @@ pub struct JitContext<'a> {
     pub builder: &'a mut WasmBuilder,
     pub register_locals: &'a mut Vec<WasmLocal>,
     pub start_of_current_instruction: u32,
-    /// Virtual page of the basic block being compiled (low 32 bits). Used for
-    /// RIP-relative 64-bit addressing at low RIP.
+    /// Virtual page of the basic block being compiled (low 32 bits).
     pub virt_page: u32,
+    /// Canonical page of that block (`virt32_to_linear` of `virt_page`).
+    /// RIP-relative EA uses this so kernel RIP is not truncated to 32 bits.
+    pub linear_page: u64,
+    /// RIP of the compile entry, used to recover high-half linear addresses.
+    pub sample_rip: u64,
     pub exit_with_fault_label: Label,
     pub exit_label: Label,
     pub current_instruction: Instruction,
@@ -606,6 +610,17 @@ fn jit_find_basic_blocks(
         };
         loop {
             let addr_before_instruction = current_address;
+            // Do not compile INT3 padding as the next insn of an ALU block:
+            // executing it is STOP 0x7E. End the block on the previous insn
+            // with RIP pointing at the 0xCC (interpreter takes it if reached).
+            if cpu.state_flags.is_64()
+                && sample_rip > 0xFFFF_FFFF
+                && current_block.number_of_instructions > 0
+                && memory::read8(current_address) as u8 == 0xCC
+            {
+                current_block.ty = BasicBlockType::Exit;
+                break;
+            }
             let mut cpu = &mut CpuContext {
                 eip: current_address,
                 ..cpu
@@ -1070,6 +1085,7 @@ fn jit_analyze_and_generate(
         &mut ctx.wasm_builder,
         wasm_table_index,
         state_flags,
+        virt_entry_point,
     );
     dbg_assert!(!entries.is_empty());
 
@@ -1256,6 +1272,7 @@ fn jit_generate_module(
     builder: &mut WasmBuilder,
     wasm_table_index: WasmTableIndex,
     state_flags: CachedStateFlags,
+    sample_rip: u64,
 ) -> Vec<(u32, u16)> {
     builder.reset();
 
@@ -1294,6 +1311,8 @@ fn jit_generate_module(
         register_locals: &mut register_locals,
         start_of_current_instruction: 0,
         virt_page: 0,
+        linear_page: 0,
+        sample_rip,
         exit_with_fault_label,
         exit_label,
         current_instruction: Instruction::Other,
@@ -2143,6 +2162,7 @@ fn jit_generate_basic_block(ctx: &mut JitContext, block: &BasicBlock) {
 
     ctx.cpu.eip = start_addr;
     ctx.virt_page = block.virt_addr as u32 & !0xFFF;
+    ctx.linear_page = cpu::virt32_to_linear(block.virt_addr, ctx.sample_rip) & !0xFFF;
     ctx.current_instruction = Instruction::Other;
     ctx.previous_instruction = Instruction::Other;
 
@@ -2234,7 +2254,10 @@ pub fn jit_increase_hotness_and_maybe_compile(
         });
 
         if !is_near_end_of_page(phys_address) {
-            entry_points.insert(phys_address as u16 & 0xFFF);
+            let int3_pad = state_flags.is_64() && memory::read8(phys_address) as u8 == 0xCC;
+            if !int3_pad {
+                entry_points.insert(phys_address as u16 & 0xFFF);
+            }
         }
 
         *hotness += heat;

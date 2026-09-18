@@ -1,6 +1,8 @@
 ; Multiboot payload: 32-bit-opsize loop at a canonical higher-half RIP
 ; (Linux -2GB window). The JIT must compile it (RIP > 4GiB) without
-; widening instruction_pointer. Exit code is written to port 0xF4 (0 = pass).
+; widening instruction_pointer. REX.W / R8 / RIP-relative ALU also compile;
+; INT3 padding after a jmp must not run. Exit code is written to port 0xF4
+; (0 = pass).
 
 BITS 32
 ORG 0x100000
@@ -79,9 +81,10 @@ higher:
     ; compare. Use the 32-bit identity address (low 2MB is mapped).
     mov edi, scratch
 
-    ; REX.W encodings trampoline; this loop should compile as 32-bit-opsize JIT.
     ; 32-bit XOR must zero-extend: stale 0xFFFFFFFF80000000 in RAX after
     ; `xor eax, eax` becomes a canonical kernel pointer and can land in INT3.
+    ; REX.W / R8 / RIP-relative now compile at RIP > 4GiB; Jcc and 67h still
+    ; trampoline so a wrong compiled edge cannot execute INT3 padding.
     mov rax, HIGHER_HALF
     xor eax, eax
     test rax, rax
@@ -102,6 +105,26 @@ higher:
 
     cmp eax, ITERATIONS
     jne fail64
+
+    xor eax, eax
+    xor r8, r8
+    mov ecx, ITERATIONS
+.loop64:
+    add rax, 1
+    add r8, 1
+    mov ebx, [rel scratch]
+    cmp ebx, 0x11223344
+    jne fail_riprel
+    sub ecx, 1
+    jnz .loop64
+    cmp rax, ITERATIONS
+    jne fail_rexw
+    cmp r8, ITERATIONS
+    jne fail_r8
+
+    jmp after_pad
+    times 16 db 0xCC
+after_pad:
 
     lea rax, [after_loop]
     mov rbx, HIGHER_HALF + after_loop
@@ -141,6 +164,27 @@ fail_zext:
 .hang_zext:
     hlt
     jmp .hang_zext
+
+fail_rexw:
+    mov al, 5
+    out 0xF4, al
+.hang_rexw:
+    hlt
+    jmp .hang_rexw
+
+fail_r8:
+    mov al, 6
+    out 0xF4, al
+.hang_r8:
+    hlt
+    jmp .hang_r8
+
+fail_riprel:
+    mov al, 7
+    out 0xF4, al
+.hang_riprel:
+    hlt
+    jmp .hang_riprel
 
 align 8
 scratch:
