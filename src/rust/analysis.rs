@@ -298,7 +298,8 @@ pub fn opcode_needs_long_trampoline(
         if opcode_0f_needs_long_trampoline(next, next2, prefixes) {
             return true;
         }
-    } else if long_mode::opcode_is_forced64(opcode as i32) {
+    }
+    else if long_mode::opcode_is_forced64(opcode as i32) {
         return true;
     }
     if rex != 0 {
@@ -323,14 +324,13 @@ pub fn opcode_needs_long_trampoline(
     false
 }
 
-fn peek_imm8(cpu: &CpuContext) -> u8 {
-    peek_imm8_at(cpu, 0)
-}
+fn peek_imm8(cpu: &CpuContext) -> u8 { peek_imm8_at(cpu, 0) }
 
 fn peek_imm8_at(cpu: &CpuContext, off: u32) -> u8 {
     if (cpu.eip as u32 & 0xFFF) + off > 0xFFF {
         0
-    } else {
+    }
+    else {
         memory::read8(cpu.eip.wrapping_add(off)) as u8
     }
 }
@@ -339,7 +339,8 @@ fn fixup_imm64_skip(cpu: &mut CpuContext, opcode: u8) {
     if cpu.rex_prefix & long_mode::REX_W != 0 && (0xB8..=0xBF).contains(&opcode) {
         if cpu.osize_32() {
             let _ = cpu.read_imm32();
-        } else {
+        }
+        else {
             let _ = cpu.read_imm16();
             let _ = cpu.read_imm32();
         }
@@ -434,9 +435,7 @@ pub fn instr_F3_analyze(cpu: &mut CpuContext, analysis: &mut Analysis) {
     analyze_step_handle_prefix(cpu, analysis)
 }
 
-pub fn modrm_analyze(ctx: &mut CpuContext, modrm_byte: u8) {
-    modrm::skip(ctx, modrm_byte);
-}
+pub fn modrm_analyze(ctx: &mut CpuContext, modrm_byte: u8) { modrm::skip(ctx, modrm_byte); }
 
 #[cfg(test)]
 mod tests {
