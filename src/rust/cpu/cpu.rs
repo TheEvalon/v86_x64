@@ -4530,8 +4530,9 @@ pub unsafe fn cycle_internal() {
             // 4GB path must restore the current RIP, not the stale one.
             *previous_rip = *rip;
         }
-        // 32-bit-opsize JIT in 64-bit CS trampolines REX.W (XP usermode) and
-        // compiled high-RIP kernel ops hit STOP 0x7E. `sync_jit` tests opt in.
+        // 32-bit-opsize JIT in 64-bit CS trampolines non-whitelist ops. High-RIP
+        // Jcc/0F/CALL stay interpreted (compiled edges hit ntoskrnl INT3).
+        // `sync_jit` tests opt in.
         if !jit::jit_long_mode_enabled() {
             let phys_addr = return_on_pagefault!(get_phys_eip());
             let initial_instruction_counter = *instruction_counter;
@@ -4773,8 +4774,8 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
             }
         }
 
-        // Hand ALU at RIP > 4GiB back to compiled code; stay in this batch for
-        // trampolines (REX/memory/Jcc) so we do not pay wasm enter per insn.
+        // Hand ALU/REX/LEA at RIP > 4GiB back to compiled code; stay in this
+        // batch for trampolines (Jcc/0F/CALL) so we do not pay wasm enter per insn.
         // Skip the peek when long-mode JIT is off: high_rip_should_enter_jit
         // reads a code byte every insn and slowed the XP kernel vs master.
         if i > 0 && jit::jit_long_mode_enabled() && *is_64 && get_rip() > 0xFFFF_FFFF {

@@ -468,7 +468,7 @@ pub fn gen_modrm64_ea(ctx: &mut JitContext, modrm_byte: u8, opcode: u8) -> WasmL
             return ctx.builder.set_new_local_i64();
         }
         let tail = trailing_imm_after_modrm(opcode as u32 | 0x100, false, modrm_byte as i32);
-        let rip = ctx.virt_page as u64 | ctx.cpu.eip as u64 & 0xFFF;
+        let rip = ctx.linear_page | ctx.cpu.eip as u64 & 0xFFF;
         let ea = rip.wrapping_add(tail as u64).wrapping_add(disp as u64);
         ctx.builder.const_i64(ea as i64);
         return ctx.builder.set_new_local_i64();

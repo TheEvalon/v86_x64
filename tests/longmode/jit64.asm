@@ -63,9 +63,8 @@ fail32:
 BITS 64
 start64:
     ; Register and whitelist memory REX ALU/MOV compile (low RIP), including
-    ; R8–R15, 32-bit REX, LEA, and C7 MOV r/m,imm. ADC/SBB, FS/GS, and high
-    ; RIP still trampoline. The 32-bit-opsize loop below stays on the 32-bit
-    ; helpers except memory forms, which use a 64-bit EA.
+    ; R8–R15, 32-bit REX, LEA, and C7 MOV r/m,imm. ADC/SBB and FS/GS still
+    ; trampoline. High RIP compiles the same ALU whitelist; Jcc/0F/CALL do not.
     mov rax, 0x1122334455667788
     add rax, 1
     mov rbx, 0x1122334455667789
