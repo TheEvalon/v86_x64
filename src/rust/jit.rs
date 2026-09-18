@@ -62,9 +62,10 @@ pub fn jit_clear_func(wasm_table_index: WasmTableIndex) {
 static mut JIT_DISABLED: bool = false;
 
 /// 64-bit CS JIT is opt-in (`sync_jit` / jit_config 5). Default off: XP x64
-/// usermode is low-RIP 64-bit and the 32-bit JIT trampolines REX.W, then
-/// `MAX_64BIT_STEPS` cuts the slice. Interpreting that path is faster and
-/// avoids STOP 0x7E from compiled high-RIP kernel code.
+/// usermode is low-RIP 64-bit. Register-form REX.W ALU/MOV now compile as
+/// wasm i64; other REX still trampolines and `MAX_64BIT_STEPS` cuts the
+/// slice. Interpreting remains faster with JIT off, and avoids STOP 0x7E
+/// from compiled high-RIP kernel code.
 static mut JIT_LONG_MODE: bool = false;
 
 pub fn jit_long_mode_enabled() -> bool { unsafe { JIT_LONG_MODE } }

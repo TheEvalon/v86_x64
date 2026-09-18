@@ -224,6 +224,47 @@ fn high_rip_may_jit_32bit_alu(
     )
 }
 
+/// Low-RIP REX.W register-form MOV/ALU the i64 JIT can emit. R8–R15 (REX.R/B),
+/// memory ModRM, ADC/SBB (/2 /3), and any legacy prefix stay interpreted.
+pub fn rexw_register_alu_may_jit(rex: u8, opcode: u8, next: u8, prefixes: u8) -> bool {
+    if rex != long_mode::REX_W || prefixes != 0 {
+        return false;
+    }
+    if opcode_has_modrm(opcode) && next < 0xC0 {
+        return false;
+    }
+    match opcode {
+        0x01
+        | 0x03
+        | 0x05
+        | 0x09
+        | 0x0B
+        | 0x0D
+        | 0x21
+        | 0x23
+        | 0x25
+        | 0x29
+        | 0x2B
+        | 0x2D
+        | 0x31
+        | 0x33
+        | 0x35
+        | 0x39
+        | 0x3B
+        | 0x3D
+        | 0x85
+        | 0x89
+        | 0x8B
+        | 0xA9
+        | 0xB8..=0xBF => true,
+        0x81 | 0x83 => {
+            let group = next >> 3 & 7;
+            group != 2 && group != 3
+        },
+        _ => false,
+    }
+}
+
 pub fn opcode_needs_long_trampoline(
     rex: u8,
     opcode: u8,
@@ -248,7 +289,9 @@ pub fn opcode_needs_long_trampoline(
         return true;
     }
     if rex != 0 {
-        return true;
+        // Low-RIP REX.W register ALU/MOV compiles as wasm i64. REX.R/B/X,
+        // memory, ADC/SBB, and any other REX still trampoline.
+        return !rexw_register_alu_may_jit(rex, opcode, next, prefixes);
     }
     if matches!(
         opcode,
@@ -399,8 +442,56 @@ mod tests {
 
     #[test]
     fn trampoline_any_rex() {
-        assert!(needs(long_mode::REX_W, 0x01, 0xC0, false));
         assert!(needs(0x40, 0x33, 0xC0, false));
+        assert!(needs(
+            long_mode::REX_W | long_mode::REX_B,
+            0x01,
+            0xC0,
+            false
+        ));
+        assert!(needs(
+            long_mode::REX_W | long_mode::REX_R,
+            0x8B,
+            0xC3,
+            false
+        ));
+        assert!(needs(long_mode::REX_W, 0x01, 0x00, false));
+        assert!(opcode_needs_long_trampoline(
+            long_mode::REX_W,
+            0x01,
+            0xC0,
+            0,
+            false,
+            PREFIX_66,
+            false
+        ));
+        assert!(opcode_needs_long_trampoline(
+            long_mode::REX_W,
+            0x01,
+            0xC0,
+            0,
+            false,
+            0,
+            true
+        ));
+    }
+
+    #[test]
+    fn jit_rexw_register_alu() {
+        assert!(!needs(long_mode::REX_W, 0x01, 0xC0, false));
+        assert!(!needs(long_mode::REX_W, 0x03, 0xC3, false));
+        assert!(!needs(long_mode::REX_W, 0x8B, 0xC3, false));
+        assert!(!needs(long_mode::REX_W, 0x89, 0xC3, false));
+        assert!(!needs(long_mode::REX_W, 0xB8, 0, false));
+        assert!(!needs(long_mode::REX_W, 0x05, 0, false));
+        assert!(!needs(long_mode::REX_W, 0x85, 0xC3, false));
+        assert!(!needs(long_mode::REX_W, 0xA9, 0, false));
+        assert!(!needs(long_mode::REX_W, 0x83, 0xC0, false));
+        assert!(!needs(long_mode::REX_W, 0x81, 0xF8, false));
+        assert!(needs(long_mode::REX_W, 0x81, 0xD0, false));
+        assert!(needs(long_mode::REX_W, 0x83, 0xD8, false));
+        assert!(needs(long_mode::REX_W, 0x11, 0xC0, false));
+        assert!(needs(long_mode::REX_W, 0x90, 0, false));
     }
 
     #[test]

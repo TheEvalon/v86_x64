@@ -62,8 +62,9 @@ fail32:
 
 BITS 64
 start64:
-    ; REX.W encodings trampoline to the interpreter; the following loop should
-    ; be compiled as 32-bit-opsize JIT code.
+    ; Register-form REX.W MOV/ALU compile as wasm i64 (low RIP). Memory,
+    ; R8–R15, ADC/SBB, and high RIP still trampoline. The 32-bit-opsize
+    ; loop below stays on the existing 32-bit JIT helpers.
     mov rax, 0x1122334455667788
     add rax, 1
     mov rbx, 0x1122334455667789
@@ -207,6 +208,50 @@ start64:
     cmp eax, ITERATIONS
     jne fail_loop0f
 
+    ; 32-bit ADD would zero-extend and drop the 2^32 carry.
+    mov rax, 0xFFFFFFFF
+    add rax, 1
+    mov rbx, 0x100000000
+    cmp rax, rbx
+    jne fail_rexw
+
+    xor eax, eax
+    mov rcx, ITERATIONS
+.loop64:
+    add rax, 1
+    sub rcx, 1
+    jnz .loop64
+    cmp rax, ITERATIONS
+    jne fail_rexw
+
+    mov rax, 0xF0F0F0F0F0F0F0F0
+    mov rbx, 0x0F0F0F0F0F0F0F0F
+    or rax, rbx
+    mov rcx, 0xFFFFFFFFFFFFFFFF
+    cmp rax, rcx
+    jne fail_rexw
+    and rax, rbx
+    cmp rax, rbx
+    jne fail_rexw
+    xor rax, rax
+    test rax, rax
+    jnz fail_rexw
+
+    mov rax, 1
+    add rax, 0x7FFFFFFF
+    mov rbx, 0x80000000
+    cmp rax, rbx
+    jne fail_rexw
+    add rbx, 0x10000
+    mov rax, 0x80010000
+    cmp rax, rbx
+    jne fail_rexw
+    sub rax, 1
+    js fail_rexw
+    xor eax, eax
+    sub rax, 1
+    jns fail_rexw
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -239,6 +284,9 @@ fail_bt:
     jmp fail_out
 fail_loop0f:
     mov al, 10
+    jmp fail_out
+fail_rexw:
+    mov al, 11
     jmp fail_out
 fail64:
     mov al, 1
