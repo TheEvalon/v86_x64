@@ -2507,6 +2507,29 @@ pub unsafe fn translate_address_write(address: i32) -> OrPageFault<u32> {
     translate_address(address, true, *cpl == 3, false, true, false)
 }
 pub unsafe fn translate_address_write_jit(address: i32, wasm_table_index: u16) -> OrPageFault<u32> {
+    if efer_lma() {
+        let v = virt64_from_i32(address);
+        if v > 0xFFFF_FFFF {
+            let phys_addr = translate_address64(v, true, *cpl == 3, true, true, false)?;
+            let page = Page::page_of(phys_addr);
+            if !jit::jit_page_has_code(page) {
+                return Ok(phys_addr);
+            }
+            let is_smc = jit::jit_page_has_wasm_table_index(page, wasm_table_index);
+            jit::jit_dirty_page(page);
+            if !is_smc {
+                return Ok(phys_addr);
+            }
+            dbg_log!(
+                "SMC: write to addr phys={:x} virt={:x} of the running module {}, exiting",
+                phys_addr,
+                v,
+                wasm_table_index,
+            );
+            jit_exit_reason = JitExitReason::SelfModifyingCodeBail;
+            return Err(());
+        }
+    }
     let mut entry = tlb_data[(address as u32 >> 12) as usize];
     let user = *cpl == 3;
     if entry & (TLB_VALID | if user { TLB_NO_USER } else { 0 } | TLB_READONLY) != TLB_VALID {

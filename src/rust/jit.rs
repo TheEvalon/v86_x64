@@ -62,10 +62,10 @@ pub fn jit_clear_func(wasm_table_index: WasmTableIndex) {
 static mut JIT_DISABLED: bool = false;
 
 /// 64-bit CS JIT is opt-in (`sync_jit` / jit_config 5). Default off: XP x64
-/// usermode is low-RIP 64-bit. Register-form REX.W ALU/MOV now compile as
-/// wasm i64; other REX still trampolines and `MAX_64BIT_STEPS` cuts the
-/// slice. Interpreting remains faster with JIT off, and avoids STOP 0x7E
-/// from compiled high-RIP kernel code.
+/// usermode is low-RIP 64-bit. Register and whitelist memory REX.W ALU/MOV
+/// compile as wasm i64, including R8–R15; `MAX_64BIT_STEPS` still cuts the
+/// interpreter slice. Interpreting remains faster with JIT off, and avoids
+/// STOP 0x7E from compiled high-RIP kernel code.
 static mut JIT_LONG_MODE: bool = false;
 
 pub fn jit_long_mode_enabled() -> bool { unsafe { JIT_LONG_MODE } }
@@ -361,6 +361,9 @@ pub struct JitContext<'a> {
     pub builder: &'a mut WasmBuilder,
     pub register_locals: &'a mut Vec<WasmLocal>,
     pub start_of_current_instruction: u32,
+    /// Virtual page of the basic block being compiled (low 32 bits). Used for
+    /// RIP-relative 64-bit addressing at low RIP.
+    pub virt_page: u32,
     pub exit_with_fault_label: Label,
     pub exit_label: Label,
     pub current_instruction: Instruction,
@@ -1290,6 +1293,7 @@ fn jit_generate_module(
         builder,
         register_locals: &mut register_locals,
         start_of_current_instruction: 0,
+        virt_page: 0,
         exit_with_fault_label,
         exit_label,
         current_instruction: Instruction::Other,
@@ -2065,6 +2069,7 @@ fn jit_generate_module(
     {
         // exit with exception or due to smc
         ctx.builder.block_end();
+        codegen::gen_clear_pending_linear64(ctx.builder);
         codegen::gen_move_registers_from_locals_to_memory(ctx);
         codegen::gen_fn0_const(ctx.builder, "exit_jit");
         codegen::gen_update_instruction_counter(ctx);
@@ -2133,6 +2138,7 @@ fn jit_generate_basic_block(ctx: &mut JitContext, block: &BasicBlock) {
     ctx.builder.set_local(&ctx.instruction_counter);
 
     ctx.cpu.eip = start_addr;
+    ctx.virt_page = block.virt_addr as u32 & !0xFFF;
     ctx.current_instruction = Instruction::Other;
     ctx.previous_instruction = Instruction::Other;
 

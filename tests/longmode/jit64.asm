@@ -62,9 +62,10 @@ fail32:
 
 BITS 64
 start64:
-    ; Register-form REX.W MOV/ALU compile as wasm i64 (low RIP). Memory,
-    ; R8–R15, ADC/SBB, and high RIP still trampoline. The 32-bit-opsize
-    ; loop below stays on the existing 32-bit JIT helpers.
+    ; Register and whitelist memory REX.W MOV/ALU compile as wasm i64 (low
+    ; RIP), including R8–R15. ADC/SBB, C7, LEA, FS/GS, and high RIP still
+    ; trampoline. The 32-bit-opsize loop below stays on the 32-bit helpers
+    ; except memory forms, which use a 64-bit EA.
     mov rax, 0x1122334455667788
     add rax, 1
     mov rbx, 0x1122334455667789
@@ -252,6 +253,59 @@ start64:
     sub rax, 1
     jns fail_rexw
 
+    ; R8–R15 register ALU (Windows x64 ABI args).
+    mov r8, 0x100000000
+    add r8, 1
+    mov r9, 0x100000001
+    cmp r8, r9
+    jne fail_r8
+    mov r10, r8
+    xor r10, r9
+    test r10, r10
+    jnz fail_r8
+    mov r11, 0xF0F0F0F0F0F0F0F0
+    or r11, 0x0F0F0F0F0F0F0F0F
+    mov rax, 0xFFFFFFFFFFFFFFFF
+    cmp r11, rax
+    jne fail_r8
+
+    ; RIP-relative load (MSVC).
+    mov rax, [rel test_qword]
+    mov rbx, 0x1122334455667788
+    cmp rax, rbx
+    jne fail_rip
+    add qword [rel test_qword], 1
+    mov rax, [rel test_qword]
+    mov rbx, 0x1122334455667789
+    cmp rax, rbx
+    jne fail_rip
+    mov eax, [rel test_dword]
+    cmp eax, 0xAABBCCDD
+    jne fail_rip
+
+    ; [rsp+disp] SIB.
+    mov rax, 0xA1A2A3A4A5A6A7A8
+    push rax
+    mov rbx, [rsp]
+    cmp rax, rbx
+    jne fail_sib
+    mov rcx, 0xB1B2B3B4B5B6B7B8
+    mov [rsp], rcx
+    mov rdx, [rsp]
+    cmp rcx, rdx
+    jne fail_sib
+    pop rax
+    cmp rax, rcx
+    jne fail_sib
+
+    ; [rcx+r8] SIB with REX.X.
+    lea rcx, [rel test_qword]
+    xor r8, r8
+    mov rax, [rcx+r8]
+    mov rbx, 0x1122334455667789
+    cmp rax, rbx
+    jne fail_sib
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -287,6 +341,15 @@ fail_loop0f:
     jmp fail_out
 fail_rexw:
     mov al, 11
+    jmp fail_out
+fail_r8:
+    mov al, 12
+    jmp fail_out
+fail_rip:
+    mov al, 13
+    jmp fail_out
+fail_sib:
+    mov al, 14
     jmp fail_out
 fail64:
     mov al, 1
@@ -332,6 +395,13 @@ pd_4g:
 align 16
 low_buf:
     dd 0
+    dd 0
+
+align 8
+test_qword:
+    dq 0x1122334455667788
+test_dword:
+    dd 0xAABBCCDD
     dd 0
 
 align 16
