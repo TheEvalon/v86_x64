@@ -116,6 +116,10 @@ fn jit_instruction_64(ctx: &mut JitContext, instr_flags: &mut u32) {
         gen_rexw_alu_instr(ctx, opcode, instr_flags);
         return;
     }
+    if ctx.cpu.rex_prefix != 0 {
+        gen_rex32_alu_instr(ctx, opcode, instr_flags);
+        return;
+    }
     if ctx.cpu.prefixes & PREFIX_MASK_ADDRSIZE == 0 && analysis::opcode_has_modrm(opcode) {
         let next = if ctx.cpu.eip as u32 & 0xFFF < 0xFFF {
             crate::cpu::memory::read8(ctx.cpu.eip) as u8
@@ -340,7 +344,285 @@ fn gen_rexw_alu_instr(ctx: &mut JitContext, opcode: u8, instr_flags: &mut u32) {
             codegen::gen_set_reg64(ctx, reg);
             ctx.builder.free_local_i64(ea);
         },
+        0xC7 => gen_c7_mov_imm(ctx, true, instr_flags),
         _ => gen_trampoline_long_mode(ctx, instr_flags),
+    }
+}
+
+fn gen_rex32_alu_instr(ctx: &mut JitContext, opcode: u8, instr_flags: &mut u32) {
+    ctx.current_instruction = Instruction::Other;
+    match opcode {
+        0x01 | 0x09 | 0x21 | 0x29 | 0x31 | 0x39 | 0x85 | 0x89 => {
+            let modrm = ctx.cpu.read_imm8();
+            let rm = (modrm & 7) as u32 | rex_b(ctx);
+            let reg = (modrm >> 3 & 7) as u32 | rex_r(ctx);
+            if modrm >= 0xC0 {
+                if opcode == 0x89 {
+                    codegen::gen_get_reg32x(ctx, reg);
+                    codegen::gen_set_reg32x(ctx, rm);
+                }
+                else {
+                    let (f, writeback) = alu32_fn_from_mr(opcode);
+                    gen_alu32_rr(ctx, rm, reg, f, writeback);
+                }
+            }
+            else {
+                let ea = codegen::gen_modrm64_ea(ctx, modrm, opcode);
+                if opcode == 0x89 {
+                    codegen::gen_get_reg32x(ctx, reg);
+                    let val = ctx.builder.set_new_local();
+                    codegen::gen_safe_write32_ea64(ctx, &ea, &val);
+                    ctx.builder.free_local(val);
+                }
+                else {
+                    match opcode {
+                        0x01 => gen_alu32_mem_rmw(ctx, &ea, reg, gen_add32),
+                        0x09 => gen_alu32_mem_rmw(ctx, &ea, reg, gen_or32),
+                        0x21 => gen_alu32_mem_rmw(ctx, &ea, reg, gen_and32),
+                        0x29 => gen_alu32_mem_rmw(ctx, &ea, reg, gen_sub32),
+                        0x31 => gen_alu32_mem_rmw(ctx, &ea, reg, gen_xor32),
+                        0x39 => gen_alu32_mem_cmp_test(ctx, &ea, reg, gen_cmp32),
+                        0x85 => gen_alu32_mem_cmp_test(ctx, &ea, reg, gen_test32),
+                        _ => unreachable!(),
+                    }
+                }
+                ctx.builder.free_local_i64(ea);
+            }
+        },
+        0x03 | 0x0B | 0x23 | 0x2B | 0x33 | 0x3B | 0x8B => {
+            let modrm = ctx.cpu.read_imm8();
+            let rm = (modrm & 7) as u32 | rex_b(ctx);
+            let reg = (modrm >> 3 & 7) as u32 | rex_r(ctx);
+            if modrm >= 0xC0 {
+                if opcode == 0x8B {
+                    codegen::gen_get_reg32x(ctx, rm);
+                    codegen::gen_set_reg32x(ctx, reg);
+                }
+                else {
+                    let (f, writeback) = alu32_fn_from_rm(opcode);
+                    gen_alu32_rr(ctx, reg, rm, f, writeback);
+                }
+            }
+            else {
+                let ea = codegen::gen_modrm64_ea(ctx, modrm, opcode);
+                if opcode == 0x8B {
+                    codegen::gen_safe_read_ea64(ctx, BitSize::DWORD, &ea);
+                    codegen::gen_set_reg32x(ctx, reg);
+                }
+                else if opcode == 0x3B {
+                    codegen::gen_safe_read_ea64(ctx, BitSize::DWORD, &ea);
+                    let src = ctx.builder.set_new_local();
+                    codegen::gen_get_reg32x(ctx, reg);
+                    let dest = ctx.builder.set_new_local();
+                    gen_cmp32(ctx, &dest, &LocalOrImmediate::WasmLocal(&src));
+                    ctx.builder.free_local(src);
+                    ctx.builder.free_local(dest);
+                }
+                else {
+                    match opcode {
+                        0x03 => gen_alu32_mem_to_reg(ctx, &ea, reg, gen_add32),
+                        0x0B => gen_alu32_mem_to_reg(ctx, &ea, reg, gen_or32),
+                        0x23 => gen_alu32_mem_to_reg(ctx, &ea, reg, gen_and32),
+                        0x2B => gen_alu32_mem_to_reg(ctx, &ea, reg, gen_sub32),
+                        0x33 => gen_alu32_mem_to_reg(ctx, &ea, reg, gen_xor32),
+                        _ => unreachable!(),
+                    }
+                }
+                ctx.builder.free_local_i64(ea);
+            }
+        },
+        0x05 | 0x0D | 0x25 | 0x2D | 0x35 | 0x3D | 0xA9 => {
+            let imm = ctx.cpu.read_imm32() as i32;
+            match opcode {
+                0x05 => gen_alu32_ri(ctx, 0, imm, gen_add32, true),
+                0x0D => gen_alu32_ri(ctx, 0, imm, gen_or32, true),
+                0x25 => gen_alu32_ri(ctx, 0, imm, gen_and32, true),
+                0x2D => gen_alu32_ri(ctx, 0, imm, gen_sub32, true),
+                0x35 => gen_alu32_ri(ctx, 0, imm, gen_xor32, true),
+                0x3D => gen_alu32_ri(ctx, 0, imm, gen_cmp32, false),
+                0xA9 => gen_alu32_ri(ctx, 0, imm, gen_test32, false),
+                _ => unreachable!(),
+            }
+        },
+        0x81 | 0x83 => {
+            let modrm = ctx.cpu.read_imm8();
+            let rm = (modrm & 7) as u32 | rex_b(ctx);
+            let group = (modrm >> 3 & 7) as u32;
+            let op = match alu32_fn_from_group(group) {
+                Some(op) => op,
+                None => {
+                    gen_trampoline_long_mode(ctx, instr_flags);
+                    return;
+                },
+            };
+            if modrm >= 0xC0 {
+                let imm = if opcode == 0x81 {
+                    ctx.cpu.read_imm32() as i32
+                }
+                else {
+                    ctx.cpu.read_imm8s() as i32
+                };
+                gen_alu32_ri(ctx, rm, imm, op.0, op.1);
+            }
+            else {
+                let ea = codegen::gen_modrm64_ea(ctx, modrm, opcode);
+                let imm = if opcode == 0x81 {
+                    ctx.cpu.read_imm32() as i32
+                }
+                else {
+                    ctx.cpu.read_imm8s() as i32
+                };
+                match group {
+                    0 => gen_alu32_mem_imm(ctx, &ea, imm, gen_add32, false),
+                    1 => gen_alu32_mem_imm(ctx, &ea, imm, gen_or32, false),
+                    4 => gen_alu32_mem_imm(ctx, &ea, imm, gen_and32, false),
+                    5 => gen_alu32_mem_imm(ctx, &ea, imm, gen_sub32, false),
+                    6 => gen_alu32_mem_imm(ctx, &ea, imm, gen_xor32, false),
+                    7 => gen_alu32_mem_imm(ctx, &ea, imm, gen_cmp32, true),
+                    _ => {
+                        ctx.builder.free_local_i64(ea);
+                        gen_trampoline_long_mode(ctx, instr_flags);
+                        return;
+                    },
+                }
+                ctx.builder.free_local_i64(ea);
+            }
+        },
+        0xB8..=0xBF => {
+            let rd = (opcode & 7) as u32 | rex_b(ctx);
+            let imm = ctx.cpu.read_imm32() as i32;
+            ctx.builder.const_i32(imm);
+            codegen::gen_set_reg32x(ctx, rd);
+        },
+        0x8D => {
+            let modrm = ctx.cpu.read_imm8();
+            let reg = (modrm >> 3 & 7) as u32 | rex_r(ctx);
+            if modrm >= 0xC0 {
+                gen_trampoline_long_mode(ctx, instr_flags);
+                return;
+            }
+            let ea = codegen::gen_modrm64_ea(ctx, modrm, opcode);
+            ctx.builder.get_local_i64(&ea);
+            ctx.builder.wrap_i64_to_i32();
+            codegen::gen_set_reg32x(ctx, reg);
+            ctx.builder.free_local_i64(ea);
+        },
+        0xC7 => gen_c7_mov_imm(ctx, false, instr_flags),
+        _ => gen_trampoline_long_mode(ctx, instr_flags),
+    }
+}
+
+fn alu32_fn_from_mr(opcode: u8) -> (fn(&mut JitContext, &WasmLocal, &LocalOrImmediate), bool) {
+    match opcode {
+        0x01 => (gen_add32, true),
+        0x09 => (gen_or32, true),
+        0x21 => (gen_and32, true),
+        0x29 => (gen_sub32, true),
+        0x31 => (gen_xor32, true),
+        0x39 => (gen_cmp32, false),
+        0x85 => (gen_test32, false),
+        _ => unreachable!(),
+    }
+}
+
+fn alu32_fn_from_rm(opcode: u8) -> (fn(&mut JitContext, &WasmLocal, &LocalOrImmediate), bool) {
+    match opcode {
+        0x03 => (gen_add32, true),
+        0x0B => (gen_or32, true),
+        0x23 => (gen_and32, true),
+        0x2B => (gen_sub32, true),
+        0x33 => (gen_xor32, true),
+        0x3B => (gen_cmp32, false),
+        _ => unreachable!(),
+    }
+}
+
+fn alu32_fn_from_group(
+    group: u32,
+) -> Option<(fn(&mut JitContext, &WasmLocal, &LocalOrImmediate), bool)> {
+    match group {
+        0 => Some((gen_add32, true)),
+        1 => Some((gen_or32, true)),
+        4 => Some((gen_and32, true)),
+        5 => Some((gen_sub32, true)),
+        6 => Some((gen_xor32, true)),
+        7 => Some((gen_cmp32, false)),
+        _ => None,
+    }
+}
+
+fn gen_alu32_rr(
+    ctx: &mut JitContext,
+    dest: u32,
+    src: u32,
+    f: fn(&mut JitContext, &WasmLocal, &LocalOrImmediate),
+    writeback: bool,
+) {
+    codegen::gen_get_reg32x(ctx, dest);
+    let a = ctx.builder.set_new_local();
+    codegen::gen_get_reg32x(ctx, src);
+    let b = ctx.builder.set_new_local();
+    f(ctx, &a, &LocalOrImmediate::WasmLocal(&b));
+    if writeback {
+        ctx.builder.get_local(&a);
+        codegen::gen_set_reg32x(ctx, dest);
+    }
+    ctx.builder.free_local(a);
+    ctx.builder.free_local(b);
+}
+
+fn gen_alu32_ri(
+    ctx: &mut JitContext,
+    dest: u32,
+    imm: i32,
+    f: fn(&mut JitContext, &WasmLocal, &LocalOrImmediate),
+    writeback: bool,
+) {
+    codegen::gen_get_reg32x(ctx, dest);
+    let a = ctx.builder.set_new_local();
+    f(ctx, &a, &LocalOrImmediate::Immediate(imm));
+    if writeback {
+        ctx.builder.get_local(&a);
+        codegen::gen_set_reg32x(ctx, dest);
+    }
+    ctx.builder.free_local(a);
+}
+
+fn gen_c7_mov_imm(ctx: &mut JitContext, rexw: bool, instr_flags: &mut u32) {
+    let modrm = ctx.cpu.read_imm8();
+    if modrm >> 3 & 7 != 0 {
+        gen_trampoline_long_mode(ctx, instr_flags);
+        return;
+    }
+    let rm = (modrm & 7) as u32 | rex_b(ctx);
+    if modrm >= 0xC0 {
+        if rexw {
+            let imm = sign_extend_imm32(ctx);
+            gen_mov64_ri(ctx, rm, imm);
+        }
+        else {
+            let imm = ctx.cpu.read_imm32() as i32;
+            ctx.builder.const_i32(imm);
+            codegen::gen_set_reg32x(ctx, rm);
+        }
+    }
+    else {
+        let ea = codegen::gen_modrm64_ea(ctx, modrm, 0xC7);
+        if rexw {
+            let imm = sign_extend_imm32(ctx);
+            ctx.builder.const_i64(imm);
+            let val = ctx.builder.set_new_local_i64();
+            codegen::gen_safe_write64_ea64(ctx, &ea, &val);
+            ctx.builder.free_local_i64(val);
+        }
+        else {
+            let imm = ctx.cpu.read_imm32() as i32;
+            ctx.builder.const_i32(imm);
+            let val = ctx.builder.set_new_local();
+            codegen::gen_safe_write32_ea64(ctx, &ea, &val);
+            ctx.builder.free_local(val);
+        }
+        ctx.builder.free_local_i64(ea);
     }
 }
 
@@ -376,12 +658,24 @@ fn gen_mem32_alu_64ea(ctx: &mut JitContext, opcode: u8, instr_flags: &mut u32) {
         },
         0x8B => {
             codegen::gen_safe_read_ea64(ctx, BitSize::DWORD, &ea);
-            codegen::gen_set_reg32(ctx, reg);
+            codegen::gen_set_reg32x(ctx, reg);
         },
         0x8D => {
             ctx.builder.get_local_i64(&ea);
             ctx.builder.wrap_i64_to_i32();
-            codegen::gen_set_reg32(ctx, reg);
+            codegen::gen_set_reg32x(ctx, reg);
+        },
+        0xC7 => {
+            if (modrm >> 3 & 7) != 0 {
+                ctx.builder.free_local_i64(ea);
+                gen_trampoline_long_mode(ctx, instr_flags);
+                return;
+            }
+            let imm = ctx.cpu.read_imm32() as i32;
+            ctx.builder.const_i32(imm);
+            let val = ctx.builder.set_new_local();
+            codegen::gen_safe_write32_ea64(ctx, &ea, &val);
+            ctx.builder.free_local(val);
         },
         0x81 | 0x83 => {
             let group = (modrm >> 3 & 7) as u32;
@@ -422,10 +716,12 @@ fn gen_alu32_mem_rmw(
 ) {
     codegen::gen_safe_read_ea64(ctx, BitSize::DWORD, &ea);
     let dest = ctx.builder.set_new_local();
-    let src = ctx.reg(reg);
+    codegen::gen_get_reg32x(ctx, reg);
+    let src = ctx.builder.set_new_local();
     f(ctx, &dest, &LocalOrImmediate::WasmLocal(&src));
     codegen::gen_safe_write32_ea64(ctx, ea, &dest);
     ctx.builder.free_local(dest);
+    ctx.builder.free_local(src);
 }
 
 fn gen_alu32_mem_to_reg(
@@ -436,9 +732,13 @@ fn gen_alu32_mem_to_reg(
 ) {
     codegen::gen_safe_read_ea64(ctx, BitSize::DWORD, &ea);
     let src = ctx.builder.set_new_local();
-    let dest = ctx.reg(reg);
+    codegen::gen_get_reg32x(ctx, reg);
+    let dest = ctx.builder.set_new_local();
     f(ctx, &dest, &LocalOrImmediate::WasmLocal(&src));
+    ctx.builder.get_local(&dest);
+    codegen::gen_set_reg32x(ctx, reg);
     ctx.builder.free_local(src);
+    ctx.builder.free_local(dest);
 }
 
 fn gen_alu32_mem_cmp_test(
@@ -449,9 +749,11 @@ fn gen_alu32_mem_cmp_test(
 ) {
     codegen::gen_safe_read_ea64(ctx, BitSize::DWORD, &ea);
     let dest = ctx.builder.set_new_local();
-    let src = ctx.reg(reg);
+    codegen::gen_get_reg32x(ctx, reg);
+    let src = ctx.builder.set_new_local();
     f(ctx, &dest, &LocalOrImmediate::WasmLocal(&src));
     ctx.builder.free_local(dest);
+    ctx.builder.free_local(src);
 }
 
 fn gen_alu32_mem_imm(

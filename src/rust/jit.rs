@@ -62,10 +62,10 @@ pub fn jit_clear_func(wasm_table_index: WasmTableIndex) {
 static mut JIT_DISABLED: bool = false;
 
 /// 64-bit CS JIT is opt-in (`sync_jit` / jit_config 5). Default off: XP x64
-/// usermode is low-RIP 64-bit. Register and whitelist memory REX.W ALU/MOV
-/// compile as wasm i64, including R8–R15; `MAX_64BIT_STEPS` still cuts the
-/// interpreter slice. Interpreting remains faster with JIT off, and avoids
-/// STOP 0x7E from compiled high-RIP kernel code.
+/// usermode is low-RIP 64-bit. Whitelist ALU/MOV/LEA compiles with 64-bit
+/// addressing, REX.W i64 ops, and 32-bit REX (R8–R15); `MAX_64BIT_STEPS`
+/// still cuts the interpreter slice. Interpreting remains faster with JIT
+/// off, and avoids STOP 0x7E from compiled high-RIP kernel code.
 static mut JIT_LONG_MODE: bool = false;
 
 pub fn jit_long_mode_enabled() -> bool { unsafe { JIT_LONG_MODE } }

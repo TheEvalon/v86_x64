@@ -62,10 +62,10 @@ fail32:
 
 BITS 64
 start64:
-    ; Register and whitelist memory REX.W MOV/ALU compile as wasm i64 (low
-    ; RIP), including R8–R15 and LEA. ADC/SBB, C7, FS/GS, and high RIP still
-    ; trampoline. The 32-bit-opsize loop below stays on the 32-bit helpers
-    ; except memory forms, which use a 64-bit EA.
+    ; Register and whitelist memory REX ALU/MOV compile (low RIP), including
+    ; R8–R15, 32-bit REX, LEA, and C7 MOV r/m,imm. ADC/SBB, FS/GS, and high
+    ; RIP still trampoline. The 32-bit-opsize loop below stays on the 32-bit
+    ; helpers except memory forms, which use a 64-bit EA.
     mov rax, 0x1122334455667788
     add rax, 1
     mov rbx, 0x1122334455667789
@@ -319,6 +319,62 @@ start64:
     cmp rax, rcx
     jne fail_lea
 
+    ; 32-bit REX without W: R8–R15 ALU, zero-extend, and 64-bit EA.
+    mov r8, 0x000007FFAABBCCDD
+    xor r8d, r8d
+    test r8, r8
+    jnz fail_rex32
+    mov r9d, 0x12345678
+    mov eax, r9d
+    cmp eax, 0x12345678
+    jne fail_rex32
+    add r9d, 1
+    cmp r9d, 0x12345679
+    jne fail_rex32
+    mov r9, 0x000007FF12345679
+    add r9d, 0
+    mov rax, 0x12345679
+    cmp r9, rax
+    jne fail_rex32
+    lea rbx, [rel test_dword]
+    mov dword [rbx], 0x11111111
+    mov r8, 0x0000000100000000
+    or r8, rbx
+    mov ecx, 0x55667788
+    mov [r8], ecx
+    cmp dword [rbx], 0x11111111
+    jne fail_rex32
+    mov eax, [r8]
+    cmp eax, 0x55667788
+    jne fail_rex32
+    mov dword [rbx], 0xAABBCCDD
+    mov r10, 0x000007FF00000000
+    lea r10d, [r9]
+    mov rax, 0x12345679
+    cmp r10, rax
+    jne fail_rex32
+
+    ; C7 MOV r/m, imm32 (32-bit and REX.W sign-extend).
+    mov dword [rel test_dword], 0x11223344
+    cmp dword [rel test_dword], 0x11223344
+    jne fail_c7
+    push rax
+    mov dword [rsp], 0x55667788
+    cmp dword [rsp], 0x55667788
+    jne fail_c7
+    pop rax
+    mov qword [rel test_qword], -1
+    cmp qword [rel test_qword], -1
+    jne fail_c7
+    mov r11d, 0xDEADBEEF
+    cmp r11d, 0xDEADBEEF
+    jne fail_c7
+    mov r11, 0x000007FF00000000
+    mov r11d, 0xAABBCCDD
+    mov rax, 0xAABBCCDD
+    cmp r11, rax
+    jne fail_c7
+
     xor eax, eax
     out 0xF4, al
 .ok:
@@ -366,6 +422,12 @@ fail_sib:
     jmp fail_out
 fail_lea:
     mov al, 15
+    jmp fail_out
+fail_rex32:
+    mov al, 16
+    jmp fail_out
+fail_c7:
+    mov al, 17
     jmp fail_out
 fail64:
     mov al, 1

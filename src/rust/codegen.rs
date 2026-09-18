@@ -370,6 +370,36 @@ pub fn gen_set_reg64(ctx: &mut JitContext, r: u32) {
     }
 }
 
+/// Push the low 32 bits of RAX–R15. R8–R15 wrap the `reg_r8` qword.
+pub fn gen_get_reg32x(ctx: &mut JitContext, r: u32) {
+    dbg_assert!(r < 16);
+    if r < 8 {
+        gen_get_reg32(ctx, r);
+    }
+    else {
+        ctx.builder
+            .load_fixed_i64(global_pointers::get_reg_r8_offset(r));
+        ctx.builder.wrap_i64_to_i32();
+    }
+}
+
+/// Pop i32 into RAX–R15 and zero-extend to 64 bits (IA-32e 32-bit GPR write).
+pub fn gen_set_reg32x(ctx: &mut JitContext, r: u32) {
+    dbg_assert!(r < 16);
+    if r < 8 {
+        gen_set_reg32(ctx, r);
+    }
+    else {
+        ctx.builder.extend_unsigned_i32_to_i64();
+        let val = ctx.builder.set_new_local_i64();
+        ctx.builder
+            .const_i32(global_pointers::get_reg_r8_offset(r) as i32);
+        ctx.builder.get_local_i64(&val);
+        ctx.builder.store_aligned_i64(0);
+        ctx.builder.free_local_i64(val);
+    }
+}
+
 pub fn gen_set_pending_linear64(builder: &mut WasmBuilder, ea: &WasmLocalI64) {
     builder.const_i32(global_pointers::pending_linear64 as i32);
     builder.get_local_i64(ea);

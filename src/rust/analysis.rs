@@ -224,10 +224,12 @@ fn high_rip_may_jit_32bit_alu(
     )
 }
 
-/// Low-RIP REX.W MOV/ALU/LEA the i64 JIT can emit, including R8–R15 (REX.R/B/X)
-/// and memory ModRM. ADC/SBB (/2 /3) and any legacy prefix stay interpreted.
-pub fn rexw_alu_may_jit(rex: u8, opcode: u8, next: u8, prefixes: u8) -> bool {
-    if rex & long_mode::REX_W == 0 || prefixes != 0 {
+/// Low-RIP REX MOV/ALU/LEA the JIT can emit, including R8–R15 (REX.R/B/X)
+/// and memory ModRM. REX.W uses wasm i64; REX without W is 32-bit opsize
+/// with zero-extending writes. ADC/SBB (/2 /3) and any legacy prefix stay
+/// interpreted.
+pub fn rex_alu_may_jit(rex: u8, opcode: u8, next: u8, prefixes: u8) -> bool {
+    if rex == 0 || prefixes != 0 {
         return false;
     }
     long_cs_alu_opcode_ok(opcode, next)
@@ -275,6 +277,7 @@ fn long_cs_alu_opcode_ok(opcode: u8, next: u8) -> bool {
             group != 2 && group != 3
         },
         0x8D => next < 0xC0,
+        0xC7 => next >> 3 & 7 == 0,
         _ => false,
     }
 }
@@ -303,9 +306,9 @@ pub fn opcode_needs_long_trampoline(
         return true;
     }
     if rex != 0 {
-        // Low-RIP REX.W ALU/MOV (register or memory, R8–R15) compiles as
-        // wasm i64. REX without W, ADC/SBB, and any legacy prefix trampoline.
-        return !rexw_alu_may_jit(rex, opcode, next, prefixes);
+        // Low-RIP REX ALU/MOV (32- or 64-bit opsize, R8–R15, memory) compiles.
+        // ADC/SBB and any legacy prefix trampoline.
+        return !rex_alu_may_jit(rex, opcode, next, prefixes);
     }
     if matches!(
         opcode,
@@ -454,14 +457,20 @@ mod tests {
     }
 
     #[test]
-    fn trampoline_rex_without_w() {
-        assert!(needs(0x40, 0x33, 0xC0, false));
-        assert!(needs(long_mode::REX_B, 0x8B, 0xC3, false));
-        assert!(needs(long_mode::REX_R, 0x8B, 0xC3, false));
+    fn trampoline_rex_legacy_prefix_and_high_rip() {
         assert!(opcode_needs_long_trampoline(
             long_mode::REX_W,
             0x01,
             0xC0,
+            0,
+            false,
+            PREFIX_66,
+            false
+        ));
+        assert!(opcode_needs_long_trampoline(
+            long_mode::REX_B,
+            0x8B,
+            0xC3,
             0,
             false,
             PREFIX_66,
@@ -476,6 +485,27 @@ mod tests {
             0,
             true
         ));
+        assert!(opcode_needs_long_trampoline(
+            long_mode::REX_B,
+            0x8B,
+            0xC3,
+            0,
+            false,
+            0,
+            true
+        ));
+    }
+
+    #[test]
+    fn jit_rex_without_w_alu() {
+        assert!(!needs(0x40, 0x33, 0xC0, false));
+        assert!(!needs(long_mode::REX_B, 0x8B, 0xC3, false));
+        assert!(!needs(long_mode::REX_R, 0x8B, 0xC3, false));
+        assert!(!needs(long_mode::REX_B, 0x89, 0x00, false));
+        assert!(!needs(long_mode::REX_R, 0x8D, 0x05, false));
+        assert!(!needs(long_mode::REX_B, 0xB8, 0, false));
+        assert!(needs(long_mode::REX_B, 0x11, 0xC0, false));
+        assert!(needs(long_mode::REX_B, 0x00, 0xC0, false));
     }
 
     #[test]
@@ -533,15 +563,17 @@ mod tests {
             0x00,
             false
         ));
-        // C7 / 8-bit / ADC stay interpreted. LEA memory compiles.
-        assert!(needs(0, 0xC7, 0x44, false));
+        // 8-bit / ADC stay interpreted. LEA memory and C7 /0 compile.
+        assert!(!needs(0, 0xC7, 0x44, false));
+        assert!(!needs(long_mode::REX_W, 0xC7, 0x00, false));
+        assert!(!needs(long_mode::REX_B, 0xC7, 0xC0, false));
+        assert!(needs(0, 0xC7, 0x08, false));
         assert!(!needs(0, 0x8D, 0x05, false));
         assert!(!needs(long_mode::REX_W, 0x8D, 0x05, false));
         assert!(!needs(0, 0x8D, 0xC0, false));
         assert!(needs(long_mode::REX_W, 0x8D, 0xC0, false));
         assert!(needs(0, 0x00, 0x00, false));
         assert!(needs(0, 0x11, 0x00, false));
-        assert!(needs(long_mode::REX_W, 0xC7, 0x00, false));
         assert!(!needs(0, 0x8B, 0x05, true));
         assert!(!needs(0, 0x8B, 0x18, true));
         assert!(!needs(0, 0x8B, 0xC3, false));
