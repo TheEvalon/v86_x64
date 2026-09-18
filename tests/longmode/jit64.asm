@@ -264,7 +264,8 @@ start64:
     test r10, r10
     jnz fail_r8
     mov r11, 0xF0F0F0F0F0F0F0F0
-    or r11, 0x0F0F0F0F0F0F0F0F
+    mov rax, 0x0F0F0F0F0F0F0F0F
+    or r11, rax
     mov rax, 0xFFFFFFFFFFFFFFFF
     cmp r11, rax
     jne fail_r8

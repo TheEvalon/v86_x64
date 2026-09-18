@@ -389,6 +389,11 @@ fn gen_ea64_is_low32(builder: &mut WasmBuilder, ea: &WasmLocalI64) {
     builder.eqz_i64();
 }
 
+fn gen_ea64_is_high32(builder: &mut WasmBuilder, ea: &WasmLocalI64) {
+    gen_ea64_is_low32(builder, ea);
+    builder.eqz_i32();
+}
+
 fn gen_wrap_ea64(builder: &mut WasmBuilder, ea: &WasmLocalI64) -> WasmLocal {
     builder.get_local_i64(ea);
     builder.wrap_i64_to_i32();
@@ -508,67 +513,88 @@ fn gen_sib64_ea(ctx: &mut JitContext, mod_has_disp: bool) {
 
 /// Load DWORD/QWORD from a 64-bit EA. Low 4GiB uses `tlb_data`; higher-half
 /// stashes `pending_linear64` and takes the slow_jit path (tlb_data aliases).
+///
+/// Do not wrap `gen_safe_read` in `if_i32`/`if_i64`: it emits an inner
+/// `block_void` plus a load, and a typed if around that fails wasm
+/// validation (`expected 0 elements on the stack for fallthru, found 2`).
 pub fn gen_safe_read_ea64(ctx: &mut JitContext, bits: BitSize, ea: &WasmLocalI64) {
     dbg_assert!(bits == BitSize::DWORD || bits == BitSize::QWORD);
-    gen_ea64_is_low32(ctx.builder, ea);
+    let addr = gen_wrap_ea64(ctx.builder, ea);
     if bits == BitSize::QWORD {
-        ctx.builder.if_i64();
+        ctx.builder.const_i64(0);
+        let result = ctx.builder.set_new_local_i64();
+        let done = ctx.builder.block_void();
+        gen_ea64_is_high32(ctx.builder, ea);
+        ctx.builder.if_void();
+        {
+            gen_set_pending_linear64(ctx.builder, ea);
+            gen_safe_read_slow_only(ctx, bits, &addr);
+            ctx.builder.set_local_i64(&result);
+            gen_clear_pending_linear64(ctx.builder);
+            ctx.builder.br(done);
+        }
+        ctx.builder.block_end();
+        gen_safe_read(ctx, bits, &addr, None);
+        ctx.builder.set_local_i64(&result);
+        ctx.builder.block_end();
+        ctx.builder.get_local_i64(&result);
+        ctx.builder.free_local_i64(result);
     }
     else {
-        ctx.builder.if_i32();
-    }
-    {
-        let addr = gen_wrap_ea64(ctx.builder, ea);
+        ctx.builder.const_i32(0);
+        let result = ctx.builder.set_new_local();
+        let done = ctx.builder.block_void();
+        gen_ea64_is_high32(ctx.builder, ea);
+        ctx.builder.if_void();
+        {
+            gen_set_pending_linear64(ctx.builder, ea);
+            gen_safe_read_slow_only(ctx, bits, &addr);
+            ctx.builder.set_local(&result);
+            gen_clear_pending_linear64(ctx.builder);
+            ctx.builder.br(done);
+        }
+        ctx.builder.block_end();
         gen_safe_read(ctx, bits, &addr, None);
-        ctx.builder.free_local(addr);
+        ctx.builder.set_local(&result);
+        ctx.builder.block_end();
+        ctx.builder.get_local(&result);
+        ctx.builder.free_local(result);
     }
-    ctx.builder.else_();
-    {
-        gen_set_pending_linear64(ctx.builder, ea);
-        let addr = gen_wrap_ea64(ctx.builder, ea);
-        gen_safe_read_slow_only(ctx, bits, &addr);
-        ctx.builder.free_local(addr);
-        gen_clear_pending_linear64(ctx.builder);
-    }
-    ctx.builder.block_end();
+    ctx.builder.free_local(addr);
 }
 
 pub fn gen_safe_write32_ea64(ctx: &mut JitContext, ea: &WasmLocalI64, value: &WasmLocal) {
-    gen_ea64_is_low32(ctx.builder, ea);
+    let addr = gen_wrap_ea64(ctx.builder, ea);
+    let done = ctx.builder.block_void();
+    gen_ea64_is_high32(ctx.builder, ea);
     ctx.builder.if_void();
     {
-        let addr = gen_wrap_ea64(ctx.builder, ea);
-        gen_safe_write32(ctx, &addr, value);
-        ctx.builder.free_local(addr);
-    }
-    ctx.builder.else_();
-    {
         gen_set_pending_linear64(ctx.builder, ea);
-        let addr = gen_wrap_ea64(ctx.builder, ea);
         gen_safe_write_slow_only(ctx, BitSize::DWORD, &addr, GenSafeWriteValue::I32(value));
-        ctx.builder.free_local(addr);
         gen_clear_pending_linear64(ctx.builder);
+        ctx.builder.br(done);
     }
     ctx.builder.block_end();
+    gen_safe_write32(ctx, &addr, value);
+    ctx.builder.block_end();
+    ctx.builder.free_local(addr);
 }
 
 pub fn gen_safe_write64_ea64(ctx: &mut JitContext, ea: &WasmLocalI64, value: &WasmLocalI64) {
-    gen_ea64_is_low32(ctx.builder, ea);
+    let addr = gen_wrap_ea64(ctx.builder, ea);
+    let done = ctx.builder.block_void();
+    gen_ea64_is_high32(ctx.builder, ea);
     ctx.builder.if_void();
     {
-        let addr = gen_wrap_ea64(ctx.builder, ea);
-        gen_safe_write64(ctx, &addr, value);
-        ctx.builder.free_local(addr);
-    }
-    ctx.builder.else_();
-    {
         gen_set_pending_linear64(ctx.builder, ea);
-        let addr = gen_wrap_ea64(ctx.builder, ea);
         gen_safe_write_slow_only(ctx, BitSize::QWORD, &addr, GenSafeWriteValue::I64(value));
-        ctx.builder.free_local(addr);
         gen_clear_pending_linear64(ctx.builder);
+        ctx.builder.br(done);
     }
     ctx.builder.block_end();
+    gen_safe_write64(ctx, &addr, value);
+    ctx.builder.block_end();
+    ctx.builder.free_local(addr);
 }
 
 #[derive(Copy, Clone)]
