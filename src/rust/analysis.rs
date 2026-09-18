@@ -537,7 +537,8 @@ mod tests {
         assert!(needs(0, 0xC7, 0x44, false));
         assert!(!needs(0, 0x8D, 0x05, false));
         assert!(!needs(long_mode::REX_W, 0x8D, 0x05, false));
-        assert!(needs(0, 0x8D, 0xC0, false));
+        assert!(!needs(0, 0x8D, 0xC0, false));
+        assert!(needs(long_mode::REX_W, 0x8D, 0xC0, false));
         assert!(needs(0, 0x00, 0x00, false));
         assert!(needs(0, 0x11, 0x00, false));
         assert!(needs(long_mode::REX_W, 0xC7, 0x00, false));
