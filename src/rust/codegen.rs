@@ -675,7 +675,8 @@ pub fn gen_set_arith_flags64(
     ctx.builder.store_aligned_i32(0);
 
     let arith = FLAG_CARRY | FLAG_PARITY | FLAG_ADJUST | FLAG_ZERO | FLAG_SIGN | FLAG_OVERFLOW;
-    ctx.builder.const_i32(global_pointers::flags as i32);
+    // `load_fixed` already pushes the flags address; a second const here leaked
+    // an i32 per REX.W ALU and failed wasm validation at the next Jcc.
     gen_get_flags(ctx.builder);
     ctx.builder.const_i32(!arith);
     ctx.builder.and_i32();
