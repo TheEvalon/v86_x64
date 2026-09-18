@@ -2069,7 +2069,11 @@ fn jit_generate_module(
     {
         // exit with exception or due to smc
         ctx.builder.block_end();
-        codegen::gen_clear_pending_linear64(ctx.builder);
+        // 32-bit JIT never stashes pending_linear64; keep that store off the
+        // expect-test snapshots (and off every 16/32-bit block).
+        if state_flags.is_64() {
+            codegen::gen_clear_pending_linear64(ctx.builder);
+        }
         codegen::gen_move_registers_from_locals_to_memory(ctx);
         codegen::gen_fn0_const(ctx.builder, "exit_jit");
         codegen::gen_update_instruction_counter(ctx);
