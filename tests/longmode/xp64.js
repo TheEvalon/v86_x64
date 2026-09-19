@@ -17,6 +17,7 @@
 //
 // Time to Start menu (needs a long timeout; default HOLD is only 5s):
 //   XP64_UNTIL_START=1 node tests/longmode/xp64.js
+// 64-bit JIT (xp.html checkbox): XP64_SYNC_JIT=1. Off by default.
 // Heartbeats every XP64_HEARTBEAT_MS (default 30000). Passes when the green
 // XP Start button is on the VGA dump. Offline check of existing PNGs:
 //   node tests/longmode/xp64.js --check-start shot.png
@@ -319,16 +320,21 @@ const HOLD_MS = +process.env.XP64_HOLD_MS || 5000;
 const HEARTBEAT_MS = +process.env.XP64_HEARTBEAT_MS || 30000;
 // QEMU-installed XP x64 uses the ACPI HAL; Standard PC is XP64_ACPI=0.
 const ACPI = process.env.XP64_ACPI !== "0";
+const SYNC_JIT = process.env.XP64_SYNC_JIT === "1" || process.env.XP64_SYNC_JIT === "true";
+console.error("xp64: acpi=" + ACPI + " sync_jit=" + SYNC_JIT +
+    " until_start=" + UNTIL_START + " timeout_ms=" + TIMEOUT_MS);
 
 const emulator = new V86({
     bios: { url: path.join(ROOT, "bios/seabios.bin") },
     vga_bios: { url: path.join(ROOT, "bios/vgabios.bin") },
     hda: { url: IMAGE, async: true },
     autostart: true,
+    wasm_path: path.join(ROOT, "build/v86-debug.wasm"),
     memory_size: (+process.env.XP64_MEMORY_MB || 512) * 1024 * 1024,
     acpi: ACPI,
     apic: ACPI,
     disable_jit: +process.env.DISABLE_JIT,
+    sync_jit: SYNC_JIT,
     log_level: +process.env.LOG_LEVEL || 0,
 });
 
@@ -348,7 +354,7 @@ let saw_hw_reset = false;
 let saw_bugcheck_data = false;
 let logged_hard_error = false;
 let syscall_log_count = 0;
-const MAX_SYSCALL_LOGS = 48;
+const MAX_SYSCALL_LOGS = SYNC_JIT ? 200 : 48;
 let pf_count = 0;
 let last_screenshot_score = -1;
 let saved_boot_menu = false;
@@ -1604,6 +1610,24 @@ emulator.add_listener("emulator-loaded", function()
             "ms heartbeat " + HEARTBEAT_MS + "ms)");
     }
     const cpu0 = emulator.v86.cpu;
+    let jit_finalized = 0;
+    try
+    {
+        console.error("xp64: jit_config5=" + cpu0.wm.exports["get_jit_config"](5) +
+            " sync_jit=" + (+cpu0.sync_jit));
+        cpu0.test_hook_did_finalize_wasm = function()
+        {
+            jit_finalized++;
+            if(jit_finalized <= 12 || jit_finalized % 100 === 0)
+            {
+                console.error("xp64: jit_finalize n=" + jit_finalized +
+                    " is_64=" + (cpu0.is_64[0] | 0) +
+                    " rip=" + hex64(u64_from_pair(cpu0.rip64)));
+            }
+        };
+    }
+    catch(_e)
+    {}
     const orig_reboot = cpu0.reboot_internal.bind(cpu0);
     cpu0.reboot_internal = function()
     {
@@ -1708,9 +1732,9 @@ emulator.add_listener("emulator-loaded", function()
                     {
                         const desc = dump_object_name(cpu0, read_gpr64(cpu0, 8));
                         const insns = cpu0.instruction_counter[0] >>> 0;
-                        const hot = /winsrv|basesrv/i.test(desc);
-                        if((hot || syscall_log_count < MAX_SYSCALL_LOGS) &&
-                            (hot || interesting_path(desc) ||
+                        const hot = /winsrv|basesrv|dll|windows|system32|knowndll/i.test(desc);
+                        if(syscall_log_count < MAX_SYSCALL_LOGS &&
+                            (SYNC_JIT || hot || interesting_path(desc) ||
                                 (insns > 2400000000 && /\.dll/i.test(desc))))
                         {
                             syscall_log_count++;
@@ -1735,14 +1759,38 @@ emulator.add_listener("emulator-loaded", function()
             if(rip === NTOS_BUGCHECK)
             {
                 logged_bugcheck = true;
+                let bc = "";
                 try
                 {
-                    dump_bugcheck(cpu0);
+                    bc = dump_bugcheck(cpu0);
+                }
+                catch(e)
+                {
+                    bc = "(dump_bugcheck " + e + ")";
+                }
+                console.error("xp64: KeBugCheckEx " + dump_regs(cpu0) +
+                    "\n" + bc + "\n" + dump_stuck(cpu0));
+                try
+                {
+                    save_boot_screenshot("bugcheck");
                 }
                 catch(_e)
                 {}
-                console.error("xp64: KeBugCheckEx " + dump_regs(cpu0) +
-                    "\n" + dump_stuck(cpu0));
+                if(hold_timer)
+                {
+                    clearTimeout(hold_timer);
+                    hold_timer = null;
+                }
+                // Let Inbv paint the BSOD so the screenshot has the stop code.
+                hold_timer = setTimeout(() => {
+                    try
+                    {
+                        save_boot_screenshot("bsod");
+                    }
+                    catch(_e)
+                    {}
+                    finish(1, "xp64: KeBugCheckEx (64-bit JIT BSOD repro)\n" + bc);
+                }, 4000);
             }
         }
         if(cpu0.is_64[0] && !logged_rsp_drop)
@@ -1809,11 +1857,52 @@ emulator.add_listener("emulator-loaded", function()
                     {
                         logged_hard_error = true;
                         console.error("xp64: first hard-error pcr+1a0=" + hex64(code) +
-                            "\n" + dump_loader_paths(cpu0));
+                            "\n" + dump_loader_paths(cpu0) +
+                            "\nrcx_ustr=" + dump_ustr(cpu0, read_gpr64(cpu0, 1)) +
+                            "\nr8_ustr=" + dump_ustr(cpu0, read_gpr64(cpu0, 8)) +
+                            "\nrdx_cstr=" + dump_cstr(cpu0, read_gpr64(cpu0, 2), 64) +
+                            "\nrsi_utf16=" + JSON.stringify(utf16_at(cpu0, read_gpr64(cpu0, 6), 80)) +
+                            "\nrdi_utf16=" + JSON.stringify(utf16_at(cpu0, read_gpr64(cpu0, 7), 80)));
+                        try
+                        {
+                            save_boot_screenshot("harderr");
+                        }
+                        catch(_e)
+                        {}
+                        if(SYNC_JIT)
+                        {
+                            if(hold_timer)
+                            {
+                                clearTimeout(hold_timer);
+                                hold_timer = null;
+                            }
+                            hold_timer = setTimeout(() => {
+                                try
+                                {
+                                    save_boot_screenshot("bsod");
+                                }
+                                catch(_e)
+                                {}
+                                finish(1, "xp64: hard-error " + hex64(code) +
+                                    " (64-bit JIT BSOD repro)");
+                            }, 4000);
+                        }
                     }
                 }
                 catch(_e)
                 {}
+            }
+            if(/A problem has been detected|STOP:|IRQL_NOT_LESS|PAGE_FAULT_IN_NONPAGED|SYSTEM_THREAD_EXCEPTION|KMODE_EXCEPTION|UNEXPECTED_KERNEL/i.test(screen_text()))
+            {
+                try
+                {
+                    save_boot_screenshot("bsod_text");
+                }
+                catch(_e)
+                {}
+                finish(1, "xp64: BSOD text on screen gen=" + lma_generation +
+                    "\n" + last_lma_line + "\n" + screen_text().slice(-2000));
+                return orig_main_loop();
             }
             if(!UNTIL_START && LOGON_RE.test(screen_text()))
             {
@@ -1857,6 +1946,7 @@ emulator.add_listener("emulator-loaded", function()
                 {}
                 save_boot_screenshot("hb" + hb_n);
                 console.error("xp64: T+" + format_elapsed(elapsed) + " hb=" + hb_n +
+                    " jit_n=" + jit_finalized +
                     (hit ? " START" : " no-start"));
                 if(hit)
                 {
