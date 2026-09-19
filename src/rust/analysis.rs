@@ -69,10 +69,12 @@ pub fn consume_legacy_prefixes_and_rex(cpu: &mut CpuContext) -> u8 {
     }
 }
 
-/// True when a high-RIP compiled entry at `phys_eip` is on the ALU/MOV/LEA
-/// whitelist (including REX / R8–R15 / 64-bit EA). Trampoline-only entries
-/// must not be entered: wasm call + one interpreted insn is slower than an
-/// interpreter batch.
+/// True when a high-RIP compiled entry at `phys_eip` is on the register
+/// ALU/MOV whitelist (including REX / R8–R15). Memory ModRM, LEA, and
+/// RIP-relative stay interpreted: those compiled EAs caused XP x64
+/// `STOP: c0000145` / `0xc000003a` after the logo. Trampoline-only
+/// entries must not be entered: wasm call + one interpreted insn is
+/// slower than an interpreter batch.
 ///
 /// Peeks guest bytes without `read_imm8` so a RIP on the last byte of a page
 /// cannot assert in `CpuContext`. INT3 padding is never an entry.
@@ -197,10 +199,13 @@ fn opcode_0f_needs_long_trampoline(op: u8, modrm: u8, prefixes: u8) -> bool {
     modrm < 0xC0
 }
 
-/// ALU/MOV/LEA/C7 the JIT can run when RIP > 4GiB: same whitelist as low RIP,
-/// including REX.W, R8–R15, and 64-bit EA. Control-flow (Jcc, CALL/JMP/RET,
-/// 0F, INT3) and legacy prefixes stay interpreted so a wrong compiled edge
-/// cannot land in ntoskrnl `0xCC` padding (STOP 0x7E).
+/// Register ALU/MOV the JIT can run when RIP > 4GiB. Same opsize/REX
+/// whitelist as low RIP, but memory ModRM (including LEA and RIP-relative)
+/// trampolines: compiled 64-bit EA at kernel RIP > 4GiB made XP x64 fail
+/// csrss/winsrv with `STATUS_OBJECT_PATH_NOT_FOUND` (`0xc000003a`) then
+/// `STATUS_DLL_INIT_FAILED` (`STOP: c0000145`). Control-flow (Jcc,
+/// CALL/JMP/RET, 0F, INT3) and legacy prefixes stay interpreted so a
+/// wrong compiled edge cannot land in ntoskrnl `0xCC` padding (STOP 0x7E).
 fn high_rip_may_jit(rex: u8, opcode: u8, next: u8, addrsize_override: bool, prefixes: u8) -> bool {
     if prefixes != 0 || addrsize_override {
         return false;
@@ -230,11 +235,12 @@ fn high_rip_may_jit(rex: u8, opcode: u8, next: u8, addrsize_override: bool, pref
     if opcode == 0x90 {
         return rex == 0;
     }
+    // [mem]/LEA/RIP-relative at RIP > 4GiB: interpret. Register ALU/MOV JITs.
+    if opcode_has_modrm(opcode) && next < 0xC0 {
+        return false;
+    }
     if rex != 0 {
         return rex_alu_may_jit(rex, opcode, next, prefixes);
-    }
-    if opcode_has_modrm(opcode) && next < 0xC0 {
-        return long_cs_mem32_may_jit(opcode, next, prefixes);
     }
     long_cs_alu_opcode_ok(opcode, next)
 }
@@ -306,9 +312,9 @@ pub fn opcode_needs_long_trampoline(
     prefixes: u8,
     high_rip: bool,
 ) -> bool {
-    // Above 4GiB compile the same ALU/MOV/LEA whitelist as low RIP. Jcc, 0F,
-    // CALL/RET, and prefixes still trampoline: those compiled edges used to
-    // land XP in ntoskrnl INT3 padding (STOP 0x7E / STATUS_BREAKPOINT).
+    // Above 4GiB compile register ALU/MOV (REX included). Memory EA, Jcc,
+    // 0F, CALL/RET, and prefixes trampoline: compiled memory caused XP
+    // STOP c0000145; compiled branches landed in ntoskrnl INT3 padding.
     if high_rip {
         return !high_rip_may_jit(rex, opcode, next, addrsize_override, prefixes);
     }
@@ -598,7 +604,7 @@ mod tests {
         assert!(!needs(0, 0x8B, 0x05, true));
         assert!(!needs(0, 0x8B, 0x18, true));
         assert!(!needs(0, 0x8B, 0xC3, false));
-        // High RIP: 67h/66h still trampoline. Unprefixed MOV/ALU memory JITs.
+        // High RIP: 67h/66h and memory ModRM trampoline. Register MOV JITs.
         assert!(opcode_needs_long_trampoline(
             0, 0x8B, 0x05, 0, true, PREFIX_67, true
         ));
@@ -608,7 +614,7 @@ mod tests {
         assert!(opcode_needs_long_trampoline(
             0, 0x89, 0xC0, 0, false, PREFIX_66, true
         ));
-        assert!(!opcode_needs_long_trampoline(
+        assert!(opcode_needs_long_trampoline(
             0, 0x8B, 0x05, 0, false, 0, true
         ));
         assert!(needs(0, 0xE8, 0, false));
@@ -644,17 +650,18 @@ mod tests {
     }
 
     #[test]
-    fn high_rip_jits_rex_and_memory_not_jcc() {
+    fn high_rip_jits_register_not_memory_or_jcc() {
         assert!(!needs_high(0x01, 0xC3));
         assert!(!needs_high(0x8B, 0xC3));
         assert!(!needs_high(0x83, 0xC0));
         assert!(!needs_high(0x3D, 0));
         assert!(!needs_high(0xB8, 0));
         assert!(!needs_high(0x90, 0));
-        assert!(!needs_high(0x8B, 0x05));
-        assert!(!needs_high(0x8D, 0x05));
-        assert!(!needs_high(0xC7, 0x00));
-        assert!(!opcode_needs_long_trampoline(
+        // Memory / LEA / RIP-relative / C7 m32,imm: interpret at RIP > 4GiB.
+        assert!(needs_high(0x8B, 0x05));
+        assert!(needs_high(0x8D, 0x05));
+        assert!(needs_high(0xC7, 0x00));
+        assert!(opcode_needs_long_trampoline(
             long_mode::REX_W,
             0x8B,
             0x05,
@@ -663,7 +670,7 @@ mod tests {
             0,
             true
         ));
-        assert!(!opcode_needs_long_trampoline(
+        assert!(opcode_needs_long_trampoline(
             long_mode::REX_W | long_mode::REX_R,
             0x8D,
             0x05,
