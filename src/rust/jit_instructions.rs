@@ -107,6 +107,9 @@ pub fn jit_instruction(ctx: &mut JitContext, instr_flags: &mut u32) {
 }
 
 fn jit_instruction_64(ctx: &mut JitContext, instr_flags: &mut u32) {
+    if gen_high_rip_near_ctrl(ctx, instr_flags) {
+        return;
+    }
     if analysis::long_cs_needs_trampoline(&ctx.cpu) {
         gen_trampoline_long_mode(ctx, instr_flags);
         return;
@@ -137,6 +140,201 @@ fn jit_instruction_64(ctx: &mut JitContext, instr_flags: &mut u32) {
         ctx,
         instr_flags,
     );
+}
+
+/// Near call/jmp/ret above 4GiB. Pushes the full return RIP and `set_rip`s
+/// the target. The 32-bit JIT call only writes `instruction_pointer`.
+fn gen_high_rip_near_ctrl(ctx: &mut JitContext, instr_flags: &mut u32) -> bool {
+    if !ctx.cpu.high_rip {
+        return false;
+    }
+    let mut tmp = ctx.cpu.clone();
+    tmp.prefixes = 0;
+    tmp.rex_prefix = 0;
+    let opcode = analysis::consume_legacy_prefixes_and_rex(&mut tmp);
+    if tmp.prefixes != 0 {
+        return false;
+    }
+    let next = if tmp.eip & 0xFFF == 0xFFF { 0 } else { crate::cpu::memory::read8(tmp.eip) as u8 };
+    if !analysis::high_rip_ctrl_may_jit(tmp.rex_prefix, opcode, next) {
+        return false;
+    }
+    let opcode = analysis::consume_legacy_prefixes_and_rex(&mut ctx.cpu);
+    match opcode {
+        0xE8 => {
+            let rel = ctx.cpu.read_imm32() as i32 as i64;
+            gen_high_rip_direct(ctx, instr_flags, rel, true);
+        },
+        0xE9 => {
+            let rel = ctx.cpu.read_imm32() as i32 as i64;
+            gen_high_rip_direct(ctx, instr_flags, rel, false);
+        },
+        0xEB => {
+            let rel = ctx.cpu.read_imm8s() as i64;
+            gen_high_rip_direct(ctx, instr_flags, rel, false);
+        },
+        0xC3 => {
+            let rip = gen_pop64(ctx);
+            gen_set_rip_local(ctx, &rip);
+            ctx.builder.free_local_i64(rip);
+            *instr_flags |= crate::jit::JIT_INSTR_BLOCK_BOUNDARY_FLAG;
+        },
+        0xC2 => {
+            let imm = ctx.cpu.read_imm16();
+            let rip = gen_pop64(ctx);
+            gen_set_rip_local(ctx, &rip);
+            ctx.builder.free_local_i64(rip);
+            gen_add_rsp64(ctx, imm);
+            *instr_flags |= crate::jit::JIT_INSTR_BLOCK_BOUNDARY_FLAG;
+        },
+        0xFF => gen_high_rip_ff(ctx, instr_flags),
+        _ => {
+            ctx.cpu.eip = ctx.start_of_current_instruction;
+            ctx.cpu.prefixes = 0;
+            ctx.cpu.rex_prefix = 0;
+            gen_trampoline_long_mode(ctx, instr_flags);
+        },
+    }
+    true
+}
+
+fn gen_high_rip_direct(ctx: &mut JitContext, instr_flags: &mut u32, rel: i64, push_return: bool) {
+    let ret = high_rip_cursor_linear(ctx);
+    let target = ret.wrapping_add(rel as u64);
+    if !crate::cpu::cpu::is_canonical_va(ret) || !crate::cpu::cpu::is_canonical_va(target) {
+        ctx.cpu.eip = ctx.start_of_current_instruction;
+        ctx.cpu.prefixes = 0;
+        ctx.cpu.rex_prefix = 0;
+        gen_trampoline_long_mode(ctx, instr_flags);
+        return;
+    }
+    if push_return {
+        gen_push64_imm(ctx, ret);
+    }
+    gen_set_rip_imm(ctx, target);
+    *instr_flags |= crate::jit::JIT_INSTR_BLOCK_BOUNDARY_FLAG;
+}
+
+fn gen_high_rip_ff(ctx: &mut JitContext, instr_flags: &mut u32) {
+    let modrm = ctx.cpu.read_imm8();
+    let extra = modrm >> 3 & 7;
+    let target = if modrm >= 0xC0 {
+        let rm = (modrm & 7) as u32 | rex_b(ctx);
+        codegen::gen_get_reg64(ctx, rm);
+        ctx.builder.set_new_local_i64()
+    }
+    else {
+        let ea = codegen::gen_modrm64_ea(ctx, modrm, 0xFF);
+        codegen::gen_safe_read_ea64(ctx, BitSize::QWORD, &ea);
+        ctx.builder.free_local_i64(ea);
+        ctx.builder.set_new_local_i64()
+    };
+    // #GP before the push: a non-canonical target must not move RSP.
+    if extra == 2 {
+        gen_gp_if_noncanonical(ctx, &target);
+        let ret = high_rip_cursor_linear(ctx);
+        if !crate::cpu::cpu::is_canonical_va(ret) {
+            codegen::gen_trigger_gp(ctx, 0);
+        }
+        else {
+            gen_push64_imm(ctx, ret);
+            gen_set_rip_local(ctx, &target);
+        }
+    }
+    else {
+        gen_set_rip_local(ctx, &target);
+    }
+    ctx.builder.free_local_i64(target);
+    *instr_flags |= crate::jit::JIT_INSTR_BLOCK_BOUNDARY_FLAG;
+}
+
+fn high_rip_cursor_linear(ctx: &JitContext) -> u64 {
+    let start_off = ctx.start_of_current_instruction & 0xFFF;
+    let consumed = ctx.cpu.eip.wrapping_sub(ctx.start_of_current_instruction);
+    let next = (ctx.virt_page | start_off).wrapping_add(consumed) as i32;
+    crate::cpu::cpu::virt32_to_linear(next, ctx.sample_rip)
+}
+
+fn gen_canonical_i64(ctx: &mut JitContext, rip: &WasmLocalI64) {
+    ctx.builder.get_local_i64(rip);
+    ctx.builder.const_i64(47);
+    ctx.builder.shr_u_i64();
+    let top = ctx.builder.tee_new_local_i64();
+    ctx.builder.eqz_i64();
+    ctx.builder.get_local_i64(&top);
+    ctx.builder.const_i64(0x1FFFF);
+    ctx.builder.eq_i64();
+    ctx.builder.or_i32();
+    ctx.builder.free_local_i64(top);
+}
+
+fn gen_gp_if_noncanonical(ctx: &mut JitContext, rip: &WasmLocalI64) {
+    gen_canonical_i64(ctx, rip);
+    ctx.builder.eqz_i32();
+    ctx.builder.if_void();
+    codegen::gen_trigger_gp(ctx, 0);
+    ctx.builder.block_end();
+}
+
+fn gen_set_rip_imm(ctx: &mut JitContext, rip: u64) {
+    ctx.builder.const_i32(global_pointers::rip as i32);
+    ctx.builder.const_i64(rip as i64);
+    ctx.builder.store_aligned_i64(0);
+    ctx.builder
+        .const_i32(global_pointers::instruction_pointer as i32);
+    ctx.builder.const_i32(rip as i32);
+    ctx.builder.store_aligned_i32(0);
+}
+
+fn gen_set_rip_local(ctx: &mut JitContext, rip: &WasmLocalI64) {
+    gen_gp_if_noncanonical(ctx, rip);
+    ctx.builder.const_i32(global_pointers::rip as i32);
+    ctx.builder.get_local_i64(rip);
+    ctx.builder.store_aligned_i64(0);
+    ctx.builder
+        .const_i32(global_pointers::instruction_pointer as i32);
+    ctx.builder.get_local_i64(rip);
+    ctx.builder.wrap_i64_to_i32();
+    ctx.builder.store_aligned_i32(0);
+}
+
+fn gen_push64_imm(ctx: &mut JitContext, imm: u64) {
+    codegen::gen_get_reg64(ctx, ESP);
+    ctx.builder.const_i64(8);
+    ctx.builder.sub_i64();
+    let new_rsp = ctx.builder.set_new_local_i64();
+    gen_gp_if_noncanonical(ctx, &new_rsp);
+    ctx.builder.const_i64(imm as i64);
+    let val = ctx.builder.set_new_local_i64();
+    codegen::gen_safe_write64_ea64(ctx, &new_rsp, &val);
+    ctx.builder.free_local_i64(val);
+    ctx.builder.get_local_i64(&new_rsp);
+    codegen::gen_set_reg64(ctx, ESP);
+    ctx.builder.free_local_i64(new_rsp);
+}
+
+fn gen_pop64(ctx: &mut JitContext) -> WasmLocalI64 {
+    codegen::gen_get_reg64(ctx, ESP);
+    let rsp = ctx.builder.set_new_local_i64();
+    gen_gp_if_noncanonical(ctx, &rsp);
+    codegen::gen_safe_read_ea64(ctx, BitSize::QWORD, &rsp);
+    let val = ctx.builder.set_new_local_i64();
+    ctx.builder.get_local_i64(&rsp);
+    ctx.builder.const_i64(8);
+    ctx.builder.add_i64();
+    codegen::gen_set_reg64(ctx, ESP);
+    ctx.builder.free_local_i64(rsp);
+    val
+}
+
+fn gen_add_rsp64(ctx: &mut JitContext, imm: u16) {
+    if imm == 0 {
+        return;
+    }
+    codegen::gen_get_reg64(ctx, ESP);
+    ctx.builder.const_i64(imm as i64);
+    ctx.builder.add_i64();
+    codegen::gen_set_reg64(ctx, ESP);
 }
 
 #[derive(Copy, Clone)]

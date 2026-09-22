@@ -1,8 +1,8 @@
 ; Multiboot payload: 32-bit-opsize loop at a canonical higher-half RIP
 ; (Linux -2GB window). The JIT must compile it (RIP > 4GiB) without
-; widening instruction_pointer. REX.W / R8 / RIP-relative ALU also compile;
-; INT3 padding after a jmp must not run. Exit code is written to port 0xF4
-; (0 = pass).
+; widening instruction_pointer. REX.W / R8 / memory / near call/ret also
+; compile; INT3 padding after a jmp must not run. Exit code is written to
+; port 0xF4 (0 = pass).
 
 BITS 32
 ORG 0x100000
@@ -122,6 +122,58 @@ higher:
     cmp r8, ITERATIONS
     jne fail_r8
 
+    ; scratch64 is at 0x200000 (its own 2MB page). Higher-half RIP-relative
+    ; addresses HIGHER_HALF+0x200000, mapped at phys 0x400000. The low alias
+    ; is a different frame that still holds the poison. A truncated EA misses.
+    mov rbx, HIGHER_HALF + scratch64
+    mov r10, 0x1122334455667788
+    mov r11, 0x99AABBCCDDEEFF00
+    ; DS prefix: ignored in 64-bit mode, but it keeps this store interpreted
+    ; so a wrong compiled EA cannot write the low alias and then read it back.
+    db 0x3E
+    mov [rbx], r10
+    db 0x3E
+    mov [rbx + 16], r11
+
+    mov ecx, ITERATIONS
+loopmem:
+    mov rax, [rel scratch64]
+    cmp rax, r10
+    jne fail_ea_rip
+    mov rax, [rbx + 16]
+    cmp rax, r11
+    jne fail_ea_disp
+    sub ecx, 1
+    jnz loopmem
+
+    mov ecx, ITERATIONS
+loopcall:
+    call callee
+after_call:
+    cmp rax, HIGHER_HALF + after_call
+    jne fail_slot
+    jmp skipcc
+    times 8 db 0xCC
+skipcc:
+    mov r12, rsp
+    push rax
+    call callee_c2
+after_c2:
+    cmp rax, HIGHER_HALF + after_c2
+    jne fail_slot
+    cmp rsp, r12
+    jne fail_c2
+    mov rax, HIGHER_HALF + ind_callee
+    call rax
+after_ind:
+    cmp rdx, HIGHER_HALF + after_ind
+    jne fail_ind
+    jmp skipcc2
+    times 8 db 0xCC
+skipcc2:
+    sub ecx, 1
+    jnz loopcall
+
     jmp after_pad
     times 16 db 0xCC
 after_pad:
@@ -186,6 +238,53 @@ fail_riprel:
     hlt
     jmp .hang_riprel
 
+fail_ea_rip:
+    mov al, 8
+    out 0xF4, al
+.hang_ea_rip:
+    hlt
+    jmp .hang_ea_rip
+
+fail_ea_disp:
+    mov al, 9
+    out 0xF4, al
+.hang_ea_disp:
+    hlt
+    jmp .hang_ea_disp
+
+fail_slot:
+    mov al, 10
+    out 0xF4, al
+.hang_slot:
+    hlt
+    jmp .hang_slot
+
+fail_c2:
+    mov al, 11
+    out 0xF4, al
+.hang_c2:
+    hlt
+    jmp .hang_c2
+
+fail_ind:
+    mov al, 12
+    out 0xF4, al
+.hang_ind:
+    hlt
+    jmp .hang_ind
+
+callee:
+    mov rax, [rsp]
+    ret
+
+callee_c2:
+    mov rax, [rsp]
+    ret 8
+
+ind_callee:
+    mov rdx, [rsp]
+    ret
+
 align 8
 scratch:
     dd 0x11223344
@@ -215,14 +314,28 @@ pdpt:
 align 4096
 pdpt_high:
     times 510 dq 0
-    dq pd + 0x07
+    dq pd_high + 0x07
     dq 0
 
 align 4096
 pd:
     dq 0x00000000000001E7
-    times 511 dq 0
+    dq 0x200000 | 0x1E7
+    times 510 dq 0
+
+align 4096
+pd_high:
+    dq 0x00000000000001E7
+    dq 0x400000 | 0x1E7
+    times 510 dq 0
 
 align 16
     times 4096 db 0
 stack_top:
+
+; File address 0x200000, not the first 2MB page (that page is mapped twice).
+section .scratch start=0x200000
+scratch64:
+    dq 0xBAD0BAD0BAD0BAD0
+    dq 0xBAD0BAD0BAD0BAD0
+    dq 0xBAD0BAD0BAD0BAD0

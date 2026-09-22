@@ -63,9 +63,10 @@ static mut JIT_DISABLED: bool = false;
 
 /// 64-bit CS JIT is opt-in (`sync_jit` / jit_config 5). Default off: XP x64
 /// usermode is low-RIP 64-bit. Whitelist ALU/MOV/LEA compiles with 64-bit
-/// addressing, REX.W i64 ops, and 32-bit REX (R8–R15), including at RIP > 4GiB.
-/// Jcc/0F/CALL stay interpreted at high RIP so compiled edges cannot hit
-/// ntoskrnl INT3 padding. `MAX_64BIT_STEPS` still cuts the interpreter slice.
+/// addressing, REX.W i64 ops, and 32-bit REX (R8–R15), including memory at
+/// RIP > 4GiB. Near call/jmp/ret at high RIP are full-RIP block edges.
+/// Jcc/0F stay interpreted so a compiled conditional cannot hit ntoskrnl
+/// INT3 padding. `MAX_64BIT_STEPS` still cuts the interpreter slice.
 static mut JIT_LONG_MODE: bool = false;
 
 pub fn jit_long_mode_enabled() -> bool { unsafe { JIT_LONG_MODE } }
@@ -773,6 +774,30 @@ fn jit_find_basic_blocks(
                         // entry point
                         marked_as_entry.insert(current_virt_addr);
                         to_visit_stack.push(current_virt_addr);
+                    }
+
+                    // High-RIP near call/jmp set a full RIP and leave via
+                    // AbsoluteEip. Record the constant target so that lookup
+                    // can stay in this module.
+                    if sample_rip > 0xFFFF_FFFF {
+                        if let Some(disp) = analysis::high_rip_direct_disp(addr_before_instruction)
+                        {
+                            let target = current_virt_addr.wrapping_add(disp);
+                            if follow_jump(
+                                target,
+                                sample_rip,
+                                ctx,
+                                &mut pages,
+                                &mut page_blacklist,
+                                max_pages,
+                                &mut marked_as_entry,
+                                &mut to_visit_stack,
+                            )
+                            .is_some()
+                            {
+                                marked_as_entry.insert(target);
+                            }
+                        }
                     }
 
                     if analysis.absolute_jump {

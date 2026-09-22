@@ -4076,6 +4076,14 @@ pub fn virt32_to_linear(virt: i32, sample_rip: u64) -> u64 {
     }
 }
 
+/// RIP-relative virtual address. `next_ip` is the low 32 bits of the next
+/// instruction (the architectural RIP base), recovered against `sample_rip`.
+/// The offset is added: ORing a physical page into the VA clears a high half
+/// that then aliases through the low 4GiB TLB (`STOP: c0000145`).
+pub fn rip_relative_ea(sample_rip: u64, next_ip: i32, disp: i64) -> u64 {
+    virt32_to_linear(next_ip, sample_rip).wrapping_add(disp as u64)
+}
+
 pub unsafe fn sync_rip_from_instruction_pointer() {
     if !*is_64 {
         return;
@@ -4531,8 +4539,8 @@ pub unsafe fn cycle_internal() {
             *previous_rip = *rip;
         }
         // 32-bit-opsize JIT in 64-bit CS trampolines non-whitelist ops. High-RIP
-        // Jcc/0F/CALL stay interpreted (compiled edges hit ntoskrnl INT3).
-        // `sync_jit` tests opt in.
+        // Jcc/0F stay interpreted (compiled Jcc hit ntoskrnl INT3). Near
+        // call/jmp/ret compile as full-RIP block edges. `sync_jit` tests opt in.
         if !jit::jit_long_mode_enabled() {
             let phys_addr = return_on_pagefault!(get_phys_eip());
             let initial_instruction_counter = *instruction_counter;
@@ -6536,6 +6544,29 @@ mod high_rip_jit_tests {
         let virt = (0x8000_0000u32 as i32).wrapping_add(0x7FFF_FFFF);
         // 0xFFFFFFFF80000000 + 0x7FFFFFFF == 0xFFFFFFFFFFFFFFFF
         assert_eq!(virt32_to_linear(virt, sample), 0xFFFF_FFFF_FFFF_FFFF);
+    }
+
+    #[test]
+    fn rip_relative_ea_adds_next_ip_and_disp() {
+        let sample = 0xFFFF_FFFF_8000_2000;
+        let next = 0x8000_2007u32 as i32;
+        assert_eq!(rip_relative_ea(sample, next, -7), sample);
+        assert!(rip_relative_ea(sample, next, -8) > 0xFFFF_FFFF);
+        assert_eq!(rip_relative_ea(0x2000, 0x2007, -7), 0x2000);
+    }
+
+    #[test]
+    fn rip_relative_ea_page_cross_keeps_high_half() {
+        // Next IP is 0x14 bytes past a sample that sits near the end of a page.
+        // ORing the physical in-page offset 0x004 into the start page is a
+        // different address and would take the low TLB if the high half were lost.
+        let sample = 0xFFFF_F800_0000_0FF0u64;
+        let next = 0x1004i32;
+        let ea = rip_relative_ea(sample, next, -4);
+        assert_eq!(ea, 0xFFFF_F800_0000_1000);
+        let ored = (sample & !0xFFF) | 0x004;
+        assert_ne!(ored, ea);
+        assert!(ea > 0xFFFF_FFFF);
     }
 
     #[test]

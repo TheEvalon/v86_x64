@@ -18,6 +18,8 @@
 // Time to Start menu (needs a long timeout; default HOLD is only 5s):
 //   XP64_UNTIL_START=1 node tests/longmode/xp64.js
 // 64-bit JIT (xp.html checkbox): XP64_SYNC_JIT=1. Off by default.
+// XP64_SYNC_COMPILE=1 compiles wasm on the main thread (tests). The
+// checkbox does not.
 // Heartbeats every XP64_HEARTBEAT_MS (default 30000). Passes when the green
 // XP Start button is on the VGA dump. Offline check of existing PNGs:
 //   node tests/longmode/xp64.js --check-start shot.png
@@ -321,7 +323,10 @@ const HEARTBEAT_MS = +process.env.XP64_HEARTBEAT_MS || 30000;
 // QEMU-installed XP x64 uses the ACPI HAL; Standard PC is XP64_ACPI=0.
 const ACPI = process.env.XP64_ACPI !== "0";
 const SYNC_JIT = process.env.XP64_SYNC_JIT === "1" || process.env.XP64_SYNC_JIT === "true";
+const SYNC_COMPILE = process.env.XP64_SYNC_COMPILE === "1" ||
+    process.env.XP64_SYNC_COMPILE === "true";
 console.error("xp64: acpi=" + ACPI + " sync_jit=" + SYNC_JIT +
+    " sync_compile=" + SYNC_COMPILE +
     " until_start=" + UNTIL_START + " timeout_ms=" + TIMEOUT_MS);
 
 const emulator = new V86({
@@ -335,6 +340,7 @@ const emulator = new V86({
     apic: ACPI,
     disable_jit: +process.env.DISABLE_JIT,
     sync_jit: SYNC_JIT,
+    sync_compilation: SYNC_COMPILE,
     log_level: +process.env.LOG_LEVEL || 0,
 });
 
