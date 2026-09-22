@@ -231,6 +231,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.apic = options.apic;
     settings.disable_jit = options.disable_jit;
     settings.sync_jit = options.sync_jit;
+    settings.sync_compilation = options.sync_compilation;
     settings.jit_threshold = options.jit_threshold;
     settings.load_devices = true;
     settings.memory_size = options.memory_size || 64 * 1024 * 1024;

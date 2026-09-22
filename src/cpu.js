@@ -69,6 +69,7 @@ export function CPU(bus, wm, stop_idling)
     this.wasm_patch();
     this.create_jit_imports();
     this.sync_jit = false;
+    this.sync_compilation = false;
 
     const memory = this.wm.exports.memory;
 
@@ -1067,7 +1068,11 @@ CPU.prototype.init = function(settings, device_bus)
         this.set_jit_config(0, 1);
     }
 
-    this.sync_jit = !!settings.sync_jit;
+    // `sync_jit` is the 64-bit CS JIT switch (xp.html checkbox). It does not
+    // compile wasm on the main thread. Tests that must observe a block before
+    // the next instruction pass `sync_compilation`.
+    this.sync_jit = !!(settings.jit64 ?? settings.sync_jit);
+    this.sync_compilation = !!settings.sync_compilation;
     // jit_config 5: compile/enter 64-bit CS. Off by default (XP post-LMA).
     this.set_jit_config(5, +this.sync_jit);
     if(settings.jit_threshold)
@@ -1879,7 +1884,7 @@ CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, 
         }
     }
 
-    const SYNC_COMPILATION = this.sync_jit;
+    const SYNC_COMPILATION = this.sync_compilation;
 
     if(SYNC_COMPILATION)
     {
