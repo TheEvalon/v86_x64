@@ -468,8 +468,11 @@ pub fn gen_modrm64_ea(ctx: &mut JitContext, modrm_byte: u8, opcode: u8) -> WasmL
             return ctx.builder.set_new_local_i64();
         }
         let tail = trailing_imm_after_modrm(opcode as u32 | 0x100, false, modrm_byte as i32);
-        let rip = ctx.linear_page | ctx.cpu.eip as u64 & 0xFFF;
-        let ea = rip.wrapping_add(tail as u64).wrapping_add(disp as u64);
+        // `cpu.eip` is the physical cursor and has already moved past the
+        // disp. Rebuild the next instruction's low 32 from the block's virtual
+        // page plus the byte length, then recover the high half from sample_rip.
+        let next_ip = rip_rel_next_ip(ctx, tail);
+        let ea = crate::cpu::cpu::rip_relative_ea(ctx.sample_rip, next_ip, disp);
         ctx.builder.const_i64(ea as i64);
         return ctx.builder.set_new_local_i64();
     }
@@ -491,6 +494,17 @@ pub fn gen_modrm64_ea(ctx: &mut JitContext, modrm_byte: u8, opcode: u8) -> WasmL
         }
     }
     ctx.builder.set_new_local_i64()
+}
+
+/// Low 32 bits of the instruction after ModRM/SIB/disp and `tail` trailing
+/// immediate bytes. Added to the virtual page; not ORed with the physical cursor.
+fn rip_rel_next_ip(ctx: &JitContext, tail: u32) -> i32 {
+    let start_off = ctx.start_of_current_instruction & 0xFFF;
+    let consumed = ctx.cpu.eip.wrapping_sub(ctx.start_of_current_instruction);
+    dbg_assert!(ctx.virt_page & 0xFFF == 0);
+    (ctx.virt_page | start_off)
+        .wrapping_add(consumed)
+        .wrapping_add(tail) as i32
 }
 
 /// Leaves the SIB effective address (i64) on the stack.
