@@ -69,9 +69,9 @@ pub fn consume_legacy_prefixes_and_rex(cpu: &mut CpuContext) -> u8 {
     }
 }
 
-/// True when a high-RIP compiled entry is on the ALU/MOV/memory whitelist
+/// True when a high-RIP compiled entry is on the register ALU/MOV whitelist
 /// (including REX / R8–R15) or is a near call/jmp/ret block edge.
-/// Jcc, 0F, legacy prefixes, and 67h stay interpreted. Trampoline-only
+/// Memory, Jcc, 0F, legacy prefixes, and 67h stay interpreted. Trampoline-only
 /// entries must not be entered: wasm call + one interpreted insn is
 /// slower than an interpreter batch.
 ///
@@ -198,10 +198,11 @@ fn opcode_0f_needs_long_trampoline(op: u8, modrm: u8, prefixes: u8) -> bool {
     modrm < 0xC0
 }
 
-/// Compiled memory at RIP > 4GiB. The EA is `rip_relative_ea` / `gen_get_reg64`,
-/// not a physical page ORed into the VA. Flip off if XP x64 returns
-/// `STOP: c0000145` (`0xc000003a` was that alias).
-const HIGH_RIP_MEMORY_JIT: bool = true;
+/// Compiled memory at RIP > 4GiB. The EA helper is `rip_relative_ea`, but a
+/// boot of the supplied XP x64 disk with this on still returned
+/// `STOP: c0000145` / `0xc000003a`. Keep it off. Register ALU and near
+/// call/jmp/ret stay compiled.
+const HIGH_RIP_MEMORY_JIT: bool = false;
 
 /// Near call/jmp/ret the high-RIP JIT compiles as a full-RIP block edge.
 /// Jcc stays out: a compiled conditional landed in ntoskrnl `0xCC` (STOP 0x7E).
@@ -229,9 +230,8 @@ pub fn high_rip_ctrl_may_jit(rex: u8, opcode: u8, next: u8) -> bool {
     }
 }
 
-/// Register and memory ALU/MOV the JIT can run when RIP > 4GiB, plus near
-/// call/jmp/ret. 67h, segment prefixes, Jcc, far control, and 0F stay
-/// interpreted.
+/// Register ALU/MOV the JIT can run when RIP > 4GiB, plus near call/jmp/ret.
+/// Memory, 67h, segment prefixes, Jcc, far control, and 0F stay interpreted.
 fn high_rip_may_jit(rex: u8, opcode: u8, next: u8, addrsize_override: bool, prefixes: u8) -> bool {
     if prefixes != 0 || addrsize_override {
         return false;
@@ -370,9 +370,9 @@ pub fn opcode_needs_long_trampoline(
     prefixes: u8,
     high_rip: bool,
 ) -> bool {
-    // Above 4GiB compile ALU/MOV/memory and near call/jmp/ret. Jcc, 0F,
-    // far control, and prefixes trampoline: compiled Jcc landed in
-    // ntoskrnl INT3 padding (STOP 0x7E).
+    // Above 4GiB compile register ALU/MOV and near call/jmp/ret. Memory,
+    // Jcc, 0F, far control, and prefixes trampoline: compiled memory returned
+    // STOP c0000145; compiled Jcc landed in ntoskrnl INT3 padding (STOP 0x7E).
     if high_rip {
         return !high_rip_may_jit(rex, opcode, next, addrsize_override, prefixes);
     }
@@ -671,7 +671,7 @@ mod tests {
         assert!(!needs(0, 0x8B, 0x05, true));
         assert!(!needs(0, 0x8B, 0x18, true));
         assert!(!needs(0, 0x8B, 0xC3, false));
-        // High RIP: 67h/66h trampoline. Unprefixed memory MOV compiles.
+        // High RIP: 67h/66h and memory MOV trampoline. Register MOV compiles.
         assert!(opcode_needs_long_trampoline(
             0, 0x8B, 0x05, 0, true, PREFIX_67, true
         ));
@@ -681,7 +681,7 @@ mod tests {
         assert!(opcode_needs_long_trampoline(
             0, 0x89, 0xC0, 0, false, PREFIX_66, true
         ));
-        assert!(!opcode_needs_long_trampoline(
+        assert!(opcode_needs_long_trampoline(
             0, 0x8B, 0x05, 0, false, 0, true
         ));
         assert!(needs(0, 0xE8, 0, false));
@@ -724,11 +724,11 @@ mod tests {
         assert!(!needs_high(0x3D, 0));
         assert!(!needs_high(0xB8, 0));
         assert!(!needs_high(0x90, 0));
-        // Unprefixed memory / LEA / RIP-relative / C7 m32 compile again.
-        assert!(!needs_high(0x8B, 0x05));
-        assert!(!needs_high(0x8D, 0x05));
-        assert!(!needs_high(0xC7, 0x00));
-        assert!(!opcode_needs_long_trampoline(
+        // Memory / LEA / RIP-relative / C7 m32 stay interpreted at RIP > 4GiB.
+        assert!(needs_high(0x8B, 0x05));
+        assert!(needs_high(0x8D, 0x05));
+        assert!(needs_high(0xC7, 0x00));
+        assert!(opcode_needs_long_trampoline(
             long_mode::REX_W,
             0x8B,
             0x05,
@@ -737,7 +737,7 @@ mod tests {
             0,
             true
         ));
-        assert!(!opcode_needs_long_trampoline(
+        assert!(opcode_needs_long_trampoline(
             long_mode::REX_W | long_mode::REX_R,
             0x8D,
             0x05,
@@ -758,7 +758,7 @@ mod tests {
         assert!(!opcode_needs_long_trampoline(
             0, 0xFF, 0xE0, 0, false, 0, true
         ));
-        assert!(!opcode_needs_long_trampoline(
+        assert!(opcode_needs_long_trampoline(
             0, 0xFF, 0x10, 0, false, 0, true
         ));
         assert!(opcode_needs_long_trampoline(

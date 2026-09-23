@@ -1,8 +1,9 @@
 ; Multiboot payload: 32-bit-opsize loop at a canonical higher-half RIP
 ; (Linux -2GB window). The JIT must compile it (RIP > 4GiB) without
-; widening instruction_pointer. REX.W / R8 / memory / near call/ret also
-; compile; INT3 padding after a jmp must not run. Exit code is written to
-; port 0xF4 (0 = pass).
+; widening instruction_pointer. REX.W / R8 / near call/ret also compile.
+; Memory at this RIP stays interpreted (XP x64 STOP c0000145). INT3
+; padding after a jmp must not run. Exit code is written to port 0xF4
+; (0 = pass).
 
 BITS 32
 ORG 0x100000

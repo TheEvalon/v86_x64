@@ -63,10 +63,11 @@ static mut JIT_DISABLED: bool = false;
 
 /// 64-bit CS JIT is opt-in (`sync_jit` / jit_config 5). Default off: XP x64
 /// usermode is low-RIP 64-bit. Whitelist ALU/MOV/LEA compiles with 64-bit
-/// addressing, REX.W i64 ops, and 32-bit REX (R8–R15), including memory at
-/// RIP > 4GiB. Near call/jmp/ret at high RIP are full-RIP block edges.
-/// Jcc/0F stay interpreted so a compiled conditional cannot hit ntoskrnl
-/// INT3 padding. `MAX_64BIT_STEPS` still cuts the interpreter slice.
+/// addressing, REX.W i64 ops, and 32-bit REX (R8–R15). Memory at RIP > 4GiB
+/// stays interpreted (`STOP: c0000145` on the XP x64 disk). Near call/jmp/ret
+/// at high RIP are full-RIP block edges. Jcc/0F stay interpreted so a
+/// compiled conditional cannot hit ntoskrnl INT3 padding.
+/// `MAX_64BIT_STEPS` still cuts the interpreter slice.
 static mut JIT_LONG_MODE: bool = false;
 
 pub fn jit_long_mode_enabled() -> bool { unsafe { JIT_LONG_MODE } }
