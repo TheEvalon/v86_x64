@@ -4539,8 +4539,9 @@ pub unsafe fn cycle_internal() {
             *previous_rip = *rip;
         }
         // 32-bit-opsize JIT in 64-bit CS trampolines non-whitelist ops. High-RIP
-        // Jcc/0F stay interpreted (compiled Jcc hit ntoskrnl INT3). Near
-        // call/jmp/ret compile as full-RIP block edges. `sync_jit` tests opt in.
+        // memory and Jcc/0F stay interpreted (compiled memory was STOP c0000145,
+        // compiled Jcc hit ntoskrnl INT3). Near call/jmp/ret compile as full-RIP
+        // block edges. `sync_jit` tests opt in.
         if !jit::jit_long_mode_enabled() {
             let phys_addr = return_on_pagefault!(get_phys_eip());
             let initial_instruction_counter = *instruction_counter;

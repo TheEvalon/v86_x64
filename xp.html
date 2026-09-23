@@ -67,7 +67,7 @@ a { color: #8cf; }
     <div id="controls">
         <label>RAM <input id="memory_mb" type="number" value="512" min="128" max="2048" step="16" style="width:5em"> MB</label>
         <label><input id="acpi" type="checkbox" checked> ACPI / APIC</label>
-        <label title="Compile 64-bit CS in the background. Off by default. Jcc at kernel RIP still interprets."><input id="sync_jit" type="checkbox"> 64-bit JIT</label>
+        <label title="Compile 64-bit CS in the background. Off by default. Memory and Jcc at kernel RIP still interpret."><input id="sync_jit" type="checkbox"> 64-bit JIT</label>
         <span id="chunk_label" style="color:#9ad">disk chunks: —</span>
         <label>HDD <input id="disk_file" type="file" accept=".img,.raw,.bin,.vhd,.zip,application/octet-stream"></label>
         <button id="clear_disk" type="button">Clear disk</button>
@@ -116,8 +116,8 @@ a { color: #8cf; }
         <code>?sync_jit=1</code> (or the <strong>64-bit JIT</strong> box) compiles
         64-bit CS in the background, the same way the 32-bit JIT does. It does
         not compile wasm on the main thread. INT3 padding is not compiled.
-        Jcc at kernel RIP still interprets. A broader compiler used to hit
-        STOP 0x7E.
+        Memory and Jcc at kernel RIP still interpret. Compiling that memory
+        returned STOP c0000145; compiling Jcc used to hit STOP 0x7E.
         Disk Range reads are coalesced to 256&nbsp;KiB (same as copy.sh
         Windows images). Without that, XP issues 10–100&nbsp;KB ATA reads
         as separate HTTP requests and boot stretches into tens of minutes
